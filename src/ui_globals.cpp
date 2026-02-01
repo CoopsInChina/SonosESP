@@ -22,7 +22,6 @@ lv_color_t COL_SELECTED = lv_color_hex(0x333333);
 // Core Objects
 // ============================================================================
 SonosController sonos;
-JPEGDEC jpeg;
 Preferences wifiPrefs;
 
 // ============================================================================
@@ -111,11 +110,18 @@ String last_art_url = "";
 String pending_art_url = "";
 volatile bool art_ready = false;
 SemaphoreHandle_t art_mutex = nullptr;
+TaskHandle_t albumArtTaskHandle = nullptr;
+volatile bool art_shutdown_requested = false;  // Signal album art to stop gracefully
+volatile bool art_abort_download = false;      // Signal to abort current download (source changed)
 uint32_t dominant_color = 0x1a1a1a;
 volatile bool color_ready = false;
 int art_offset_x = 0;
 int art_offset_y = 0;
 bool is_sonos_radio_art = false;
+bool pending_is_station_logo = false;
+unsigned long last_source_change_time = 0;
+volatile unsigned long last_queue_fetch_time = 0;
+SemaphoreHandle_t network_mutex = NULL;  // Created in main.cpp
 
 // Color sampling
 uint32_t color_r_sum = 0;

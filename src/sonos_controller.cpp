@@ -6,6 +6,7 @@
 #include "sonos_controller.h"
 #include <HTTPClient.h>
 #include "lvgl.h"
+#include "ui_common.h"  // For last_queue_fetch_time
 
 // Debounce for button presses
 static uint32_t lastCommandTime = 0;
@@ -48,237 +49,8 @@ void SonosController::startTasks() {
 }
 
 // ============================================================================
-// Discovery
+// Discovery - Implemented in sonos_discovery.cpp
 // ============================================================================
-int SonosController::discoverDevices() {
-    Serial.printf("[SONOS] Starting discovery...\n");
-    deviceCount = 0;
-
-    udp.stop();
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-    IPAddress multicast(239, 255, 255, 250);
-    // Bind a UDP socket to receive unicast SSDP responses (replies go to the sender's source port)
-    if (!udp.begin(1900)) {
-        Serial.printf("[SONOS] UDP begin failed on port 1900\n");
-        return 0;
-    }
-
-    const char* msg =
-        "M-SEARCH * HTTP/1.1\r\n"
-        "HOST: 239.255.255.250:1900\r\n"
-        "MAN: \"ssdp:discover\"\r\n"
-        "MX: 1\r\n"
-        "ST: urn:schemas-upnp-org:device:ZonePlayer:1\r\n\r\n";
-
-    // Send discovery to both multicast (239.255.255.250) AND broadcast (255.255.255.255)
-    // This ensures discovery works even if routers don't properly handle multicast
-    // Send 5 bursts with 500ms spacing for balance between coverage and speed
-    IPAddress broadcast(255, 255, 255, 255);
-
-    for (int burst = 0; burst < 5; burst++) {
-        // Send to multicast address (standard UPnP)
-        udp.beginPacket(multicast, 1900);
-        udp.write((const uint8_t*)msg, strlen(msg));
-        udp.endPacket();
-
-        // Also send to broadcast address (for networks with multicast issues)
-        udp.beginPacket(broadcast, 1900);
-        udp.write((const uint8_t*)msg, strlen(msg));
-        udp.endPacket();
-
-        Serial.printf("[SONOS] Sent discovery burst %d/5 (multicast + broadcast)\n", burst + 1);
-
-        if (burst < 4) {
-            vTaskDelay(pdMS_TO_TICKS(500));  // 500ms between bursts - balance between coverage and speed
-        }
-    }
-
-    int rawDeviceCount = 0;  // Count of IPs found before dedup
-    unsigned long start = millis();
-    unsigned long lastUIUpdate = 0;
-    while (millis() - start < 15000) {  // 15 seconds total (5 bursts * 0.5s = 2.5s send + 12.5s listen)
-        int size = udp.parsePacket();
-        if (size > 0) {
-            char buf[1025];  // 1024 + 1 for null terminator
-            int len = udp.read(buf, sizeof(buf) - 1);
-            if (len > 0 && len < (int)sizeof(buf)) {  // Safety check
-                buf[len] = 0;
-                String resp = buf;
-                resp.toLowerCase();
-                if (resp.indexOf("sonos") >= 0 || resp.indexOf("zoneplayer") >= 0) {
-                    IPAddress ip = udp.remoteIP();
-
-                    bool exists = false;
-                    for (int i = 0; i < deviceCount; i++) {
-                        if (devices[i].ip == ip) { exists = true; break; }
-                    }
-
-                    if (!exists && deviceCount < MAX_SONOS_DEVICES) {
-                        devices[deviceCount].ip = ip;
-                        devices[deviceCount].roomName = ip.toString();
-                        devices[deviceCount].isPlaying = false;
-                        devices[deviceCount].volume = 50;
-                        devices[deviceCount].isMuted = false;
-                        devices[deviceCount].shuffleMode = false;
-                        devices[deviceCount].repeatMode = "NONE";
-                        devices[deviceCount].connected = false;
-                        devices[deviceCount].errorCount = 0;
-                        devices[deviceCount].currentTrackNumber = 0;
-                        devices[deviceCount].totalTracks = 0;
-                        devices[deviceCount].queueSize = 0;
-                        devices[deviceCount].groupCoordinatorUUID = "";
-                        devices[deviceCount].isGroupCoordinator = true;  // Standalone by default
-                        devices[deviceCount].groupMemberCount = 1;
-
-                        Serial.printf("[SONOS] SSDP Response #%d: %s\n", deviceCount + 1, ip.toString().c_str());
-                        deviceCount++;
-                        rawDeviceCount++;
-                    } else if (exists) {
-                        Serial.printf("[SONOS] Ignoring duplicate SSDP response from: %s\n", ip.toString().c_str());
-                    }
-
-                    if (deviceCount >= MAX_SONOS_DEVICES) {
-                        Serial.printf("[SONOS] Reached MAX_SONOS_DEVICES limit (%d)\n", MAX_SONOS_DEVICES);
-                    }
-                }
-            }
-        }
-
-        // Update UI periodically to keep spinner animating
-        if (millis() - lastUIUpdate > 20) {
-            lv_tick_inc(20);
-            lv_timer_handler();
-            lv_refr_now(NULL);  // Force display refresh
-            lastUIUpdate = millis();
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
-
-    udp.stop();
-
-    Serial.printf("[SONOS] Discovery window closed. Found %d raw IP(s) before deduplication.\n", rawDeviceCount);
-
-    if (deviceCount == 0) {
-        Serial.printf("[SONOS] No Sonos devices responded to discovery. Check network connectivity and ensure devices are powered on.\n");
-        return 0;
-    }
-
-    if (deviceCount == 1 && rawDeviceCount == 1) {
-        Serial.printf("[SONOS] Only 1 device found. If you have more speakers, try scanning again or check:\n");
-        Serial.printf("[SONOS]   - All speakers are powered on and connected to WiFi\n");
-        Serial.printf("[SONOS]   - ESP32 and Sonos devices are on the same network/VLAN\n");
-        Serial.printf("[SONOS]   - Router allows multicast/UPnP traffic\n");
-    }
-
-    // Fetch room names for all discovered devices
-    Serial.printf("[SONOS] Fetching room names for %d device(s)...\n", deviceCount);
-    for (int i = 0; i < deviceCount; i++) {
-        Serial.printf("[SONOS] Fetching room name %d/%d from %s\n", i + 1, deviceCount, devices[i].ip.toString().c_str());
-        getRoomName(&devices[i]);
-        Serial.printf("[SONOS]   -> Room name: '%s'\n", devices[i].roomName.c_str());
-
-        // Update UI while fetching room names
-        lv_tick_inc(10);
-        lv_timer_handler();
-        lv_refr_now(NULL);
-    }
-
-    // Deduplicate by room name to handle stereo pairs
-    // In stereo pairs, both speakers respond to SSDP but have the same room name
-    // Keep the first occurrence (usually the primary/left speaker)
-    Serial.printf("[SONOS] Starting deduplication process...\n");
-    int uniqueCount = 0;
-    for (int i = 0; i < deviceCount; i++) {
-        // Normalize room name: trim whitespace and convert to lowercase for comparison
-        String normalizedCurrent = devices[i].roomName;
-        normalizedCurrent.trim();
-        normalizedCurrent.toLowerCase();
-
-        bool isDuplicate = false;
-        for (int j = 0; j < uniqueCount; j++) {
-            String normalizedExisting = devices[j].roomName;
-            normalizedExisting.trim();
-            normalizedExisting.toLowerCase();
-
-            if (normalizedExisting == normalizedCurrent) {
-                Serial.printf("[SONOS]   [DUPLICATE] '%s' (%s) matches existing '%s' (%s) - filtering out\n",
-                    devices[i].roomName.c_str(), devices[i].ip.toString().c_str(),
-                    devices[j].roomName.c_str(), devices[j].ip.toString().c_str());
-                isDuplicate = true;
-                break;
-            }
-        }
-
-        if (!isDuplicate) {
-            Serial.printf("[SONOS]   [UNIQUE] '%s' (%s) - keeping\n",
-                devices[i].roomName.c_str(), devices[i].ip.toString().c_str());
-            if (i != uniqueCount) {
-                // Move device to compact position
-                devices[uniqueCount] = devices[i];
-            }
-            uniqueCount++;
-        }
-    }
-
-    int filteredCount = deviceCount - uniqueCount;
-    if (filteredCount > 0) {
-        Serial.printf("[SONOS] Filtered %d duplicate(s) from stereo pairs\n", filteredCount);
-    } else {
-        Serial.printf("[SONOS] No duplicates found - all %d devices are unique\n", uniqueCount);
-    }
-    deviceCount = uniqueCount;
-
-    if (deviceCount > 0) {
-        prefs.putString("device_ip", devices[0].ip.toString());
-    }
-
-    Serial.printf("[SONOS] Discovery complete: %d visible zone(s)\n", deviceCount);
-    return deviceCount;
-}
-
-void SonosController::getRoomName(SonosDevice* dev) {
-    HTTPClient http;
-    char url[128];
-    snprintf(url, sizeof(url), "http://%s:1400/xml/device_description.xml", dev->ip.toString().c_str());
-
-    http.begin(url);
-    http.setTimeout(3000);  // Increased from 2s to 3s for slower networks
-
-    int code = http.GET();
-    if (code == 200) {
-        String xml = http.getString();  // Keep String for XML parsing (indexOf/substring)
-        int start = xml.indexOf("<roomName>");
-        int end = xml.indexOf("</roomName>");
-        if (start > 0 && end > start) {
-            dev->roomName = xml.substring(start + 10, end);
-            Serial.printf("[SONOS]   Room name fetched successfully: '%s'\n", dev->roomName.c_str());
-        } else {
-            Serial.printf("[SONOS]   Failed to parse room name from XML for %s\n", dev->ip.toString().c_str());
-        }
-
-        start = xml.indexOf("<UDN>uuid:");
-        end = xml.indexOf("</UDN>", start);
-        if (start > 0 && end > start) {
-            dev->rinconID = xml.substring(start + 10, end);
-            Serial.printf("[SONOS]   RINCON ID: %s\n", dev->rinconID.c_str());
-        } else {
-            Serial.printf("[SONOS]   Failed to parse RINCON ID from XML for %s\n", dev->ip.toString().c_str());
-        }
-    } else {
-        Serial.printf("[SONOS]   HTTP GET failed with code %d for %s (keeping IP as name)\n", code, dev->ip.toString().c_str());
-    }
-    http.end();
-}
-
-String SonosController::getCachedDeviceIP() {
-    return prefs.getString("device_ip", "");
-}
-
-void SonosController::cacheDeviceIP(String ip) {
-    prefs.putString("device_ip", ip);
-}
 
 SonosDevice* SonosController::getDevice(int index) {
     if (index >= 0 && index < deviceCount) return &devices[index];
@@ -286,8 +58,11 @@ SonosDevice* SonosController::getDevice(int index) {
 }
 
 SonosDevice* SonosController::getCurrentDevice() {
-    if (currentDeviceIndex >= 0 && currentDeviceIndex < deviceCount) {
-        return &devices[currentDeviceIndex];
+    // Use local copy to prevent TOCTOU (time-of-check-time-of-use) race
+    // Reading int is atomic on 32-bit systems, so no mutex needed for performance
+    int index = currentDeviceIndex;
+    if (index >= 0 && index < deviceCount) {
+        return &devices[index];
     }
     return nullptr;
 }
@@ -330,6 +105,14 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
     // Build URL without String concatenation
     snprintf(url, sizeof(url), "http://%s:1400%s", dev->ip.toString().c_str(), endpoint);
 
+    // Validate args size to prevent buffer overflow
+    // SOAP wrapper adds ~400 bytes, so args must stay under 1600 bytes
+    size_t args_len = strlen(args);
+    if (args_len > 1600) {
+        Serial.printf("[SONOS] ERROR: SOAP args too large (%d bytes, max 1600)\n", args_len);
+        return "";
+    }
+
     // Build SOAP body without String concatenation
     snprintf(body, sizeof(body),
         "<?xml version=\"1.0\"?>"
@@ -353,6 +136,14 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
     snprintf(soapActionHeader, sizeof(soapActionHeader), "\"%s\"", soapAction);
     http.addHeader("SOAPAction", soapActionHeader);
 
+    // CRITICAL: Acquire network_mutex to serialize WiFi access
+    // Prevents SDIO buffer overflow when album art downloads happen during SOAP requests
+    if (!xSemaphoreTake(network_mutex, pdMS_TO_TICKS(NETWORK_MUTEX_TIMEOUT_MS))) {
+        Serial.println("[SOAP] Failed to acquire network mutex - request failed");
+        http.end();
+        return "";
+    }
+
     int code = http.POST(body);
     String response = "";  // Keep String for return value (used by callers)
 
@@ -363,13 +154,23 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
     } else {
         Serial.printf("[SOAP] HTTP error %d for %s.%s\n", code, service, action);
         dev->errorCount++;
-        // Immediate disconnect on network errors (connection refused, timeout, etc)
-        if (code == -1 || code == -11) {
+        // Only disconnect after multiple consecutive errors
+        // This handles temporary network issues during source changes
+        if (code == -1) {
+            // Connection refused - immediate disconnect
             if (dev->connected) {
-                Serial.printf("[SONOS] Device disconnected (network error %d)\n\n", code);
+                Serial.printf("[SONOS] Device disconnected (connection refused)\n");
             }
             dev->connected = false;
-            dev->errorCount = 10;  // Set high to prevent flapping
+            dev->errorCount = 10;
+        } else if (code == -11) {
+            // Timeout - might be temporary (source change), need 3 consecutive timeouts
+            if (dev->errorCount >= 3) {
+                if (dev->connected) {
+                    Serial.printf("[SONOS] Device disconnected (repeated timeouts)\n");
+                }
+                dev->connected = false;
+            }
         } else if (dev->errorCount > 5) {
             if (dev->connected) {
                 Serial.println("[SONOS] Device disconnected (too many errors)");
@@ -379,6 +180,10 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
     }
 
     http.end();
+
+    // Release network mutex after HTTP operation completes
+    xSemaphoreGive(network_mutex);
+
     return response;
 }
 
@@ -462,7 +267,17 @@ String SonosController::decodeHTML(String text) {
         // UTF-8 smart punctuation (3-byte)
         {"\xE2\x80\x98", "'"}, {"\xE2\x80\x99", "'"}, {"\xE2\x80\x9C", "\""},
         {"\xE2\x80\x9D", "\""}, {"\xE2\x80\x93", "-"}, {"\xE2\x80\x94", "--"},
-        {"\xE2\x80\xA6", "..."}
+        {"\xE2\x80\xA6", "..."},
+
+        // Special spaces and separators (Apple Music uses these in station names)
+        {"\xC2\xA0", " "},       // Non-breaking space (U+00A0)
+        {"\xE2\x80\x82", " "},   // En space (U+2002)
+        {"\xE2\x80\x83", " "},   // Em space (U+2003)
+        {"\xE2\x80\x89", " "},   // Thin space (U+2009)
+        {"\xE2\x80\x8B", ""},    // Zero-width space (U+200B) - remove
+        {"\xE2\x80\x8C", ""},    // Zero-width non-joiner (U+200C) - remove
+        {"\xE2\x80\x8D", ""},    // Zero-width joiner (U+200D) - remove
+        {"\xEF\xBB\xBF", ""}     // BOM (U+FEFF) - remove
     };
 
     // Single pass through replacements
@@ -580,10 +395,7 @@ bool SonosController::saveCurrentTrack(const char* playlistName) {
     String queueDIDL = extractXML(browseQueue, "Result");
 
     // Decode HTML entities
-    queueDIDL.replace("&lt;", "<");
-    queueDIDL.replace("&gt;", ">");
-    queueDIDL.replace("&quot;", "\"");
-    queueDIDL.replace("&amp;", "&");
+    queueDIDL = decodeHTMLEntities(queueDIDL);
 
     // Find the item for current track number
     String trackMetadata = "";
@@ -638,10 +450,7 @@ bool SonosController::saveCurrentTrack(const char* playlistName) {
         "<SortCriteria></SortCriteria>");
 
     String didlContent = extractXML(browseResp, "Result");
-    didlContent.replace("&lt;", "<");
-    didlContent.replace("&gt;", ">");
-    didlContent.replace("&quot;", "\"");
-    didlContent.replace("&amp;", "&");
+    didlContent = decodeHTMLEntities(didlContent);
 
     String playlistID = "";
     pos = 0;
@@ -734,10 +543,7 @@ String SonosController::browseContent(const char* objectID, int startIndex, int 
 
     // Extract and decode DIDL
     String didl = extractXML(resp, "Result");
-    didl.replace("&lt;", "<");
-    didl.replace("&gt;", ">");
-    didl.replace("&quot;", "\"");
-    didl.replace("&amp;", "&");
+    didl = decodeHTMLEntities(didl);
 
     return didl;
 }
@@ -841,11 +647,7 @@ bool SonosController::playContainer(const char* containerURI, const char* metada
 
     Serial.printf("[CONTAINER] Loading container: %s\n", containerURI);
 
-    String metaDecoded = String(metadata);
-    metaDecoded.replace("&amp;", "&");
-    metaDecoded.replace("&lt;", "<");
-    metaDecoded.replace("&gt;", ">");
-    metaDecoded.replace("&quot;", "\"");
+    String metaDecoded = decodeHTMLEntities(String(metadata));
 
     String metaEncoded = metaDecoded;
     metaEncoded.replace("&", "&amp;");
@@ -963,10 +765,7 @@ String SonosController::getCurrentTrackInfo() {
     String metadata = extractXML(resp, "TrackMetaData");
 
     // Decode HTML entities in metadata
-    metadata.replace("&lt;", "<");
-    metadata.replace("&gt;", ">");
-    metadata.replace("&quot;", "\"");
-    metadata.replace("&amp;", "&");
+    metadata = decodeHTMLEntities(metadata);
 
     // Format output for serial monitor
     String result = "===== TRACK URI =====\n" + uri +
@@ -995,6 +794,60 @@ void SonosController::notifyUI(UIUpdateType_e type) {
     xQueueSend(uiUpdateQueue, &upd, 0);
 }
 
+// Helper: Detect if URI is a radio station
+// Based on research: x-sonosapi-stream:, x-rincon-mp3radio:, x-sonosapi-radio:, aac://, hls-radio:
+static bool isRadioURI(const String& uri) {
+    return uri.startsWith("x-sonosapi-stream:") ||
+           uri.startsWith("x-rincon-mp3radio:") ||
+           uri.startsWith("x-sonosapi-radio:") ||
+           uri.startsWith("aac://") ||
+           uri.startsWith("hls-radio:");
+}
+
+// Helper: Parse r:streamContent for current song info
+// Formats: "Artist - Title" OR "TYPE=SNG|TITLE xxx|ARTIST xxx|ALBUM xxx"
+// Based on research from node-sonos Issue #106 and OpenHAB Issue #13208
+static void parseStreamContent(const String& content, String& outArtist, String& outTitle) {
+    if (content.length() == 0) return;
+
+    // Format 1: Pipe-delimited (SiriusXM, Apple Music)
+    // Example: "BR P|TYPE=SNG|TITLE Talk To Me|ARTIST Kopecky"
+    if (content.indexOf("TYPE=") >= 0 && content.indexOf("|") > 0) {
+        // Extract TITLE
+        int titleIdx = content.indexOf("TITLE ");
+        if (titleIdx >= 0) {
+            titleIdx += 6; // Skip "TITLE "
+            int titleEnd = content.indexOf("|", titleIdx);
+            if (titleEnd < 0) titleEnd = content.length();
+            outTitle = content.substring(titleIdx, titleEnd);
+            outTitle.trim();
+        }
+
+        // Extract ARTIST
+        int artistIdx = content.indexOf("ARTIST ");
+        if (artistIdx >= 0) {
+            artistIdx += 7; // Skip "ARTIST "
+            int artistEnd = content.indexOf("|", artistIdx);
+            if (artistEnd < 0) artistEnd = content.length();
+            outArtist = content.substring(artistIdx, artistEnd);
+            outArtist.trim();
+        }
+    }
+    // Format 2: Simple "Artist - Title" (TuneIn)
+    else if (content.indexOf(" - ") > 0) {
+        int sepIdx = content.indexOf(" - ");
+        outArtist = content.substring(0, sepIdx);
+        outTitle = content.substring(sepIdx + 3);
+        outArtist.trim();
+        outTitle.trim();
+    }
+    // Format 3: Plain text - use as title
+    else {
+        outTitle = content;
+        outTitle.trim();
+    }
+}
+
 bool SonosController::updateTrackInfo() {
     String resp = sendSOAP("AVTransport", "GetPositionInfo", "<InstanceID>0</InstanceID>");
     if (resp.length() == 0) return false;
@@ -1008,20 +861,46 @@ bool SonosController::updateTrackInfo() {
         if (trackNum.length() > 0) {
             dev->currentTrackNumber = trackNum.toInt();
         }
-        
+
         dev->relTime = extractXML(resp, "RelTime");
         dev->relTimeSeconds = timeToSeconds(dev->relTime);
-        
+
         dev->trackDuration = extractXML(resp, "TrackDuration");
         dev->durationSeconds = timeToSeconds(dev->trackDuration);
-        
+
+        // Extract TrackURI and detect radio
+        String trackURI = extractXML(resp, "TrackURI");
+        dev->currentURI = trackURI;
+        dev->isRadioStation = isRadioURI(trackURI);
+
         // Get metadata and decode HTML entities
         String meta = extractXML(resp, "TrackMetaData");
         meta = decodeHTML(meta);
 
+        // Extract r:streamContent for radio (contains current song info)
+        String streamContent = extractXML(meta, "r:streamContent");
+        streamContent = decodeHTML(streamContent);
+        dev->streamContent = streamContent;
+
         String newTrack = decodeHTML(extractXML(meta, "dc:title"));
         String newArtist = decodeHTML(extractXML(meta, "dc:creator"));
         String newAlbum = decodeHTML(extractXML(meta, "upnp:album"));
+
+        // For radio: parse streamContent for current song info
+        // streamContent overrides dc:title/dc:creator when available
+        if (dev->isRadioStation && streamContent.length() > 0) {
+            String parsedArtist = "";
+            String parsedTitle = "";
+            parseStreamContent(streamContent, parsedArtist, parsedTitle);
+
+            // Use parsed info if we got something useful
+            if (parsedTitle.length() > 0) {
+                newTrack = parsedTitle;
+            }
+            if (parsedArtist.length() > 0) {
+                newArtist = parsedArtist;
+            }
+        }
 
         // Extract album art URL
         String art = extractXML(meta, "upnp:albumArtURI");
@@ -1056,6 +935,69 @@ bool SonosController::updateTrackInfo() {
             notifyUI(UPDATE_TRACK_INFO);
         }
 
+        return true;
+    }
+    return false;
+}
+
+// Get station name for radio from GetMediaInfo
+// For radio: CurrentURIMetaData contains the actual station name
+// For music: This returns queue/playlist info (less useful)
+bool SonosController::updateMediaInfo() {
+    SonosDevice* dev = getCurrentDevice();
+    if (!dev) return false;
+
+    // Only fetch media info for radio stations
+    if (!dev->isRadioStation) {
+        // Clear radio station info when not playing radio
+        if (xSemaphoreTake(deviceMutex, pdMS_TO_TICKS(50))) {
+            dev->radioStationName = "";
+            dev->radioStationArtURL = "";
+            xSemaphoreGive(deviceMutex);
+        }
+        return true;
+    }
+
+    String resp = sendSOAP("AVTransport", "GetMediaInfo", "<InstanceID>0</InstanceID>");
+    if (resp.length() == 0) return false;
+
+    if (xSemaphoreTake(deviceMutex, pdMS_TO_TICKS(50))) {
+        // Extract CurrentURIMetaData
+        String meta = extractXML(resp, "CurrentURIMetaData");
+        meta = decodeHTML(meta);
+
+        // Extract station name from dc:title
+        String stationName = extractXML(meta, "dc:title");
+        stationName = decodeHTML(stationName);
+
+        // Extract station logo from upnp:albumArtURI
+        String stationArt = extractXML(meta, "upnp:albumArtURI");
+        stationArt = decodeHTML(stationArt);
+
+        // Store station name if valid (not URL junk)
+        if (stationName.length() > 0) {
+            // Filter out URL junk
+            bool isJunk = (stationName.indexOf("?") > 0 ||
+                          stationName.indexOf(".mp3") > 0 ||
+                          stationName.indexOf(".m3u8") > 0 ||
+                          stationName.indexOf("accessKey=") > 0);
+
+            if (!isJunk) {
+                dev->radioStationName = stationName;
+            }
+        }
+
+        // Store station logo URL
+        if (stationArt.length() > 0) {
+            if (stationArt.startsWith("/")) {
+                // Local Sonos path - convert to full URL
+                dev->radioStationArtURL = "http://" + dev->ip.toString() + ":1400" + stationArt;
+            } else {
+                dev->radioStationArtURL = stationArt;
+            }
+        }
+
+        xSemaphoreGive(deviceMutex);
         return true;
     }
     return false;
@@ -1175,7 +1117,7 @@ bool SonosController::updateQueue() {
         }
         
         Serial.printf("[SONOS] Parsed %d queue items\n", dev->queueSize);
-        
+
         xSemaphoreGive(deviceMutex);
         notifyUI(UPDATE_QUEUE);
         return true;
@@ -1313,20 +1255,60 @@ void SonosController::networkTaskFunction(void* param) {
 void SonosController::pollingTaskFunction(void* param) {
     SonosController* ctrl = (SonosController*)param;
     uint32_t tick = 0;
-    
+    uint32_t reconnectTick = 0;
+
     Serial.printf("[SONOS] Polling task started\n");
-    
+
     // Initial queue load
     vTaskDelay(pdMS_TO_TICKS(1000));
     ctrl->updateQueue();
-    
+
+    // Track previous URI to detect station changes
+    static String previousURI = "";
+
     while (1) {
         SonosDevice* dev = ctrl->getCurrentDevice();
+
+        // Auto-reconnect when disconnected
+        if (dev && !dev->connected) {
+            reconnectTick++;
+            // Try to reconnect every 2 seconds (7 * 300ms)
+            if (reconnectTick % 7 == 0) {
+                Serial.println("[SONOS] Attempting to reconnect...");
+                dev->errorCount = 0;  // Reset error count
+                ctrl->updateTrackInfo();  // Try to fetch data
+                if (dev->connected) {
+                    Serial.println("[SONOS] Reconnected successfully!");
+                    ctrl->updateQueue();  // Refresh queue on reconnect
+                }
+            }
+        } else {
+            reconnectTick = 0;
+        }
 
         if (dev && dev->connected) {
             // Track info every cycle for instant updates when changing sources
             ctrl->updateTrackInfo();
             ctrl->updatePlaybackState();
+
+            // Detect station change and fetch station name immediately
+            if (dev->isRadioStation && dev->currentURI != previousURI) {
+                Serial.printf("[RADIO] Station changed - fetching station name immediately\n");
+                ctrl->updateMediaInfo();
+                previousURI = dev->currentURI;
+                vTaskDelay(pdMS_TO_TICKS(200));  // Allow network to recover after GetMediaInfo
+            }
+
+            // Media info for radio (station name) periodic refresh every 15 seconds
+            if (tick % 50 == 0 && dev->isRadioStation) {
+                ctrl->updateMediaInfo();
+                vTaskDelay(pdMS_TO_TICKS(200));  // Allow network to recover
+            }
+
+            // Clear previous URI when not on radio
+            if (!dev->isRadioStation && previousURI.length() > 0) {
+                previousURI = "";
+            }
 
             // Volume every 1.5 seconds (5 * 300ms)
             if (tick % 5 == 0) {
@@ -1338,8 +1320,8 @@ void SonosController::pollingTaskFunction(void* param) {
                 ctrl->updateTransportSettings();
             }
 
-            // Queue every 15 seconds (50 * 300ms)
-            if (tick % 50 == 0) {
+            // Queue every 15 seconds (50 * 300ms) - skip for radio
+            if (tick % 50 == 0 && !dev->isRadioStation) {
                 ctrl->updateQueue();
             }
 
@@ -1357,6 +1339,30 @@ void SonosController::handleNetworkError(const char* msg) {
 void SonosController::resetErrorCount() {
     SonosDevice* dev = getCurrentDevice();
     if (dev) dev->errorCount = 0;
+}
+
+void SonosController::suspendTasks() {
+    // Suspend Sonos polling/network tasks for OTA to prevent WiFi buffer overflow
+    if (pollingTaskHandle) {
+        Serial.println("[SONOS] Suspending polling task for OTA");
+        vTaskSuspend(pollingTaskHandle);
+    }
+    if (networkTaskHandle) {
+        Serial.println("[SONOS] Suspending network task for OTA");
+        vTaskSuspend(networkTaskHandle);
+    }
+}
+
+void SonosController::resumeTasks() {
+    // Resume Sonos tasks after OTA
+    if (pollingTaskHandle) {
+        Serial.println("[SONOS] Resuming polling task");
+        vTaskResume(pollingTaskHandle);
+    }
+    if (networkTaskHandle) {
+        Serial.println("[SONOS] Resuming network task");
+        vTaskResume(networkTaskHandle);
+    }
 }
 
 // ============================================================================

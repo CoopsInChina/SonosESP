@@ -23,7 +23,7 @@ If you find this project helpful, consider supporting me on Ko-fi!
 
 - **Full Playback Control** - Play, pause, skip, volume, shuffle, and repeat
 - **Queue Management** - Browse and manage your playback queue
-- **Album Art Display** - High-quality JPEG rendering with bilinear scaling and automatic dominant color extraction
+- **Album Art Display** - Hardware JPEG decoder + PNG support with bilinear scaling and automatic dominant color extraction
 - **Music Browsing** - Navigate your Sonos library, playlists, and favorites
 - **Multi-Room** - Switch between multiple Sonos devices
 - **WiFi Configuration** - Easy on-screen WiFi setup with built-in keyboard
@@ -85,7 +85,7 @@ The device supports automatic Over-The-Air (OTA) firmware updates from GitHub re
 - **Memory Management** - PSRAM for album art, heap monitoring
 - **Network Layer** - HTTPClient for SOAP requests, UDP for discovery
 - **UI Framework** - LVGL 9.4.0 with custom theme
-- **Image Processing** - Custom bilinear scaling with fixed-point math for arbitrary album art sizes
+- **Image Processing** - ESP32-P4 hardware JPEG decoder + software PNG decoder, custom bilinear scaling with fixed-point math
 - **OTA Updates** - Automatic firmware updates from GitHub releases
 
 ## Configuration
@@ -129,7 +129,5 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) file for
 <div align="center">
 
 **Built with ❤️ and vibes** • [Report Bug](https://github.com/OpenSurface/SonosESP/issues) • [Request Feature](https://github.com/OpenSurface/SonosESP/issues)
-
-*This project was vibe-coded for fun!* 🎉
 
 </div>

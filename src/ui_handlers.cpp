@@ -462,6 +462,33 @@ static void performOTAUpdate() {
         return;
     }
 
+    // CRITICAL: Stop album art task gracefully to prevent WiFi buffer overflow during OTA
+    // Album art downloads can compete with OTA firmware download for WiFi TX/RX buffers
+    if (albumArtTaskHandle) {
+        Serial.println("[OTA] Requesting album art shutdown");
+        art_shutdown_requested = true;
+
+        // Wait for task to finish current operation and exit (max 3 seconds)
+        int wait_count = 0;
+        while (albumArtTaskHandle != NULL && wait_count < 30) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            wait_count++;
+        }
+
+        if (albumArtTaskHandle == NULL) {
+            Serial.println("[OTA] Album art task stopped successfully");
+        } else {
+            Serial.println("[OTA] Album art task did not stop - forcing delete");
+            vTaskDelete(albumArtTaskHandle);
+            albumArtTaskHandle = NULL;
+        }
+    }
+
+    // CRITICAL: Suspend Sonos polling tasks to prevent WiFi buffer overflow during OTA
+    // Sonos SOAP requests can compete with OTA firmware download for WiFi TX/RX buffers
+    Serial.println("[OTA] Suspending Sonos tasks");
+    sonos.suspendTasks();
+
     // Disable buttons during update
     if (btn_check_update) lv_obj_add_state(btn_check_update, LV_STATE_DISABLED);
     if (btn_install_update) lv_obj_add_state(btn_install_update, LV_STATE_DISABLED);
@@ -647,6 +674,17 @@ static void performOTAUpdate() {
     }
     if (btn_check_update) lv_obj_clear_state(btn_check_update, LV_STATE_DISABLED);
     if (btn_install_update) lv_obj_clear_state(btn_install_update, LV_STATE_DISABLED);
+
+    // Restart album art task (if update failed - successful update will restart device)
+    if (albumArtTaskHandle == NULL) {
+        Serial.println("[OTA] Restarting album art task");
+        art_shutdown_requested = false;
+        xTaskCreatePinnedToCore(albumArtTask, "Art", 8192, NULL, 1, &albumArtTaskHandle, 0);
+    }
+
+    // Resume Sonos tasks (if update failed - successful update will restart device)
+    Serial.println("[OTA] Resuming Sonos tasks");
+    sonos.resumeTasks();
 }
 
 void ev_check_update(lv_event_t* e) {
@@ -808,8 +846,9 @@ void updateUI() {
     }
 
     // Next track info - find next track in queue
+    // SKIP FOR RADIO MODE - radio stations don't have a queue/next track
     static String last_next_title = "";
-    if (d->queueSize > 0 && d->currentTrackNumber > 0) {
+    if (!d->isRadioStation && d->queueSize > 0 && d->currentTrackNumber > 0) {
         int nextIdx = -1;
 
         // Find next track after current
@@ -874,8 +913,114 @@ void updateUI() {
         ui_repeat = d->repeatMode;
     }
 
-    // Album art - fast instant update
-    if (d->albumArtURL.length() > 0) requestAlbumArt(d->albumArtURL);
+    // Album art - only request if URL changed to prevent download loops
+    static String last_art_url = "";
+    static String last_track_uri = "";
+    static String last_source_prefix = "";
+
+    // Extract source prefix to detect actual source changes (not just track changes)
+    String current_source_prefix = "";
+    if (d->currentURI.startsWith("x-sonos-vli:")) {
+        current_source_prefix = "x-sonos-vli";  // Spotify, Apple Music, etc
+    } else if (d->currentURI.startsWith("hls-radio://")) {
+        current_source_prefix = "hls-radio";  // Radio
+    } else if (d->currentURI.startsWith("x-sonos-http:")) {
+        current_source_prefix = "x-sonos-http";  // Radio
+    } else if (d->currentURI.startsWith("x-rincon-mp3radio:")) {
+        current_source_prefix = "x-rincon-mp3radio";  // Radio
+    } else {
+        // Extract first part before colon for unknown sources
+        int colonPos = d->currentURI.indexOf(':');
+        if (colonPos > 0) {
+            current_source_prefix = d->currentURI.substring(0, colonPos);
+        }
+    }
+
+    // Detect ACTUAL source changes (Spotify→Radio, not Spotify track1→track2)
+    bool actual_source_change = (current_source_prefix != last_source_prefix && current_source_prefix.length() > 0);
+
+    // Detect any URI change (track or source)
+    bool uri_changed = (d->currentURI != last_track_uri);
+
+    if (uri_changed && d->currentURI.length() > 0) {
+        if (actual_source_change) {
+            Serial.printf("[ART] SOURCE CHANGE: %s -> %s\n", last_source_prefix.c_str(), current_source_prefix.c_str());
+            last_source_change_time = millis();  // Track when SOURCE changed for WiFi buffer management
+            last_source_prefix = current_source_prefix;
+            // CRITICAL: Abort any in-progress album art download immediately
+            // This prevents Spotify download from blocking YouTube Music download
+            art_abort_download = true;
+        } else {
+            Serial.printf("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
+        }
+        last_art_url = "";  // Force art refresh on any URI change
+        last_track_uri = d->currentURI;
+    }
+
+    // Request album art if URL changed or URI changed
+    if (d->albumArtURL != last_art_url || uri_changed) {
+        String artURL = "";
+        bool usingStationLogo = false;  // Track if we're using station logo (PNG allowed)
+
+        // Determine which art to use
+        if (d->albumArtURL.length() > 0) {
+            artURL = d->albumArtURL;
+        }
+
+        // RADIO STATION LOGO FALLBACK:
+        // If playing radio and no song art available, use station logo instead
+        if (d->isRadioStation) {
+            bool hasSongArt = (artURL.length() > 0);
+            bool hasStationLogo = (d->radioStationArtURL.length() > 0);
+
+            // If no song art but have station logo, use the logo
+            if (!hasSongArt && hasStationLogo) {
+                artURL = d->radioStationArtURL;
+                usingStationLogo = true;
+                Serial.println("[ART] Radio: Using station logo (no song art)");
+            }
+            // If song art is just a generic Sonos radio icon, prefer the actual station logo
+            else if (hasSongArt && hasStationLogo && artURL.indexOf("/getaa?") > 0) {
+                // Check if it's pointing to the radio URI (generic icon)
+                if (artURL.indexOf("x-sonosapi-stream") > 0 ||
+                    artURL.indexOf("x-rincon-mp3radio") > 0 ||
+                    artURL.indexOf("x-sonosapi-radio") > 0) {
+                    artURL = d->radioStationArtURL;
+                    usingStationLogo = true;
+                    Serial.println("[ART] Radio: Using station logo (replacing generic icon)");
+                }
+            }
+        }
+
+        // Set the flag for album art task to know if PNG is allowed
+        pending_is_station_logo = usingStationLogo;
+
+        if (artURL.length() > 0) {
+            // Note: Using ESP32-P4 hardware JPEG decoder - can handle full 640x640 Spotify images!
+
+            // Apple Music: reduce image size to avoid "too large" errors (1400x1400 can be 500KB+)
+            if (artURL.indexOf("mzstatic.com") > 0) {
+                if (artURL.indexOf("/1400x1400bb.jpg") > 0) {
+                    artURL.replace("/1400x1400bb.jpg", "/400x400bb.jpg");
+                    Serial.println("[ART] Apple Music - reduced to 400x400");
+                } else if (artURL.indexOf("/1080x1080cc.jpg") > 0) {
+                    artURL.replace("/1080x1080cc.jpg", "/400x400cc.jpg");
+                    Serial.println("[ART] Apple Music - reduced to 400x400");
+                }
+            }
+
+            requestAlbumArt(artURL);
+            last_art_url = artURL;  // Track the actual URL we requested
+        } else {
+            // No art available - clear display and tracking
+            if (last_art_url.length() > 0) {
+                Serial.println("[ART] No art URL - clearing display");
+                if (img_album) lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+                if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+                last_art_url = "";
+            }
+        }
+    }
     if (xSemaphoreTake(art_mutex, 0)) {
         if (art_ready) {
             lv_img_set_src(img_album, &art_dsc);
@@ -889,6 +1034,9 @@ void updateUI() {
         }
         xSemaphoreGive(art_mutex);
     }
+
+    // Radio mode UI adaptation - must be at the END of updateUI()
+    updateRadioModeUI();
 }
 
 void processUpdates() {

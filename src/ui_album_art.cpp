@@ -1,9 +1,14 @@
 /**
  * UI Album Art Handling
- * Album art loading with JPEGDEC + bilinear scaling for arbitrary sizes
+ * Album art loading with ESP32-P4 hardware JPEG decoder + PNGdec + bilinear scaling
  */
 
 #include "ui_common.h"
+#include <PNGdec.h>
+
+// ESP32-P4 Hardware JPEG Decoder
+#include "driver/jpeg_decode.h"
+static jpeg_decoder_handle_t hw_jpeg_decoder = nullptr;
 
 // Album Art Functions
 static uint32_t color_r_sum = 0, color_g_sum = 0, color_b_sum = 0;
@@ -12,7 +17,10 @@ static int jpeg_image_width = 0;   // Store full image width for callback
 static int jpeg_image_height = 0;  // Store full image height for callback
 static int jpeg_output_width = 0;  // Actual decoded output width
 static int jpeg_output_height = 0; // Actual decoded output height
-static uint16_t* jpeg_decode_buffer = nullptr;  // Destination for JPEG decode
+static uint16_t* jpeg_decode_buffer = nullptr;  // Destination for JPEG/PNG decode
+
+// PNG decoder instance
+static PNG png;
 
 // Apply dominant color instantly to both panels and update button feedback colors
 void setBackgroundColor(uint32_t hex_color) {
@@ -150,43 +158,112 @@ void scaleImageBilinear(uint16_t* src, int src_w, int src_h, uint16_t* dst, int 
     }
 }
 
-// JPEGDEC callback - decode to temporary buffer with any source dimensions
-static int jpegDraw(JPEGDRAW* pDraw) {
+// PNGdec callback - decode to temporary buffer
+static int pngDraw(PNGDRAW* pDraw) {
     if (!jpeg_decode_buffer) return 0;
 
-    uint16_t* src = pDraw->pPixels;
-    int src_x = pDraw->x;
-    int src_y = pDraw->y;
+    // Get RGB565 pixels from PNG decoder
+    uint16_t lineBuffer[512];  // Max width we support
     int w = pDraw->iWidth;
-    int h = pDraw->iHeight;
+    if (w > 512) w = 512;
 
-    int out_w = src_x + w;
-    int out_h = src_y + h;
-    if (out_w > jpeg_output_width) jpeg_output_width = out_w;
-    if (out_h > jpeg_output_height) jpeg_output_height = out_h;
+    // Convert PNG line to RGB565
+    png.getLineAsRGB565(pDraw, lineBuffer, PNG_RGB565_LITTLE_ENDIAN, 0xFFFFFFFF);
 
-    // Copy MCU block to temp buffer using full image width
-    for (int row = 0; row < h; row++) {
-        int dy = src_y + row;
-        if (dy < 0 || dy >= jpeg_image_height) continue;
-        if (src_x < 0 || src_x >= jpeg_image_width) continue;
+    int y = pDraw->y;
+    if (y < 0 || y >= jpeg_image_height) return 1;
 
-        int copy_w = w;
-        if (src_x + copy_w > jpeg_image_width) {
-            copy_w = jpeg_image_width - src_x;
-        }
-        if (copy_w <= 0) continue;
+    // Copy to decode buffer
+    int copy_w = w;
+    if (copy_w > jpeg_image_width) copy_w = jpeg_image_width;
 
-        memcpy(&jpeg_decode_buffer[dy * jpeg_image_width + src_x], &src[row * w], copy_w * 2);
+    memcpy(&jpeg_decode_buffer[y * jpeg_image_width], lineBuffer, copy_w * 2);
+
+    // Track output dimensions
+    if (copy_w > jpeg_output_width) jpeg_output_width = copy_w;
+    if (y + 1 > jpeg_output_height) jpeg_output_height = y + 1;
+
+    return 1;  // Continue decoding
+}
+
+// Prepare and sanitize album art URL
+// Handles: HTML entity decoding, Sonos Radio URL extraction, size reduction, URL encoding
+static String prepareAlbumArtURL(const String& rawUrl) {
+    String fetchUrl = decodeHTMLEntities(rawUrl);
+
+    // Sonos Radio fix: extract high-quality art from embedded mark parameter
+    is_sonos_radio_art = false;  // Reset flag
+    int markIndex = fetchUrl.indexOf("mark=http");
+    if (markIndex == -1) {
+        markIndex = fetchUrl.indexOf("mark=https");
+    }
+    if (fetchUrl.indexOf("sonosradio.imgix.net") != -1 && markIndex != -1) {
+        Serial.println("[ART] Sonos Radio art detected");
+        int markStart = markIndex + 5;  // After "mark="
+        int markEnd = fetchUrl.indexOf("&", markStart);
+        if (markEnd == -1) markEnd = fetchUrl.length();
+
+        fetchUrl = fetchUrl.substring(markStart, markEnd);
+        is_sonos_radio_art = true;
+        Serial.printf("[ART] Extracted: %s\n", fetchUrl.c_str());
     }
 
-    return 1;
+    // Reduce image size for known providers to stay under size limit
+    // Deezer: 1000x1000 → 400x400
+    if (fetchUrl.indexOf("dzcdn.net") != -1) {
+        fetchUrl.replace("/1000x1000-", "/400x400-");
+        Serial.println("[ART] Deezer - reduced to 400x400");
+    }
+    // TuneIn (cdn-profiles.tunein.com): keep original size
+    // Note: logoq is 145x145, logog is 600x600 (too big for PNG decode)
+    if (fetchUrl.indexOf("cdn-profiles.tunein.com") != -1 && fetchUrl.indexOf("?d=") != -1) {
+        fetchUrl.replace("?d=1024", "?d=400");
+        fetchUrl.replace("?d=600", "?d=400");
+    }
+
+    // Sonos getaa URLs can contain unescaped '?' and '&' in the u= parameter; encode them only
+    if (fetchUrl.indexOf("/getaa?") != -1) {
+        int uPos = fetchUrl.indexOf("u=");
+        if (uPos != -1) {
+            int uStart = uPos + 2;
+            int uEnd = fetchUrl.indexOf("&", uStart);
+            if (uEnd == -1) uEnd = fetchUrl.length();
+            String uValue = fetchUrl.substring(uStart, uEnd);
+            String uEncoded = "";
+            for (int i = 0; i < uValue.length(); i++) {
+                char c = uValue[i];
+                if (c == '?') {
+                    uEncoded += "%3F";
+                } else if (c == '&') {
+                    uEncoded += "%26";
+                } else {
+                    uEncoded += c;
+                }
+            }
+            fetchUrl = fetchUrl.substring(0, uStart) + uEncoded + fetchUrl.substring(uEnd);
+        }
+    }
+
+    return fetchUrl;
 }
 
 void albumArtTask(void* param) {
     art_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
     art_temp_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
     if (!art_buffer || !art_temp_buffer) { vTaskDelete(NULL); return; }
+
+    // Initialize ESP32-P4 Hardware JPEG Decoder
+    jpeg_decode_engine_cfg_t hw_jpeg_cfg = {
+        .intr_priority = 0,
+        .timeout_ms = 1000,  // 1 second timeout
+    };
+    esp_err_t ret = jpeg_new_decoder_engine(&hw_jpeg_cfg, &hw_jpeg_decoder);
+    if (ret != ESP_OK) {
+        Serial.printf("[ART] Failed to init hardware JPEG decoder: %d\n", ret);
+        hw_jpeg_decoder = nullptr;
+    } else {
+        Serial.println("[ART] Hardware JPEG decoder initialized!");
+    }
 
     // HTTPClient for album art
     HTTPClient http;
@@ -198,54 +275,20 @@ void albumArtTask(void* param) {
     uint16_t* decoded_buffer = nullptr;
 
     while (1) {
+        // Check if shutdown requested (for OTA update)
+        if (art_shutdown_requested) {
+            Serial.println("[ART] Shutdown requested - exiting task");
+            albumArtTaskHandle = NULL;  // Clear handle before deleting
+            vTaskDelete(NULL);  // Delete self
+            return;
+        }
+
         url[0] = '\0';  // Clear URL
+        bool isStationLogo = false;  // Track if this is a station logo (PNG allowed)
         if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(10))) {
             if (pending_art_url.length() > 0 && pending_art_url != last_art_url) {
-                String fetchUrl = pending_art_url;
-
-                // Decode HTML entities (&amp; -> &)
-                fetchUrl.replace("&amp;", "&");
-
-                // Sonos Radio fix: extract high-quality art from embedded mark parameter
-                is_sonos_radio_art = false;
-                int markIndex = fetchUrl.indexOf("mark=http");
-                if (markIndex == -1) {
-                    markIndex = fetchUrl.indexOf("mark=https");
-                }
-                if (fetchUrl.indexOf("sonosradio.imgix.net") != -1 && markIndex != -1) {
-                    Serial.println("[ART] Sonos Radio art detected");
-                    int markStart = markIndex + 5;  // After "mark="
-                    int markEnd = fetchUrl.indexOf("&", markStart);
-                    if (markEnd == -1) markEnd = fetchUrl.length();
-
-                    String originalUrl = fetchUrl;
-                    fetchUrl = fetchUrl.substring(markStart, markEnd);
-                    is_sonos_radio_art = true;
-                    Serial.printf("[ART] Extracted: %s\n", fetchUrl.c_str());
-                }
-
-                // Sonos getaa URLs can contain unescaped '?' and '&' in the u= parameter; encode them only
-                if (fetchUrl.indexOf("/getaa?") != -1) {
-                    int uPos = fetchUrl.indexOf("u=");
-                    if (uPos != -1) {
-                        int uStart = uPos + 2;
-                        int uEnd = fetchUrl.indexOf("&", uStart);
-                        if (uEnd == -1) uEnd = fetchUrl.length();
-                        String uValue = fetchUrl.substring(uStart, uEnd);
-                        String uEncoded = "";
-                        for (int i = 0; i < uValue.length(); i++) {
-                            char c = uValue[i];
-                            if (c == '?') {
-                                uEncoded += "%3F";
-                            } else if (c == '&') {
-                                uEncoded += "%26";
-                            } else {
-                                uEncoded += c;
-                            }
-                        }
-                        fetchUrl = fetchUrl.substring(0, uStart) + uEncoded + fetchUrl.substring(uEnd);
-                    }
-                }
+                isStationLogo = pending_is_station_logo;  // Capture flag while holding mutex
+                String fetchUrl = prepareAlbumArtURL(pending_art_url);
 
                 if (fetchUrl != last_art_url) {
                     strncpy(url, fetchUrl.c_str(), sizeof(url) - 1);
@@ -256,19 +299,41 @@ void albumArtTask(void* param) {
         }
         if (url[0] != '\0') {
             Serial.printf("[ART] URL: %s\n", url);
+
+            // Simple WiFi check - don't try to download if not connected
+            if (WiFi.status() != WL_CONNECTED) {
+                Serial.println("[ART] WiFi not connected, skipping");
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+
+            // Detect if URL is from Sonos device itself (e.g., /getaa for YouTube Music)
+            // These don't need per-chunk mutex since Sonos HTTP server serializes requests anyway
+            bool isFromSonosDevice = (strstr(url, ":1400/") != nullptr);
+
             bool use_https = (strncmp(url, "https://", 8) == 0);
             if (use_https) {
                 http.begin(secure_client, url);
             } else {
                 http.begin(url);
             }
-            http.setTimeout(10000);  // Increased timeout for chunked reading
+            http.setTimeout(10000);
+
+            // REVERT TO v1.1.1: Hold network_mutex for ENTIRE download (no per-chunk)
+            // This prevents SDIO crashes but blocks SOAP during art download
+            if (!xSemaphoreTake(network_mutex, pdMS_TO_TICKS(NETWORK_MUTEX_TIMEOUT_ART_MS))) {
+                Serial.println("[ART] Failed to acquire network mutex - skipping download");
+                http.end();
+                continue;
+            }
+
             int code = http.GET();
+            // Keep mutex locked for entire download
+
             if (code == 200) {
                 int len = http.getSize();
-                const size_t max_art_size = 200000;
+                const size_t max_art_size = MAX_ART_SIZE;
                 const bool len_known = (len > 0);
-                // Reduced from 400KB to 200KB to avoid WiFi buffer exhaustion (Issue #7)
                 if ((len_known && len < (int)max_art_size) || !len_known) {
                     if (len_known) {
                         Serial.printf("[ART] Downloading album art: %d bytes\n", len);
@@ -280,13 +345,20 @@ void albumArtTask(void* param) {
                     if (jpgBuf) {
                         WiFiClient* stream = http.getStreamPtr();
 
-                        // Chunked reading to avoid WiFi buffer exhaustion (Issue #7)
-                        // Read in 4KB chunks with yields to let WiFi driver process
-                        const size_t chunkSize = 4096;
+                        // Chunked reading to avoid WiFi buffer issues
+                        const size_t chunkSize = ART_CHUNK_SIZE;
                         size_t bytesRead = 0;
                         bool readSuccess = true;
 
                         while (stream->connected() && bytesRead < alloc_len) {
+                            // Check if source changed - abort download immediately
+                            if (art_abort_download) {
+                                Serial.println("[ART] Source changed - aborting current download");
+                                art_abort_download = false;  // Clear flag
+                                readSuccess = false;
+                                break;
+                            }
+
                             size_t available = stream->available();
                             if (available == 0) {
                                 vTaskDelay(pdMS_TO_TICKS(1));
@@ -297,143 +369,326 @@ void albumArtTask(void* param) {
                             size_t remaining = len_known ? ((size_t)len - bytesRead) : (alloc_len - bytesRead);
                             size_t toRead = min(chunkSize, remaining);
                             toRead = min(toRead, available);
+
+                            // Mutex held for entire download - no per-chunk locking
                             size_t actualRead = stream->readBytes(jpgBuf + bytesRead, toRead);
 
                             if (actualRead == 0) {
                                 if (len_known) {
-                                Serial.printf("[ART] Read timeout at %d/%d bytes\n", (int)bytesRead, len);
+                                    Serial.printf("[ART] Read timeout at %d/%d bytes\n", (int)bytesRead, len);
                                     readSuccess = false;
                                 }
                                 break;
                             }
 
                             bytesRead += actualRead;
-                            vTaskDelay(pdMS_TO_TICKS(1));  // Yield to WiFi task
+                            // Yield to WiFi/SDIO task - 5ms prevents RX buffer overflow on large HTTPS downloads
+                            vTaskDelay(pdMS_TO_TICKS(5));
                         }
 
                         if (!len_known && bytesRead >= max_art_size) {
-                            Serial.println("[ART] Album art too large (max 200KB)");
+                            Serial.println("[ART] Album art too large (max 280KB)");
                             readSuccess = false;
+                        }
+
+                        // CRITICAL: Drain connection if aborted to prevent WiFi SDIO buffer overflow
+                        if (!readSuccess && len_known && bytesRead < len) {
+                            Serial.printf("[ART] Draining aborted connection: %d/%d bytes remaining\n", len - bytesRead, len);
+                            uint8_t drainBuf[512];
+                            size_t remaining = len - bytesRead;
+                            size_t drained = 0;
+                            unsigned long startDrain = millis();
+
+                            while (stream->connected() && drained < remaining) {
+                                size_t available = stream->available();
+                                if (available > 0) {
+                                    size_t toRead = min((size_t)512, available);
+                                    toRead = min(toRead, remaining - drained);
+                                    size_t read = stream->readBytes(drainBuf, toRead);
+                                    drained += read;
+                                } else {
+                                    vTaskDelay(pdMS_TO_TICKS(10));
+                                }
+                                // Abort drain if taking too long (max 2 seconds)
+                                if (millis() - startDrain > 2000) {
+                                    Serial.println("[ART] Drain timeout - closing connection");
+                                    break;
+                                }
+                            }
+                            Serial.printf("[ART] Drained %d bytes - waiting 2s for HTTPS cleanup\n", (int)drained);
+                            vTaskDelay(pdMS_TO_TICKS(2000));  // Wait for HTTPS/TLS resources to free
                         }
 
                         Serial.printf("[ART] Album art read: %d bytes (len_known=%d)\n", (int)bytesRead, len_known ? 1 : 0);
 
                         int read = bytesRead;
                         if ((len_known ? (read == len) : (read > 0)) && readSuccess) {
-                            Serial.printf("[ART] Opening JPEG with %d bytes\n", read);
-                            if (jpeg.openRAM(jpgBuf, read, jpegDraw)) {
-                                jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-                                int w = jpeg.getWidth();
-                                int h = jpeg.getHeight();
-                                jpeg_image_width = w;   // Store for callback
-                                jpeg_image_height = h;  // Store for callback
-                                jpeg_output_width = 0;
-                                jpeg_output_height = 0;
-                                Serial.printf("[ART] JPEG: %dx%d\n", w, h);
+                            // Detect image format by magic bytes
+                            bool isJPEG = (read >= 3 && jpgBuf[0] == 0xFF && jpgBuf[1] == 0xD8 && jpgBuf[2] == 0xFF);
+                            bool isPNG = (read >= 4 && jpgBuf[0] == 0x89 && jpgBuf[1] == 0x50 && jpgBuf[2] == 0x4E && jpgBuf[3] == 0x47);
 
-                                // Allocate buffer for full decoded image
-                                size_t decoded_size = w * h * 2;
-                                if (decoded_buffer) {
-                                    heap_caps_free(decoded_buffer);
-                                }
-                                decoded_buffer = (uint16_t*)heap_caps_malloc(decoded_size, MALLOC_CAP_SPIRAM);
+                            // Only decode PNG for radio station logos (not regular album art)
+                            if (isPNG && isStationLogo) {
+                                Serial.printf("[ART] Opening PNG with %d bytes\n", read);
+                                int pngResult = png.openRAM(jpgBuf, read, pngDraw);
+                                if (pngResult == 0) {  // PNG_SUCCESS = 0 (different from JPEG!)
+                                    Serial.println("[ART] PNG openRAM success");
+                                    int w = png.getWidth();
+                                    int h = png.getHeight();
 
-                                if (decoded_buffer) {
-                                    jpeg_decode_buffer = decoded_buffer;
-                                    // Clear decoded buffer to avoid stale tiles when decoder skips blocks
-                                    memset(decoded_buffer, 0, decoded_size);
+                                    // Validate PNG dimensions to prevent crashes from malformed files
+                                    if (w == 0 || h == 0 || w > 1000 || h > 1000) {
+                                        Serial.printf("[ART] Invalid PNG dimensions: %dx%d (must be 1-1000)\n", w, h);
+                                        png.close();
+                                        heap_caps_free(jpgBuf);
+                                        jpgBuf = nullptr;
+                                        continue;
+                                    }
 
-                                    // Decode full image at original size (no scaling)
-                                    jpeg.decode(0, 0, 0);
-                                    jpeg.close();
+                                    jpeg_image_width = w;   // Reuse for PNG
+                                    jpeg_image_height = h;  // Reuse for PNG
+                                    jpeg_output_width = 0;
+                                    jpeg_output_height = 0;
+                                    Serial.printf("[ART] PNG: %dx%d\n", w, h);
 
-                                    Serial.printf("[ART] Decoded %dx%d\n", w, h);
-                                    jpeg_decode_buffer = nullptr;
+                                    // Allocate buffer for full decoded image
+                                    size_t decoded_size = w * h * 2;
+                                    if (decoded_buffer) {
+                                        heap_caps_free(decoded_buffer);
+                                    }
+                                    decoded_buffer = (uint16_t*)heap_caps_malloc(decoded_size, MALLOC_CAP_SPIRAM);
 
-                                    if (art_temp_buffer) {
-                                        int out_w = jpeg_output_width > 0 ? jpeg_output_width : w;
-                                        int out_h = jpeg_output_height > 0 ? jpeg_output_height : h;
-                                        uint16_t* src_buffer = decoded_buffer;
-                                        bool needs_compact = (out_w != w) || (out_h != h);
+                                    if (decoded_buffer) {
+                                        jpeg_decode_buffer = decoded_buffer;
+                                        memset(decoded_buffer, 0, decoded_size);
 
-                                        if (needs_compact) {
-                                            Serial.printf("[ART] Output size: %dx%d (scaled)\n", out_w, out_h);
-                                            size_t compact_size = (size_t)out_w * (size_t)out_h * 2;
-                                            uint16_t* compact_buffer = (uint16_t*)heap_caps_malloc(compact_size, MALLOC_CAP_SPIRAM);
-                                            if (compact_buffer) {
-                                                for (int y = 0; y < out_h; y++) {
-                                                    memcpy(&compact_buffer[y * out_w],
-                                                           &decoded_buffer[y * w],
-                                                           (size_t)out_w * 2);
+                                        // Decode PNG
+                                        png.decode(NULL, 0);
+                                        png.close();
+
+                                        Serial.printf("[ART] Decoded %dx%d\n", w, h);
+                                        jpeg_decode_buffer = nullptr;
+
+                                        if (art_temp_buffer) {
+                                            int out_w = jpeg_output_width > 0 ? jpeg_output_width : w;
+                                            int out_h = jpeg_output_height > 0 ? jpeg_output_height : h;
+                                            uint16_t* src_buffer = decoded_buffer;
+                                            bool needs_compact = (out_w != w) || (out_h != h);
+
+                                            if (needs_compact) {
+                                                Serial.printf("[ART] Output size: %dx%d (scaled)\n", out_w, out_h);
+                                                size_t compact_size = (size_t)out_w * (size_t)out_h * 2;
+                                                uint16_t* compact_buffer = (uint16_t*)heap_caps_malloc(compact_size, MALLOC_CAP_SPIRAM);
+                                                if (compact_buffer) {
+                                                    for (int y = 0; y < out_h; y++) {
+                                                        memcpy(&compact_buffer[y * out_w],
+                                                               &decoded_buffer[y * w],
+                                                               (size_t)out_w * 2);
+                                                    }
+                                                    src_buffer = compact_buffer;
+                                                } else {
+                                                    Serial.println("[ART] Failed to allocate compact buffer");
+                                                    out_w = w;
+                                                    out_h = h;
                                                 }
-                                                src_buffer = compact_buffer;
-                                            } else {
-                                                Serial.println("[ART] Failed to allocate compact buffer");
-                                                out_w = w;
-                                                out_h = h;
+                                            }
+
+                                            // Clear output buffer
+                                            memset(art_temp_buffer, 0, ART_SIZE * ART_SIZE * 2);
+
+                                            // Scale to exact 420x420 using bilinear interpolation
+                                            Serial.printf("[ART] Bilinear scaling %dx%d -> 420x420\n", out_w, out_h);
+                                            scaleImageBilinear(src_buffer, out_w, out_h, art_temp_buffer, ART_SIZE, ART_SIZE);
+                                            Serial.println("[ART] Scaling complete");
+
+                                            if (src_buffer != decoded_buffer) {
+                                                heap_caps_free(src_buffer);
+                                            }
+                                            // Free decoded buffer immediately - don't hold 800KB until next image
+                                            heap_caps_free(decoded_buffer);
+                                            decoded_buffer = nullptr;
+
+                                            // Sample dominant color from scaled image
+                                            sampleDominantColor(art_temp_buffer, ART_SIZE, ART_SIZE);
+
+                                            // Calculate dominant color
+                                            uint32_t new_color = 0x1a1a1a;  // Default dark color
+                                            if (color_sample_count > 0) {
+                                                uint8_t avg_r = color_r_sum / color_sample_count;
+                                                uint8_t avg_g = color_g_sum / color_sample_count;
+                                                uint8_t avg_b = color_b_sum / color_sample_count;
+
+                                                // Darken for background (multiply by 0.4)
+                                                avg_r = (avg_r * 4) / 10;
+                                                avg_g = (avg_g * 4) / 10;
+                                                avg_b = (avg_b * 4) / 10;
+
+                                                new_color = (avg_r << 16) | (avg_g << 8) | avg_b;
+                                            }
+
+                                            // Copy completed image from temp to display buffer atomically
+                                            memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+
+                                            memset(&art_dsc, 0, sizeof(art_dsc));
+                                            art_dsc.header.w = ART_SIZE;
+                                            art_dsc.header.h = ART_SIZE;
+                                            art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+                                            art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
+                                            art_dsc.data = (const uint8_t*)art_buffer;
+
+                                            // Update all shared variables atomically under mutex
+                                            if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                                last_art_url = url;
+                                                dominant_color = new_color;
+                                                art_ready = true;
+                                                color_ready = true;
+                                                xSemaphoreGive(art_mutex);
                                             }
                                         }
-
-                                        // Clear output buffer
-                                        memset(art_temp_buffer, 0, ART_SIZE * ART_SIZE * 2);
-
-                                        // Scale to exact 420x420 using bilinear interpolation
-                                        Serial.printf("[ART] Bilinear scaling %dx%d -> 420x420\n", out_w, out_h);
-                                        scaleImageBilinear(src_buffer, out_w, out_h, art_temp_buffer, ART_SIZE, ART_SIZE);
-                                        Serial.println("[ART] Scaling complete");
-
-                                        if (src_buffer != decoded_buffer) {
-                                            heap_caps_free(src_buffer);
-                                        }
-
-                                        // Sample dominant color from scaled image
-                                        sampleDominantColor(art_temp_buffer, ART_SIZE, ART_SIZE);
-
-                                        // Calculate dominant color
-                                        uint32_t new_color = 0x1a1a1a;  // Default dark color
-                                        if (color_sample_count > 0) {
-                                            uint8_t avg_r = color_r_sum / color_sample_count;
-                                            uint8_t avg_g = color_g_sum / color_sample_count;
-                                            uint8_t avg_b = color_b_sum / color_sample_count;
-
-                                            // Darken for background (multiply by 0.4)
-                                            avg_r = (avg_r * 4) / 10;
-                                            avg_g = (avg_g * 4) / 10;
-                                            avg_b = (avg_b * 4) / 10;
-
-                                            new_color = (avg_r << 16) | (avg_g << 8) | avg_b;
-                                        }
-
-                                        // Copy completed image from temp to display buffer atomically
-                                        memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
-
-                                        memset(&art_dsc, 0, sizeof(art_dsc));
-                                        art_dsc.header.w = ART_SIZE;
-                                        art_dsc.header.h = ART_SIZE;
-                                        art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-                                        art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
-                                        art_dsc.data = (const uint8_t*)art_buffer;
-
-                                        // Update all shared variables atomically under mutex
-                                        if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
-                                            last_art_url = url;
-                                            dominant_color = new_color;
-                                            art_ready = true;
-                                            color_ready = true;
-                                            xSemaphoreGive(art_mutex);
-                                        }
+                                    } else {
+                                        Serial.printf("[ART] Failed to allocate %d bytes for decoded image\n", (int)decoded_size);
                                     }
                                 } else {
-                                    Serial.printf("[ART] Failed to allocate %d bytes for decoded image\n", (int)decoded_size);
+                                    Serial.printf("[ART] PNG openRAM failed - error code: %d\n", pngResult);
                                 }
+                            } else if (isPNG && !isStationLogo) {
+                                // PNG detected but not a station logo - skip (only JPEG for normal album art)
+                                Serial.println("[ART] PNG detected but not station logo - skipping");
+                            } else if (isJPEG && hw_jpeg_decoder) {
+                                // ESP32-P4 Hardware JPEG Decoder - fast and stable!
+                                Serial.printf("[ART] HW JPEG decode: %d bytes\n", read);
+
+                                // Get image dimensions from header (no hardware needed)
+                                jpeg_decode_picture_info_t pic_info;
+                                esp_err_t ret = jpeg_decoder_get_info(jpgBuf, read, &pic_info);
+                                if (ret == ESP_OK) {
+                                    int w = pic_info.width;
+                                    int h = pic_info.height;
+                                    // Hardware outputs dimensions rounded to 16-pixel boundary
+                                    int out_w = ((w + 15) / 16) * 16;
+                                    int out_h = ((h + 15) / 16) * 16;
+                                    Serial.printf("[ART] JPEG: %dx%d (output: %dx%d)\n", w, h, out_w, out_h);
+
+                                    // Allocate output buffer for RGB565 - needs to be DMA capable
+                                    size_t decoded_size = out_w * out_h * 2;
+                                    jpeg_decode_memory_alloc_cfg_t rx_mem_cfg = {
+                                        .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
+                                    };
+                                    size_t rx_buffer_size = 0;
+                                    uint8_t* hw_out_buf = (uint8_t*)jpeg_alloc_decoder_mem(decoded_size, &rx_mem_cfg, &rx_buffer_size);
+
+                                    if (hw_out_buf) {
+                                        // Configure hardware decoder for RGB565 output
+                                        jpeg_decode_cfg_t decode_cfg = {
+                                            .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
+                                            .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,  // Little endian
+                                            .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
+                                        };
+
+                                        uint32_t out_size = 0;
+                                        ret = jpeg_decoder_process(hw_jpeg_decoder, &decode_cfg, jpgBuf, read, hw_out_buf, rx_buffer_size, &out_size);
+
+                                        if (ret == ESP_OK) {
+                                            Serial.printf("[ART] HW decoded: %d bytes\n", out_size);
+
+                                            // Scale to 420x420 using bilinear interpolation
+                                            memset(art_temp_buffer, 0, ART_SIZE * ART_SIZE * 2);
+                                            Serial.printf("[ART] Bilinear scaling %dx%d -> 420x420\n", w, h);
+                                            // Use actual image dimensions for scaling (not padded)
+                                            scaleImageBilinear((uint16_t*)hw_out_buf, out_w, out_h, art_temp_buffer, ART_SIZE, ART_SIZE);
+                                            Serial.println("[ART] Scaling complete");
+
+                                            // Free hardware buffer immediately
+                                            heap_caps_free(hw_out_buf);
+                                            hw_out_buf = nullptr;
+
+                                            // Sample dominant color from scaled image
+                                            sampleDominantColor(art_temp_buffer, ART_SIZE, ART_SIZE);
+
+                                            // Calculate dominant color
+                                            uint32_t new_color = 0x1a1a1a;  // Default dark color
+                                            if (color_sample_count > 0) {
+                                                uint8_t avg_r = color_r_sum / color_sample_count;
+                                                uint8_t avg_g = color_g_sum / color_sample_count;
+                                                uint8_t avg_b = color_b_sum / color_sample_count;
+
+                                                // Darken for background (multiply by 0.4)
+                                                avg_r = (avg_r * 4) / 10;
+                                                avg_g = (avg_g * 4) / 10;
+                                                avg_b = (avg_b * 4) / 10;
+
+                                                new_color = (avg_r << 16) | (avg_g << 8) | avg_b;
+                                            }
+
+                                            // Copy completed image from temp to display buffer atomically
+                                            memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+
+                                            memset(&art_dsc, 0, sizeof(art_dsc));
+                                            art_dsc.header.w = ART_SIZE;
+                                            art_dsc.header.h = ART_SIZE;
+                                            art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+                                            art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
+                                            art_dsc.data = (const uint8_t*)art_buffer;
+
+                                            // Update all shared variables atomically under mutex
+                                            if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                                last_art_url = url;
+                                                dominant_color = new_color;
+                                                art_ready = true;
+                                                color_ready = true;
+                                                xSemaphoreGive(art_mutex);
+                                            }
+                                        } else {
+                                            Serial.printf("[ART] HW JPEG decode failed: %d\n", ret);
+                                            heap_caps_free(hw_out_buf);
+                                        }
+                                    } else {
+                                        Serial.printf("[ART] Failed to allocate %d bytes for HW decode\n", (int)decoded_size);
+                                    }
+                                } else {
+                                    Serial.printf("[ART] JPEG header parse failed: %d\n", ret);
+                                }
+                            } else if (isJPEG) {
+                                // Fallback: Software JPEG decode (if hardware not available)
+                                Serial.println("[ART] HW JPEG unavailable, skipping");
+                            } else {
+                                Serial.println("[ART] Unknown image format (not JPEG or PNG)");
                             }
                         }
                         heap_caps_free(jpgBuf);
                     } else {
                         Serial.printf("[ART] Failed to allocate %d bytes for album art\n", len);
                     }
-                } else if (len >= 200000) {
-                    Serial.printf("[ART] Album art too large: %d bytes (max 200KB)\n", len);
+                } else if (len >= (int)max_art_size) {
+                    Serial.printf("[ART] Album art too large: %d bytes (max %dKB)\n", len, (int)(max_art_size/1000));
+                    // Must drain the connection to prevent WiFi RX buffer overflow
+                    // Server is already sending data even though we're rejecting it
+                    WiFiClient* stream = http.getStreamPtr();
+                    uint8_t drainBuf[512];
+                    int drained = 0;
+                    unsigned long startDrain = millis();
+                    while (stream->connected() && drained < len) {
+                        size_t available = stream->available();
+                        if (available > 0) {
+                            size_t toRead = min((size_t)512, available);
+                            toRead = min(toRead, (size_t)(len - drained));
+                            size_t read = stream->readBytes(drainBuf, toRead);
+                            drained += read;
+                        } else {
+                            vTaskDelay(pdMS_TO_TICKS(10));
+                        }
+                        // Abort drain if taking too long (max 3 seconds)
+                        if (millis() - startDrain > 3000) {
+                            Serial.println("[ART] Drain timeout - closing connection");
+                            break;
+                        }
+                    }
+                    Serial.printf("[ART] Drained %d/%d bytes from connection\n", drained, len);
+                    // Mark as done to prevent retry loop
+                    if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                        last_art_url = url;
+                        xSemaphoreGive(art_mutex);
+                    }
                 } else {
                     Serial.printf("[ART] Invalid album art size: %d bytes\n", len);
                 }
@@ -441,8 +696,15 @@ void albumArtTask(void* param) {
                 Serial.printf("[ART] HTTP error %d fetching album art\n", code);
             }
             http.end();
+
+            // Release network_mutex after entire download completes
+            xSemaphoreGive(network_mutex);
+
+            // CRITICAL: Wait for WiFi buffers to stabilize after any download
+            // Prevents cumulative buffer exhaustion from rapid consecutive downloads + SOAP polling
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
-        vTaskDelay(pdMS_TO_TICKS(200));  // Reduced from 500ms for faster art updates
+        vTaskDelay(pdMS_TO_TICKS(100));  // Check for new URLs
     }
 }
 
