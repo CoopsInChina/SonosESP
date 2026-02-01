@@ -25,7 +25,7 @@ void setup() {
 
     // Debug: Log what was loaded from NVS
     if (ssid.length() > 0) {
-        Serial.printf("[WIFI] Loaded from NVS: SSID='%s', Password='%s' (length: %d)\n", ssid.c_str(), pass.c_str(), pass.length());
+        Serial.printf("[WIFI] Loaded from NVS: SSID='%s', (length: %d)\n", ssid.c_str(), pass.length());
     } else {
         Serial.println("[WIFI] No saved credentials found in NVS, using defaults");
     }
