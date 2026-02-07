@@ -30,6 +30,7 @@ Preferences wifiPrefs;
 int brightness_level = 100;
 int brightness_dimmed = 20;
 int autodim_timeout = 30;
+bool lyrics_enabled = true;
 uint32_t last_touch_time = 0;
 bool screen_dimmed = false;
 
@@ -46,6 +47,7 @@ lv_obj_t *scr_browse = nullptr;
 lv_obj_t *scr_display = nullptr;
 lv_obj_t *scr_ota = nullptr;
 lv_obj_t *scr_groups = nullptr;
+lv_obj_t *scr_general = nullptr;
 
 // ============================================================================
 // Main Screen UI Elements
@@ -113,21 +115,16 @@ SemaphoreHandle_t art_mutex = nullptr;
 TaskHandle_t albumArtTaskHandle = nullptr;
 volatile bool art_shutdown_requested = false;  // Signal album art to stop gracefully
 volatile bool art_abort_download = false;      // Signal to abort current download (source changed)
+volatile bool sonos_tasks_shutdown_requested = false;  // Signal Sonos tasks to stop for OTA
 uint32_t dominant_color = 0x1a1a1a;
 volatile bool color_ready = false;
 int art_offset_x = 0;
 int art_offset_y = 0;
 bool is_sonos_radio_art = false;
 bool pending_is_station_logo = false;
-unsigned long last_source_change_time = 0;
 volatile unsigned long last_queue_fetch_time = 0;
 SemaphoreHandle_t network_mutex = NULL;  // Created in main.cpp
-
-// Color sampling
-uint32_t color_r_sum = 0;
-uint32_t color_g_sum = 0;
-uint32_t color_b_sum = 0;
-int color_sample_count = 0;
+volatile unsigned long last_network_end_ms = 0;  // Last network operation end time (for SDIO cooldown)
 
 // ============================================================================
 // UI State
@@ -171,5 +168,9 @@ lv_obj_t* lbl_latest_version = nullptr;
 lv_obj_t* btn_check_update = nullptr;
 lv_obj_t* btn_install_update = nullptr;
 lv_obj_t* bar_ota_progress = nullptr;
+lv_obj_t* dd_ota_channel = nullptr;
 String latest_version = "";
 String download_url = "";
+int ota_channel = 0;  // 0=Stable, 1=Nightly
+volatile bool ota_in_progress = false;  // Flag to skip non-essential tasks during OTA
+SemaphoreHandle_t ota_progress_mutex = NULL;  // Created in main.cpp

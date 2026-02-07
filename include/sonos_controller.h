@@ -129,7 +129,7 @@ private:
     // Internal methods
     String sendSOAP(const char* service, const char* action, const char* args);
     void getRoomName(SonosDevice* dev);
-    int timeToSeconds(String time);
+    int timeToSeconds(const String& time);
     void notifyUI(UIUpdateType_e type);
     
     // Task functions
@@ -149,6 +149,8 @@ public:
     int discoverDevices();
     String getCachedDeviceIP();
     void cacheDeviceIP(String ip);
+    bool tryLoadCachedDevice();        // Try to load cached device from NVS (fast boot)
+    void cacheSelectedDevice();        // Save selected device to NVS
     int getDeviceCount() { return deviceCount; }
     SonosDevice* getDevice(int index);
     SonosDevice* getCurrentDevice();
@@ -173,6 +175,7 @@ public:
 
     // Helper methods (public for UI)
     String extractXML(const String& xml, const char* tag);
+    String extractXMLRange(const String& xml, const char* tag, int rangeStart, int rangeEnd);
     String decodeHTML(String text);
 
     // Volume control (non-blocking, queued)
@@ -194,6 +197,10 @@ public:
     // Queue access
     QueueHandle_t getCommandQueue() { return commandQueue; }
     QueueHandle_t getUIUpdateQueue() { return uiUpdateQueue; }
+
+    // Task handles for stack monitoring
+    TaskHandle_t getNetworkTaskHandle() { return networkTaskHandle; }
+    TaskHandle_t getPollingTaskHandle() { return pollingTaskHandle; }
     
     // Error handling
     void handleNetworkError(const char* message);
@@ -207,8 +214,8 @@ public:
     bool isDeviceInGroup(int deviceIndex, int coordinatorIndex);  // Check if device is in coordinator's group
 
     // Task management for OTA
-    void suspendTasks();  // Suspend polling/network tasks for OTA
-    void resumeTasks();   // Resume polling/network tasks after OTA
+    void suspendTasks();  // Delete polling/network tasks for OTA (frees WiFi buffers immediately)
+    void resumeTasks();   // Recreate polling/network tasks after OTA (only on failure)
 };
 
 #endif // SONOS_CONTROLLER_H

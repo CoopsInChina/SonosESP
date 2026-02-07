@@ -19,7 +19,7 @@
 #define DEFAULT_WIFI_PASSWORD ""
 
 // Firmware version
-#define FIRMWARE_VERSION "1.1.6"
+#define FIRMWARE_VERSION "1.2.0"
 #define GITHUB_REPO "OpenSurface/SonosESP"
 #define GITHUB_API_URL "https://api.github.com/repos/" GITHUB_REPO "/releases/latest"
 
@@ -67,12 +67,13 @@ extern Preferences wifiPrefs;
 extern int brightness_level;
 extern int brightness_dimmed;
 extern int autodim_timeout;
+extern bool lyrics_enabled;
 extern uint32_t last_touch_time;
 extern bool screen_dimmed;
 
 // Screen objects
 extern lv_obj_t *scr_main, *scr_devices, *scr_queue, *scr_settings;
-extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_display, *scr_ota, *scr_groups;
+extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_display, *scr_ota, *scr_groups, *scr_general;
 
 // Main screen UI elements
 extern lv_obj_t *img_album, *lbl_title, *lbl_artist, *lbl_album, *lbl_time, *lbl_time_remaining;
@@ -104,9 +105,9 @@ extern volatile bool color_ready;
 extern int art_offset_x, art_offset_y;
 extern bool is_sonos_radio_art;
 extern bool pending_is_station_logo;  // True when requesting radio station logo (PNG allowed)
-extern unsigned long last_source_change_time;
 extern volatile unsigned long last_queue_fetch_time;  // Track queue fetches for WiFi coordination
-extern SemaphoreHandle_t network_mutex;  // Serialize network access to prevent SDIO buffer overflow
+extern SemaphoreHandle_t network_mutex;  // Serializes all WiFi/HTTPS operations (SOAP, album art, OTA)
+extern volatile unsigned long last_network_end_ms;  // Last network operation end time (for SDIO cooldown)
 
 // UI state
 extern String ui_title, ui_artist, ui_repeat;
@@ -135,8 +136,12 @@ extern lv_obj_t *lbl_latest_version;
 extern lv_obj_t *btn_check_update;
 extern lv_obj_t *btn_install_update;
 extern lv_obj_t *bar_ota_progress;
+extern lv_obj_t *dd_ota_channel;
 extern String latest_version;
 extern String download_url;
+extern int ota_channel;  // 0=Stable, 1=Nightly
+extern volatile bool ota_in_progress;  // Flag to skip non-essential tasks during OTA
+extern SemaphoreHandle_t ota_progress_mutex;  // Protects OTA progress updates and state
 
 // ============================================================================
 // Function Declarations - Screen Creation
@@ -151,6 +156,7 @@ void createOTAScreen();
 void createSourcesScreen();
 void createBrowseScreen();
 void createGroupsScreen();
+void createGeneralScreen();
 
 // ============================================================================
 // Function Declarations - UI Refresh
@@ -216,8 +222,10 @@ extern volatile bool art_shutdown_requested;
 extern volatile bool art_abort_download;
 void albumArtTask(void *param);
 
+// Sonos task shutdown (for OTA)
+extern volatile bool sonos_tasks_shutdown_requested;
+
 // Radio mode UI adaptation
-bool isCurrentlyRadio();
 void setRadioMode(bool enable);
 void updateRadioModeUI();
 

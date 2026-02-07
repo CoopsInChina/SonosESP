@@ -4,14 +4,16 @@
  */
 
 #include "ui_common.h"
+#include "config.h"
+#include "lyrics.h"
 
 // ============================================================================
 // Brightness Control
 // ============================================================================
 void setBrightness(int level) {
-    brightness_level = constrain(level, 10, 100);  // 10-100% range
+    brightness_level = constrain(level, MIN_BRIGHTNESS, MAX_BRIGHTNESS);
     display_set_brightness(brightness_level);
-    wifiPrefs.putInt("brightness", brightness_level);
+    wifiPrefs.putInt(NVS_KEY_BRIGHTNESS, brightness_level);
 }
 
 void resetScreenTimeout() {
@@ -261,11 +263,11 @@ void ev_wifi_scan(lv_event_t* e) {
         }, LV_EVENT_CLICKED, NULL);
 
         lv_obj_t* icon = lv_label_create(btn);
-        // Signal strength icon
-        if (rssi > -50) lv_label_set_text(icon, LV_SYMBOL_WIFI);
-        else if (rssi > -70) lv_label_set_text(icon, LV_SYMBOL_WIFI);
-        else lv_label_set_text(icon, LV_SYMBOL_WIFI);
-        lv_obj_set_style_text_color(icon, COL_ACCENT, 0);
+        lv_label_set_text(icon, LV_SYMBOL_WIFI);
+        // Signal strength by color: green=strong, gold=medium, red=weak
+        if (rssi > -50) lv_obj_set_style_text_color(icon, lv_color_hex(0x4ECB71), 0);
+        else if (rssi > -70) lv_obj_set_style_text_color(icon, COL_ACCENT, 0);
+        else lv_obj_set_style_text_color(icon, lv_color_hex(0xFF6B6B), 0);
         lv_obj_align(icon, LV_ALIGN_LEFT_MID, 10, 0);
 
         lv_obj_t* ssid = lv_label_create(btn);
@@ -387,11 +389,50 @@ static void checkForUpdates() {
     client.setInsecure();  // Skip certificate validation
 
     HTTPClient http;
-    http.begin(client, "https://api.github.com/repos/" GITHUB_REPO "/releases/latest");
+
+    // Choose API endpoint based on channel
+    const char* apiUrl;
+    if (ota_channel == 0) {
+        // Stable: Get only latest non-prerelease
+        apiUrl = "https://api.github.com/repos/" GITHUB_REPO "/releases/latest";
+        Serial.println("[OTA] Checking Stable channel (latest stable release)");
+    } else {
+        // Nightly: Get recent releases (GitHub API doesn't sort prereleases first)
+        // We'll fetch multiple and filter for the most recent nightly
+        apiUrl = "https://api.github.com/repos/" GITHUB_REPO "/releases?per_page=5";
+        Serial.println("[OTA] Checking Nightly channel (fetching recent releases)");
+    }
+
+    http.begin(client, apiUrl);
     http.addHeader("Accept", "application/vnd.github.v3+json");
     http.setTimeout(15000);
 
+    // CRITICAL: Acquire network_mutex to prevent conflict with album art HTTPS downloads
+    if (!xSemaphoreTake(network_mutex, pdMS_TO_TICKS(NETWORK_MUTEX_TIMEOUT_MS))) {
+        Serial.println("[OTA] Failed to acquire network mutex - check aborted");
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Network busy, try again");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+        }
+        if (btn_check_update) lv_obj_clear_state(btn_check_update, LV_STATE_DISABLED);
+        http.end();
+        return;
+    }
+
+    // CRITICAL: Wait for SDIO cooldown (200ms since last network operation)
+    unsigned long now = millis();
+    unsigned long elapsed = now - last_network_end_ms;
+    if (last_network_end_ms > 0 && elapsed < 200) {
+        vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
+    }
+
     int httpCode = http.GET();
+
+    // Update timestamp before releasing mutex (for SDIO cooldown tracking)
+    last_network_end_ms = millis();
+
+    // Release mutex after GET completes
+    xSemaphoreGive(network_mutex);
 
     if (btn_check_update) lv_obj_clear_state(btn_check_update, LV_STATE_DISABLED);
 
@@ -401,15 +442,124 @@ static void checkForUpdates() {
         DeserializationError error = deserializeJson(doc, payload);
 
         if (!error) {
-            latest_version = doc["tag_name"].as<String>();
-            latest_version.replace("v", "");  // Remove 'v' prefix
+            // For nightly channel, search array for first nightly release
+            JsonVariant releaseObj;
+            if (ota_channel == 1) {
+                // Nightly: response is an array, find LATEST nightly release by published_at
+                if (doc.is<JsonArray>() && doc.size() > 0) {
+                    bool found = false;
+                    String latest_published = "";
 
-            if (lbl_latest_version) {
-                lv_label_set_text_fmt(lbl_latest_version, "Latest: v%s", latest_version.c_str());
+                    for (JsonVariant release : doc.as<JsonArray>()) {
+                        String tag = release["tag_name"].as<String>();
+                        // Check if this is a nightly release
+                        if (tag.indexOf("-nightly") >= 0) {
+                            String published = release["published_at"].as<String>();
+
+                            // Compare published timestamps to find the latest
+                            if (!found || published > latest_published) {
+                                releaseObj = release;
+                                latest_published = published;
+                                found = true;
+                                Serial.printf("[OTA] Found nightly release: %s (published: %s)\n",
+                                            tag.c_str(), published.c_str());
+                            }
+                        }
+                    }
+                    if (!found) {
+                        Serial.println("[OTA] No nightly releases found in recent releases");
+                        if (lbl_ota_status) {
+                            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " No nightly releases found");
+                            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+                        }
+                        if (lbl_latest_version) {
+                            lv_label_set_text(lbl_latest_version, "Latest (Nightly): None");
+                        }
+                        http.end();
+                        return;
+                    }
+                } else {
+                    Serial.println("[OTA] Error: Expected array response for nightly channel");
+                    if (lbl_ota_status) {
+                        lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " No nightly releases found");
+                        lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+                    }
+                    http.end();
+                    return;
+                }
+            } else {
+                // Stable: response is a single object
+                releaseObj = doc.as<JsonVariant>();
             }
 
+            latest_version = releaseObj["tag_name"].as<String>();
+            latest_version.replace("v", "");  // Remove 'v' prefix
+
+            bool isPrerelease = releaseObj["prerelease"].as<bool>();
+            const char* channelName = ota_channel == 0 ? "Stable" : "Nightly";
+
+            // CRITICAL: Filter out nightly versions from Stable channel
+            // A nightly version may have been incorrectly marked as stable (prerelease=false)
+            // Always check the tag name to ensure Stable channel only shows stable versions
+            if (ota_channel == 0 && latest_version.indexOf("-nightly") >= 0) {
+                Serial.printf("[OTA] Skipping nightly version in Stable channel: v%s\n", latest_version.c_str());
+                if (lbl_ota_status) {
+                    lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " No stable releases found");
+                    lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+                }
+                if (lbl_latest_version) {
+                    lv_label_set_text(lbl_latest_version, "Latest (Stable): None");
+                }
+                http.end();
+                return;
+            }
+
+            // CRITICAL: Filter out stable versions from Nightly channel
+            // Nightly channel should only show prerelease versions with "-nightly" in tag
+            if (ota_channel == 1 && latest_version.indexOf("-nightly") < 0) {
+                Serial.printf("[OTA] Skipping stable version in Nightly channel: v%s\n", latest_version.c_str());
+
+                // Check if user is already on a nightly version
+                String current_version = FIRMWARE_VERSION;
+                if (current_version.indexOf("-nightly") >= 0) {
+                    // User is on a nightly, and latest release is stable = user is on latest nightly
+                    if (lbl_ota_status) {
+                        lv_label_set_text(lbl_ota_status, LV_SYMBOL_OK " You're on the latest nightly version!");
+                        lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0x4ECB71), 0);
+                    }
+                    if (lbl_latest_version) {
+                        lv_label_set_text_fmt(lbl_latest_version, "Latest (Nightly): v%s", current_version.c_str());
+                    }
+                    if (btn_install_update) {
+                        lv_obj_add_flag(btn_install_update, LV_OBJ_FLAG_HIDDEN);
+                    }
+                } else {
+                    // User is on stable, no nightlies available
+                    if (lbl_ota_status) {
+                        lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " No nightly releases found");
+                        lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+                    }
+                    if (lbl_latest_version) {
+                        lv_label_set_text(lbl_latest_version, "Latest (Nightly): None");
+                    }
+                }
+                http.end();
+                return;
+            }
+
+            if (lbl_latest_version) {
+                if (isPrerelease && ota_channel == 1) {
+                    lv_label_set_text_fmt(lbl_latest_version, "Latest (%s): v%s (prerelease)", channelName, latest_version.c_str());
+                } else {
+                    lv_label_set_text_fmt(lbl_latest_version, "Latest (%s): v%s", channelName, latest_version.c_str());
+                }
+            }
+
+            Serial.printf("[OTA] Latest %s version: v%s (prerelease: %s)\n",
+                          channelName, latest_version.c_str(), isPrerelease ? "yes" : "no");
+
             // Find firmware.bin asset
-            JsonArray assets = doc["assets"];
+            JsonArray assets = releaseObj["assets"];
             for (JsonObject asset : assets) {
                 String name = asset["name"].as<String>();
                 if (name.indexOf("firmware.bin") >= 0) {
@@ -462,32 +612,50 @@ static void performOTAUpdate() {
         return;
     }
 
-    // CRITICAL: Stop album art task gracefully to prevent WiFi buffer overflow during OTA
-    // Album art downloads can compete with OTA firmware download for WiFi TX/RX buffers
-    if (albumArtTaskHandle) {
-        Serial.println("[OTA] Requesting album art shutdown");
-        art_shutdown_requested = true;
+    Serial.println("[OTA] ========================================");
+    Serial.println("[OTA] PREPARING FOR FIRMWARE UPDATE");
+    Serial.println("[OTA] ========================================");
 
-        // Wait for task to finish current operation and exit (max 3 seconds)
+    // Stop album art task and WAIT for it to finish
+    if (albumArtTaskHandle) {
+        art_abort_download = true;     // Abort any active download immediately
+        art_shutdown_requested = true;  // Request clean shutdown
+        Serial.println("[OTA] Aborting album art downloads and waiting for task to stop...");
+
+        // Wait up to 10 seconds for clean exit
         int wait_count = 0;
-        while (albumArtTaskHandle != NULL && wait_count < 30) {
+        while (albumArtTaskHandle != NULL && wait_count < 100) {
             vTaskDelay(pdMS_TO_TICKS(100));
             wait_count++;
         }
 
         if (albumArtTaskHandle == NULL) {
-            Serial.println("[OTA] Album art task stopped successfully");
+            Serial.println("[OTA] ✓ Album art stopped");
         } else {
-            Serial.println("[OTA] Album art task did not stop - forcing delete");
+            Serial.println("[OTA] Force killing album art task");
             vTaskDelete(albumArtTaskHandle);
             albumArtTaskHandle = NULL;
         }
     }
 
-    // CRITICAL: Suspend Sonos polling tasks to prevent WiFi buffer overflow during OTA
-    // Sonos SOAP requests can compete with OTA firmware download for WiFi TX/RX buffers
-    Serial.println("[OTA] Suspending Sonos tasks");
+    // Suspend Sonos tasks during OTA (critical for Radio playback)
+    Serial.println("[OTA] Suspending Sonos tasks...");
     sonos.suspendTasks();
+
+    // Set flag to skip non-essential tasks during OTA (protected by mutex)
+    if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
+        ota_in_progress = true;
+        xSemaphoreGive(ota_progress_mutex);
+    }
+
+    // Small delay to allow SSL cleanup in album art task to complete
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    Serial.printf("[OTA] Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
+
+    // Optimize WiFi for OTA download
+    WiFi.setAutoReconnect(false);
+    WiFi.setSleep(false);
 
     // Disable buttons during update
     if (btn_check_update) lv_obj_add_state(btn_check_update, LV_STATE_DISABLED);
@@ -516,14 +684,49 @@ static void performOTAUpdate() {
     client.setInsecure();  // Skip certificate validation
 
     HTTPClient http;
+    // Log memory before starting HTTPS connection
+    Serial.println("[OTA] ========================================");
+    Serial.println("[OTA] STARTING OTA DOWNLOAD");
+    Serial.printf("[OTA] Before connection - Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
+    Serial.printf("[OTA] Before connection - Free heap: %d bytes\n", ESP.getFreeHeap());
+    Serial.println("[OTA] ========================================");
+
     http.begin(client, download_url);
     http.setTimeout(60000);  // 60 second timeout for large files
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
+    Serial.printf("[OTA] After begin() - Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
+
     int httpCode = http.GET();
+
+    Serial.printf("[OTA] After GET() - Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
+    Serial.printf("[OTA] HTTP code: %d\n", httpCode);
 
     if (httpCode == 200) {
         int contentLength = http.getSize();
+
+        // OPTIMIZATION: Pre-download validation
+        if (contentLength <= 0 || contentLength > 10 * 1024 * 1024) {  // Max 10MB
+            Serial.printf("[OTA] Invalid firmware size: %d bytes\n", contentLength);
+            if (lbl_ota_status) {
+                lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Invalid firmware file");
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+            }
+            http.end();
+            WiFi.setAutoReconnect(true);
+            if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
+                ota_in_progress = false;
+                xSemaphoreGive(ota_progress_mutex);
+            }
+            sonos.resumeTasks();  // Resume suspended tasks
+            if (albumArtTaskHandle == NULL) {
+                art_shutdown_requested = false;
+                xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
+            }
+            return;
+        }
+
+        Serial.printf("[OTA] Firmware size: %d bytes (%.1f KB)\n", contentLength, contentLength / 1024.0);
         bool canBegin = Update.begin(contentLength);
 
         if (canBegin) {
@@ -533,55 +736,58 @@ static void performOTAUpdate() {
             lv_tick_inc(10);
             lv_refr_now(NULL);
 
-            // Dim backlight heavily during download to hide flash write flicker
-            int original_brightness = brightness_level;
-            display_set_brightness(5);  // 5% brightness during download
-
             WiFiClient* stream = http.getStreamPtr();
             size_t written = 0;
-            // Use 16KB buffer to reduce flash write frequency and minimize blue flicker
-            // (Each flash write disables external memory cache, causing RGB LCD PSRAM access issues)
-            static uint8_t buff[16384];  // 16KB - reduces ~500KB firmware to ~31 flash writes instead of 500
             int lastPercent = -1;
             uint32_t lastUIUpdate = millis();
+
+            // Buffer size and yield interval defined in config.h
+            static uint8_t buff[OTA_BUFFER_SIZE];
+            int writeCount = 0;
+
+            Serial.printf("[OTA] Starting download - Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
 
             while (http.connected() && (written < contentLength)) {
                 size_t available = stream->available();
                 if (available) {
-                    size_t toRead = available < sizeof(buff) ? available : sizeof(buff);
-                    int c = stream->readBytes(buff, toRead);
-                    written += Update.write(buff, c);
+                    size_t toRead = (available < sizeof(buff)) ? available : sizeof(buff);
+                    int bytesRead = stream->readBytes(buff, toRead);
+                    written += Update.write(buff, bytesRead);
+                    writeCount++;
+
+                    // Yield periodically
+                    if (writeCount >= OTA_YIELD_EVERY_WRITES) {
+                        taskYIELD();
+                        writeCount = 0;
+                    }
 
                     int percent = (written * 100) / contentLength;
-                    uint32_t now = millis();
 
-                    // Update UI every 1000ms (1 second) to reduce flicker
-                    if (now - lastUIUpdate >= 1000 && percent != lastPercent) {
+                    // Update UI every 1%
+                    if (percent != lastPercent) {
                         if (lbl_ota_progress) {
                             lv_label_set_text_fmt(lbl_ota_progress, "%d%%", percent);
                         }
                         if (bar_ota_progress) {
                             lv_bar_set_value(bar_ota_progress, percent, LV_ANIM_OFF);
                         }
-                        if (lbl_ota_status) {
-                            lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Downloading firmware...");
-                        }
                         lastPercent = percent;
 
-                        // Force display refresh
-                        lv_tick_inc(now - lastUIUpdate);
-                        lv_refr_now(NULL);
-                        lastUIUpdate = now;
+                        // Refresh display every 10%
+                        if (percent % 10 == 0) {
+                            uint32_t now = millis();
+                            lv_tick_inc(now - lastUIUpdate);
+                            lv_refr_now(NULL);
+                            lastUIUpdate = now;
+                            Serial.printf("[OTA] %d%% - Free DMA heap: %d bytes\n", percent, heap_caps_get_free_size(MALLOC_CAP_DMA));
+                        }
                     }
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(1));
                 }
-                // Small yield to prevent watchdog and allow display updates
-                vTaskDelay(pdMS_TO_TICKS(1));
             }
 
             if (written == contentLength) {
-                // Restore brightness after download
-                display_set_brightness(original_brightness);
-
                 // DOWNLOAD COMPLETE - Show 100%
                 if (bar_ota_progress) {
                     lv_bar_set_value(bar_ota_progress, 100, LV_ANIM_OFF);
@@ -675,16 +881,27 @@ static void performOTAUpdate() {
     if (btn_check_update) lv_obj_clear_state(btn_check_update, LV_STATE_DISABLED);
     if (btn_install_update) lv_obj_clear_state(btn_install_update, LV_STATE_DISABLED);
 
+    // Re-enable WiFi features (if update failed - successful update will restart device)
+    WiFi.setAutoReconnect(true);
+    Serial.println("[OTA] WiFi auto-reconnect re-enabled");
+
+    // Re-enable loop functions (if update failed - successful update will restart device)
+    if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
+        ota_in_progress = false;
+        xSemaphoreGive(ota_progress_mutex);
+    }
+    Serial.println("[OTA] Non-essential tasks re-enabled (processUpdates, checkAutoDim)");
+
+    // Resume Sonos background tasks (if update failed - successful update will restart device)
+    Serial.println("[OTA] Resuming Sonos background tasks");
+    sonos.resumeTasks();
+
     // Restart album art task (if update failed - successful update will restart device)
     if (albumArtTaskHandle == NULL) {
         Serial.println("[OTA] Restarting album art task");
         art_shutdown_requested = false;
-        xTaskCreatePinnedToCore(albumArtTask, "Art", 8192, NULL, 1, &albumArtTaskHandle, 0);
+        xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
     }
-
-    // Resume Sonos tasks (if update failed - successful update will restart device)
-    Serial.println("[OTA] Resuming Sonos tasks");
-    sonos.resumeTasks();
 }
 
 void ev_check_update(lv_event_t* e) {
@@ -777,6 +994,18 @@ void updateUI() {
         ui_artist = d->currentArtist;
     }
 
+    // Fetch synced lyrics when track changes
+    static String lyrics_last_track = "";
+    String lyrics_key = d->currentArtist + "|" + d->currentTrack;
+    if (lyrics_key != lyrics_last_track && d->currentTrack.length() > 0) {
+        lyrics_last_track = lyrics_key;
+        if (lyrics_enabled && !d->isRadioStation && d->durationSeconds > 0) {
+            requestLyrics(d->currentArtist, d->currentTrack, d->durationSeconds);
+        } else {
+            clearLyrics();
+        }
+    }
+
     // Album name (below album art)
     static String ui_album_name = "";
     if (d->currentAlbum != ui_album_name) {
@@ -809,6 +1038,9 @@ void updateUI() {
     // Progress slider
     if (!dragging_prog && d->durationSeconds > 0)
         lv_slider_set_value(slider_progress, (d->relTimeSeconds * 100) / d->durationSeconds, LV_ANIM_OFF);
+
+    // Update synced lyrics display
+    updateLyricsDisplay(d->relTimeSeconds);
 
     // Play/Pause button
     if (d->isPlaying != ui_playing) {
@@ -945,7 +1177,6 @@ void updateUI() {
     if (uri_changed && d->currentURI.length() > 0) {
         if (actual_source_change) {
             Serial.printf("[ART] SOURCE CHANGE: %s -> %s\n", last_source_prefix.c_str(), current_source_prefix.c_str());
-            last_source_change_time = millis();  // Track when SOURCE changed for WiFi buffer management
             last_source_prefix = current_source_prefix;
             // CRITICAL: Abort any in-progress album art download immediately
             // This prevents Spotify download from blocking YouTube Music download

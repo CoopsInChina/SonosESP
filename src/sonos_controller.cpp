@@ -1,16 +1,24 @@
 /**
- * Sonos Controller - Optimized for ESP32-S3
+ * Sonos Controller - Optimized for ESP32-P4
  * Uses HTTPClient for better connection handling
  */
 
 #include "sonos_controller.h"
+#include "config.h"
 #include <HTTPClient.h>
 #include "lvgl.h"
-#include "ui_common.h"  // For last_queue_fetch_time
+#include "ui_common.h"
 
-// Debounce for button presses
+// Command debounce tracking
 static uint32_t lastCommandTime = 0;
-static const uint32_t DEBOUNCE_MS = 400;
+
+// Encode string for XML/SOAP transport
+static void encodeXML(String& s) {
+    s.replace("&", "&amp;");
+    s.replace("<", "&lt;");
+    s.replace(">", "&gt;");
+    s.replace("\"", "&quot;");
+}
 
 SonosController::SonosController() {
     deviceCount = 0;
@@ -32,20 +40,22 @@ SonosController::~SonosController() {
 
 void SonosController::begin() {
     deviceMutex = xSemaphoreCreateMutex();
-    commandQueue = xQueueCreate(10, sizeof(CommandRequest_t));
-    uiUpdateQueue = xQueueCreate(20, sizeof(UIUpdate_t));
+    commandQueue = xQueueCreate(SONOS_CMD_QUEUE_SIZE, sizeof(CommandRequest_t));
+    uiUpdateQueue = xQueueCreate(SONOS_UI_QUEUE_SIZE, sizeof(UIUpdate_t));
     prefs.begin("sonos", false);
-    Serial.printf("[SONOS] SonosController initialized\n");
+    Serial.println("[SONOS] SonosController initialized");
 }
 
 void SonosController::startTasks() {
     if (networkTaskHandle == NULL) {
-        xTaskCreatePinnedToCore(networkTaskFunction, "SonosNet", 6144, this, 2, &networkTaskHandle, 1);  // Priority 2 (lower), reduced stack
+        xTaskCreatePinnedToCore(networkTaskFunction, "SonosNet", SONOS_NET_TASK_STACK,
+                                this, SONOS_NET_TASK_PRIORITY, &networkTaskHandle, 1);
     }
     if (pollingTaskHandle == NULL) {
-        xTaskCreatePinnedToCore(pollingTaskFunction, "SonosPoll", 4096, this, 3, &pollingTaskHandle, 1);  // Priority 3, reduced stack
+        xTaskCreatePinnedToCore(pollingTaskFunction, "SonosPoll", SONOS_POLL_TASK_STACK,
+                                this, SONOS_POLL_TASK_PRIORITY, &pollingTaskHandle, 1);
     }
-    Serial.printf("[SONOS] Background tasks started\n");
+    Serial.println("[SONOS] Background tasks started");
 }
 
 // ============================================================================
@@ -72,6 +82,9 @@ void SonosController::selectDevice(int index) {
         currentDeviceIndex = index;
         devices[index].connected = true;
         Serial.printf("[SONOS] Selected: %s\n", devices[index].ip.toString().c_str());
+
+        // Cache the selected device for fast boot next time
+        cacheSelectedDevice();
     }
 }
 
@@ -144,6 +157,13 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
         return "";
     }
 
+    // CRITICAL: Wait for SDIO cooldown (200ms since last network operation)
+    unsigned long now = millis();
+    unsigned long elapsed = now - last_network_end_ms;
+    if (last_network_end_ms > 0 && elapsed < 200) {
+        vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
+    }
+
     int code = http.POST(body);
     String response = "";  // Keep String for return value (used by callers)
 
@@ -181,6 +201,9 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
 
     http.end();
 
+    // Update timestamp before releasing mutex (for SDIO cooldown tracking)
+    last_network_end_ms = millis();
+
     // Release network mutex after HTTP operation completes
     xSemaphoreGive(network_mutex);
 
@@ -190,42 +213,55 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
 // ============================================================================
 // Helpers
 // ============================================================================
-int SonosController::timeToSeconds(String time) {
+int SonosController::timeToSeconds(const String& time) {
+    if (time.length() == 0) return 0;
+
     int h = 0, m = 0, s = 0;
     int c1 = time.indexOf(':');
-    int c2 = time.indexOf(':', c1 + 1);
-    
+    int c2 = (c1 > 0) ? time.indexOf(':', c1 + 1) : -1;
+
     if (c1 > 0 && c2 > c1) {
-        h = time.substring(0, c1).toInt();
-        m = time.substring(c1 + 1, c2).toInt();
-        s = time.substring(c2 + 1).toInt();
+        // Format: H:MM:SS or HH:MM:SS
+        h = constrain(time.substring(0, c1).toInt(), 0, 99);
+        m = constrain(time.substring(c1 + 1, c2).toInt(), 0, 59);
+        s = constrain(time.substring(c2 + 1).toInt(), 0, 59);
     } else if (c1 > 0) {
-        m = time.substring(0, c1).toInt();
-        s = time.substring(c1 + 1).toInt();
+        // Format: M:SS or MM:SS
+        m = constrain(time.substring(0, c1).toInt(), 0, 59);
+        s = constrain(time.substring(c1 + 1).toInt(), 0, 59);
     }
     return h * 3600 + m * 60 + s;
 }
 
+// Extract XML tag value - searches entire string
 String SonosController::extractXML(const String& xml, const char* tag) {
-    String startTag = "<" + String(tag) + ">";
-    String endTag = "</" + String(tag) + ">";
-    
-    int start = xml.indexOf(startTag);
-    if (start < 0) {
+    return extractXMLRange(xml, tag, 0, xml.length());
+}
+
+// Extract XML tag value within a range - avoids substring copy for nested searches
+String SonosController::extractXMLRange(const String& xml, const char* tag, int rangeStart, int rangeEnd) {
+    // Build tags on stack to avoid heap allocations
+    char startTag[64], endTag[64], attrTag[64];
+    snprintf(startTag, sizeof(startTag), "<%s>", tag);
+    snprintf(endTag, sizeof(endTag), "</%s>", tag);
+    snprintf(attrTag, sizeof(attrTag), "<%s ", tag);
+
+    // Search only within the specified range
+    int start = xml.indexOf(startTag, rangeStart);
+    if (start < 0 || start >= rangeEnd) {
         // Try with attributes
-        startTag = "<" + String(tag) + " ";
-        start = xml.indexOf(startTag);
-        if (start < 0) return "";
+        start = xml.indexOf(attrTag, rangeStart);
+        if (start < 0 || start >= rangeEnd) return "";
         start = xml.indexOf(">", start);
-        if (start < 0) return "";
+        if (start < 0 || start >= rangeEnd) return "";
         start++;
     } else {
-        start += startTag.length();
+        start += strlen(startTag);
     }
-    
+
     int end = xml.indexOf(endTag, start);
-    if (end < 0) return "";
-    
+    if (end < 0 || end > rangeEnd) return "";
+
     return xml.substring(start, end);
 }
 
@@ -303,7 +339,7 @@ void SonosController::pause() {
 
 void SonosController::next() {
     uint32_t now = millis();
-    if (now - lastCommandTime < DEBOUNCE_MS) return;
+    if (now - lastCommandTime < SONOS_DEBOUNCE_MS) return;
     lastCommandTime = now;
     
     CommandRequest_t cmd = { CMD_NEXT, 0 };
@@ -312,7 +348,7 @@ void SonosController::next() {
 
 void SonosController::previous() {
     uint32_t now = millis();
-    if (now - lastCommandTime < DEBOUNCE_MS) return;
+    if (now - lastCommandTime < SONOS_DEBOUNCE_MS) return;
     lastCommandTime = now;
     
     CommandRequest_t cmd = { CMD_PREV, 0 };
@@ -410,22 +446,18 @@ bool SonosController::saveCurrentTrack(const char* playlistName) {
             int endPos = queueDIDL.indexOf("</item>", pos) + 7;
             String itemXML = queueDIDL.substring(pos, endPos);
 
+            // Extract URI before encoding
+            int resStart = itemXML.indexOf("<res");
+            if (resStart >= 0) {
+                int resEnd = itemXML.indexOf("</res>", resStart);
+                int resContentStart = itemXML.indexOf(">", resStart) + 1;
+                trackURI = itemXML.substring(resContentStart, resEnd);
+            }
+
             // Re-encode for SOAP
-            itemXML.replace("&", "&amp;");
-            itemXML.replace("<", "&lt;");
-            itemXML.replace(">", "&gt;");
-            itemXML.replace("\"", "&quot;");
+            encodeXML(itemXML);
 
             trackMetadata = itemXML;
-
-            // Also extract URI
-            String decodedItem = queueDIDL.substring(pos, endPos);
-            int resStart = decodedItem.indexOf("<res");
-            if (resStart >= 0) {
-                int resEnd = decodedItem.indexOf("</res>", resStart);
-                int resContentStart = decodedItem.indexOf(">", resStart) + 1;
-                trackURI = decodedItem.substring(resContentStart, resEnd);
-            }
 
             Serial.printf("[FAV] Found track metadata, length: %d\n", trackMetadata.length());
             Serial.printf("[FAV] Track URI: %s\n", trackURI.c_str());
@@ -556,10 +588,7 @@ bool SonosController::playURI(const char* uri, const char* metadata) {
     }
 
     String metaEncoded = String(metadata);
-    metaEncoded.replace("&", "&amp;");
-    metaEncoded.replace("<", "&lt;");
-    metaEncoded.replace(">", "&gt;");
-    metaEncoded.replace("\"", "&quot;");
+    encodeXML(metaEncoded);
 
     // Use static buffer to avoid String concatenation
     static char args[1024];
@@ -650,10 +679,7 @@ bool SonosController::playContainer(const char* containerURI, const char* metada
     String metaDecoded = decodeHTMLEntities(String(metadata));
 
     String metaEncoded = metaDecoded;
-    metaEncoded.replace("&", "&amp;");
-    metaEncoded.replace("<", "&lt;");
-    metaEncoded.replace(">", "&gt;");
-    metaEncoded.replace("\"", "&quot;");
+    encodeXML(metaEncoded);
 
     Serial.printf("[CONTAINER] Metadata: %s\n", metaDecoded.c_str());
 
@@ -1095,24 +1121,18 @@ bool SonosController::updateQueue() {
         while (dev->queueSize < QUEUE_ITEMS_MAX && pos < (int)result.length()) {
             int itemStart = result.indexOf("<item", pos);
             if (itemStart < 0) break;
-            
+
             int itemEnd = result.indexOf("</item>", itemStart);
             if (itemEnd < 0) break;
-            
-            String item = result.substring(itemStart, itemEnd + 7);
-            
-            String title = extractXML(item, "dc:title");
-            String artist = extractXML(item, "dc:creator");
-            String album = extractXML(item, "upnp:album");
-            String artUrl = extractXML(item, "upnp:albumArtURI");
-            
-            dev->queue[dev->queueSize].title = decodeHTML(title);
-            dev->queue[dev->queueSize].artist = decodeHTML(artist);
-            dev->queue[dev->queueSize].album = decodeHTML(album);
-            dev->queue[dev->queueSize].albumArtURL = decodeHTML(artUrl);
+
+            // Use range-based extraction to avoid creating substring copy
+            dev->queue[dev->queueSize].title = decodeHTML(extractXMLRange(result, "dc:title", itemStart, itemEnd));
+            dev->queue[dev->queueSize].artist = decodeHTML(extractXMLRange(result, "dc:creator", itemStart, itemEnd));
+            dev->queue[dev->queueSize].album = decodeHTML(extractXMLRange(result, "upnp:album", itemStart, itemEnd));
+            dev->queue[dev->queueSize].albumArtURL = decodeHTML(extractXMLRange(result, "upnp:albumArtURI", itemStart, itemEnd));
             dev->queue[dev->queueSize].trackNumber = dev->queueSize + 1;
             dev->queueSize++;
-            
+
             pos = itemEnd + 7;
         }
         
@@ -1131,9 +1151,10 @@ bool SonosController::updateQueue() {
 void SonosController::processCommand(CommandRequest_t* cmd) {
     SonosDevice* dev = getCurrentDevice();
     if (!dev) return;
-    
-    String args;
-    
+
+    // Static buffer to avoid heap allocation for each command
+    static char args[256];
+
     switch (cmd->type) {
         case CMD_PLAY:
             sendSOAP("AVTransport", "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>");
@@ -1143,7 +1164,7 @@ void SonosController::processCommand(CommandRequest_t* cmd) {
             }
             notifyUI(UPDATE_PLAYBACK_STATE);
             break;
-            
+
         case CMD_PAUSE:
             sendSOAP("AVTransport", "Pause", "<InstanceID>0</InstanceID>");
             if (xSemaphoreTake(deviceMutex, pdMS_TO_TICKS(50))) {
@@ -1152,73 +1173,77 @@ void SonosController::processCommand(CommandRequest_t* cmd) {
             }
             notifyUI(UPDATE_PLAYBACK_STATE);
             break;
-            
+
         case CMD_NEXT:
             sendSOAP("AVTransport", "Next", "<InstanceID>0</InstanceID>");
             vTaskDelay(pdMS_TO_TICKS(200));
             updateTrackInfo();
             break;
-            
+
         case CMD_PREV:
             sendSOAP("AVTransport", "Previous", "<InstanceID>0</InstanceID>");
             vTaskDelay(pdMS_TO_TICKS(200));
             updateTrackInfo();
             break;
-            
+
         case CMD_SET_VOLUME:
-            args = "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>" + 
-                   String(cmd->value) + "</DesiredVolume>";
-            sendSOAP("RenderingControl", "SetVolume", args.c_str());
+            snprintf(args, sizeof(args),
+                "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredVolume>%d</DesiredVolume>",
+                cmd->value);
+            sendSOAP("RenderingControl", "SetVolume", args);
             if (xSemaphoreTake(deviceMutex, pdMS_TO_TICKS(50))) {
                 dev->volume = cmd->value;
                 xSemaphoreGive(deviceMutex);
             }
             break;
-            
+
         case CMD_SET_MUTE:
-            args = "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>" + 
-                   String(cmd->value) + "</DesiredMute>";
-            sendSOAP("RenderingControl", "SetMute", args.c_str());
+            snprintf(args, sizeof(args),
+                "<InstanceID>0</InstanceID><Channel>Master</Channel><DesiredMute>%d</DesiredMute>",
+                cmd->value);
+            sendSOAP("RenderingControl", "SetMute", args);
             if (xSemaphoreTake(deviceMutex, pdMS_TO_TICKS(50))) {
                 dev->isMuted = (cmd->value == 1);
                 xSemaphoreGive(deviceMutex);
             }
             break;
-            
+
         case CMD_SET_SHUFFLE: {
-            String mode = (cmd->value == 1) ? "SHUFFLE" : "NORMAL";
-            args = "<InstanceID>0</InstanceID><NewPlayMode>" + mode + "</NewPlayMode>";
-            sendSOAP("AVTransport", "SetPlayMode", args.c_str());
+            const char* mode = (cmd->value == 1) ? "SHUFFLE" : "NORMAL";
+            snprintf(args, sizeof(args),
+                "<InstanceID>0</InstanceID><NewPlayMode>%s</NewPlayMode>", mode);
+            sendSOAP("AVTransport", "SetPlayMode", args);
             updateTransportSettings();
             break;
         }
-            
+
         case CMD_SET_REPEAT: {
-            String mode = "NORMAL";
+            const char* mode = "NORMAL";
             if (cmd->value == 1) mode = "REPEAT_ONE";
             else if (cmd->value == 2) mode = "REPEAT_ALL";
-            args = "<InstanceID>0</InstanceID><NewPlayMode>" + mode + "</NewPlayMode>";
-            sendSOAP("AVTransport", "SetPlayMode", args.c_str());
+            snprintf(args, sizeof(args),
+                "<InstanceID>0</InstanceID><NewPlayMode>%s</NewPlayMode>", mode);
+            sendSOAP("AVTransport", "SetPlayMode", args);
             updateTransportSettings();
             break;
         }
-            
+
         case CMD_SEEK: {
             int h = cmd->value / 3600;
             int m = (cmd->value % 3600) / 60;
             int s = cmd->value % 60;
-            char t[16];
-            snprintf(t, sizeof(t), "%02d:%02d:%02d", h, m, s);
-            args = "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>" + String(t) + "</Target>";
-            sendSOAP("AVTransport", "Seek", args.c_str());
+            snprintf(args, sizeof(args),
+                "<InstanceID>0</InstanceID><Unit>REL_TIME</Unit><Target>%02d:%02d:%02d</Target>",
+                h, m, s);
+            sendSOAP("AVTransport", "Seek", args);
             break;
         }
-        
+
         case CMD_PLAY_QUEUE_ITEM: {
-            // Seek to queue position and play
-            // Use TRACK_NR seek mode to jump to specific track
-            args = "<InstanceID>0</InstanceID><Unit>TRACK_NR</Unit><Target>" + String(cmd->value) + "</Target>";
-            sendSOAP("AVTransport", "Seek", args.c_str());
+            snprintf(args, sizeof(args),
+                "<InstanceID>0</InstanceID><Unit>TRACK_NR</Unit><Target>%d</Target>",
+                cmd->value);
+            sendSOAP("AVTransport", "Seek", args);
             vTaskDelay(pdMS_TO_TICKS(100));
             sendSOAP("AVTransport", "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>");
             if (xSemaphoreTake(deviceMutex, pdMS_TO_TICKS(50))) {
@@ -1229,7 +1254,7 @@ void SonosController::processCommand(CommandRequest_t* cmd) {
             updateTrackInfo();
             break;
         }
-            
+
         default:
             break;
     }
@@ -1241,10 +1266,18 @@ void SonosController::processCommand(CommandRequest_t* cmd) {
 void SonosController::networkTaskFunction(void* param) {
     SonosController* ctrl = (SonosController*)param;
     CommandRequest_t cmd;
-    
+
     Serial.printf("[SONOS] Network task started\n");
-    
+
     while (1) {
+        // Check if shutdown requested (for OTA update)
+        if (sonos_tasks_shutdown_requested) {
+            Serial.println("[SONOS] Network task shutdown requested - exiting");
+            ctrl->networkTaskHandle = NULL;
+            vTaskDelete(NULL);
+            return;
+        }
+
         if (xQueueReceive(ctrl->commandQueue, &cmd, pdMS_TO_TICKS(20))) {
             ctrl->processCommand(&cmd);
         }
@@ -1267,6 +1300,14 @@ void SonosController::pollingTaskFunction(void* param) {
     static String previousURI = "";
 
     while (1) {
+        // Check if shutdown requested (for OTA update)
+        if (sonos_tasks_shutdown_requested) {
+            Serial.println("[SONOS] Polling task shutdown requested - exiting");
+            ctrl->pollingTaskHandle = NULL;
+            vTaskDelete(NULL);
+            return;
+        }
+
         SonosDevice* dev = ctrl->getCurrentDevice();
 
         // Auto-reconnect when disconnected
@@ -1299,10 +1340,10 @@ void SonosController::pollingTaskFunction(void* param) {
                 vTaskDelay(pdMS_TO_TICKS(200));  // Allow network to recover after GetMediaInfo
             }
 
-            // Media info for radio (station name) periodic refresh every 15 seconds
-            if (tick % 50 == 0 && dev->isRadioStation) {
+            // Media info for radio (station name) periodic refresh
+            if (tick % POLL_MEDIA_INFO_MODULO == 0 && dev->isRadioStation) {
                 ctrl->updateMediaInfo();
-                vTaskDelay(pdMS_TO_TICKS(200));  // Allow network to recover
+                vTaskDelay(pdMS_TO_TICKS(200));
             }
 
             // Clear previous URI when not on radio
@@ -1310,25 +1351,25 @@ void SonosController::pollingTaskFunction(void* param) {
                 previousURI = "";
             }
 
-            // Volume every 1.5 seconds (5 * 300ms)
-            if (tick % 5 == 0) {
+            // Volume polling
+            if (tick % POLL_VOLUME_MODULO == 0) {
                 ctrl->updateVolume();
             }
 
-            // Transport settings every 3 seconds (10 * 300ms)
-            if (tick % 10 == 0) {
+            // Transport settings polling
+            if (tick % POLL_TRANSPORT_MODULO == 0) {
                 ctrl->updateTransportSettings();
             }
 
-            // Queue every 15 seconds (50 * 300ms) - skip for radio
-            if (tick % 50 == 0 && !dev->isRadioStation) {
+            // Queue polling - skip for radio stations
+            if (tick % POLL_QUEUE_MODULO == 0 && !dev->isRadioStation) {
                 ctrl->updateQueue();
             }
 
             tick++;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(300));  // 300ms base interval (faster polling)
+        vTaskDelay(pdMS_TO_TICKS(POLL_BASE_INTERVAL_MS));
     }
 }
 
@@ -1342,27 +1383,39 @@ void SonosController::resetErrorCount() {
 }
 
 void SonosController::suspendTasks() {
-    // Suspend Sonos polling/network tasks for OTA to prevent WiFi buffer overflow
-    if (pollingTaskHandle) {
-        Serial.println("[SONOS] Suspending polling task for OTA");
-        vTaskSuspend(pollingTaskHandle);
+    // Request clean shutdown and WAIT for tasks to exit
+    // This ensures HTTPClient destructors run and SDIO buffers are freed properly
+    Serial.println("[SONOS] Requesting background tasks to stop...");
+    sonos_tasks_shutdown_requested = true;
+
+    // Wait up to 5 seconds for tasks to exit cleanly
+    int wait_count = 0;
+    while ((pollingTaskHandle != NULL || networkTaskHandle != NULL) && wait_count < 50) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        wait_count++;
     }
-    if (networkTaskHandle) {
-        Serial.println("[SONOS] Suspending network task for OTA");
-        vTaskSuspend(networkTaskHandle);
+
+    // Force-delete any tasks that didn't exit in time
+    if (pollingTaskHandle != NULL) {
+        Serial.println("[SONOS] WARNING: Force-deleting polling task (didn't exit in time)");
+        vTaskDelete(pollingTaskHandle);
+        pollingTaskHandle = NULL;
     }
+    if (networkTaskHandle != NULL) {
+        Serial.println("[SONOS] WARNING: Force-deleting network task (didn't exit in time)");
+        vTaskDelete(networkTaskHandle);
+        networkTaskHandle = NULL;
+    }
+
+    Serial.println("[SONOS] ✓ Background tasks stopped, WiFi buffers freed");
 }
 
 void SonosController::resumeTasks() {
-    // Resume Sonos tasks after OTA
-    if (pollingTaskHandle) {
-        Serial.println("[SONOS] Resuming polling task");
-        vTaskResume(pollingTaskHandle);
-    }
-    if (networkTaskHandle) {
-        Serial.println("[SONOS] Resuming network task");
-        vTaskResume(networkTaskHandle);
-    }
+    // Recreate tasks after failed OTA (successful OTA reboots device)
+    Serial.println("[SONOS] Recreating background tasks");
+    sonos_tasks_shutdown_requested = false;  // Reset shutdown flag
+    startTasks();  // This will recreate polling and network tasks
+    Serial.println("[SONOS] ✓ Background tasks recreated");
 }
 
 // ============================================================================

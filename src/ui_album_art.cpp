@@ -4,6 +4,7 @@
  */
 
 #include "ui_common.h"
+#include "config.h"
 #include <PNGdec.h>
 
 // ESP32-P4 Hardware JPEG Decoder
@@ -22,49 +23,70 @@ static uint16_t* jpeg_decode_buffer = nullptr;  // Destination for JPEG/PNG deco
 // PNG decoder instance
 static PNG png;
 
-// Apply dominant color instantly to both panels and update button feedback colors
-void setBackgroundColor(uint32_t hex_color) {
-    lv_color_t color = lv_color_hex(hex_color);
-    if (panel_art) {
-        lv_obj_set_style_bg_color(panel_art, color, LV_PART_MAIN);
-    }
-    if (panel_right) {
-        lv_obj_set_style_bg_color(panel_right, color, LV_PART_MAIN);
-    }
+// Smooth background color transition state
+static uint32_t current_bg_color = 0x1a1a1a;
+static uint32_t target_bg_color = 0x1a1a1a;
 
-    // Make progress bar indicator AND knob match dominant color (but brighter - 2x)
-    uint8_t r = ((hex_color >> 16) & 0xFF);
-    uint8_t g = ((hex_color >> 8) & 0xFF);
-    uint8_t b = (hex_color & 0xFF);
+// Interpolate a single 8-bit channel
+static inline uint8_t lerp8(uint8_t a, uint8_t b, int t) {
+    return (uint8_t)(a + ((int)(b - a) * t) / 255);
+}
 
-    // Brighten by 2x (capped at 255)
-    r = min(r * 2, 255);
-    g = min(g * 2, 255);
-    b = min(b * 2, 255);
+// Apply interpolated color to all UI elements (called by LVGL animation engine)
+static void color_anim_cb(void* var, int32_t t) {
+    uint8_t r = lerp8((current_bg_color >> 16) & 0xFF, (target_bg_color >> 16) & 0xFF, t);
+    uint8_t g = lerp8((current_bg_color >> 8) & 0xFF, (target_bg_color >> 8) & 0xFF, t);
+    uint8_t b = lerp8(current_bg_color & 0xFF, target_bg_color & 0xFF, t);
 
-    lv_color_t bright_color = lv_color_make(r, g, b);
+    lv_color_t color = lv_color_make(r, g, b);
+    if (panel_art) lv_obj_set_style_bg_color(panel_art, color, LV_PART_MAIN);
+    if (panel_right) lv_obj_set_style_bg_color(panel_right, color, LV_PART_MAIN);
+
+    // Brighten by 3x (capped at 255) with minimum floor of 80
+    uint8_t br = (uint8_t)max(min((int)r * 3, 255), 80);
+    uint8_t bg = (uint8_t)max(min((int)g * 3, 255), 80);
+    uint8_t bb = (uint8_t)max(min((int)b * 3, 255), 80);
+    lv_color_t bright = lv_color_make(br, bg, bb);
 
     if (slider_progress) {
-        lv_obj_set_style_bg_color(slider_progress, bright_color, LV_PART_INDICATOR);  // Bar
-        lv_obj_set_style_bg_color(slider_progress, bright_color, LV_PART_KNOB);  // Circle/dot
+        lv_obj_set_style_bg_color(slider_progress, bright, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(slider_progress, bright, LV_PART_KNOB);
     }
-
-    // Update all button pressed states to use dominant color (same brightness as progress bar)
-    if (btn_play) lv_obj_set_style_bg_color(btn_play, bright_color, LV_STATE_PRESSED);
+    if (btn_play) lv_obj_set_style_bg_color(btn_play, bright, LV_STATE_PRESSED);
     if (btn_prev) {
-        lv_obj_set_style_bg_color(btn_prev, bright_color, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(btn_prev, bright, LV_STATE_PRESSED);
         lv_obj_t* ico = lv_obj_get_child(btn_prev, 0);
-        if (ico) lv_obj_set_style_text_color(ico, bright_color, LV_STATE_PRESSED);
+        if (ico) lv_obj_set_style_text_color(ico, bright, LV_STATE_PRESSED);
     }
     if (btn_next) {
-        lv_obj_set_style_bg_color(btn_next, bright_color, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(btn_next, bright, LV_STATE_PRESSED);
         lv_obj_t* ico = lv_obj_get_child(btn_next, 0);
-        if (ico) lv_obj_set_style_text_color(ico, bright_color, LV_STATE_PRESSED);
+        if (ico) lv_obj_set_style_text_color(ico, bright, LV_STATE_PRESSED);
     }
-    if (btn_mute) lv_obj_set_style_bg_color(btn_mute, bright_color, LV_STATE_PRESSED);
-    if (btn_shuffle) lv_obj_set_style_bg_color(btn_shuffle, bright_color, LV_STATE_PRESSED);
-    if (btn_repeat) lv_obj_set_style_bg_color(btn_repeat, bright_color, LV_STATE_PRESSED);
-    if (btn_queue) lv_obj_set_style_bg_color(btn_queue, bright_color, LV_STATE_PRESSED);
+    if (btn_mute) lv_obj_set_style_bg_color(btn_mute, bright, LV_STATE_PRESSED);
+    if (btn_shuffle) lv_obj_set_style_bg_color(btn_shuffle, bright, LV_STATE_PRESSED);
+    if (btn_repeat) lv_obj_set_style_bg_color(btn_repeat, bright, LV_STATE_PRESSED);
+    if (btn_queue) lv_obj_set_style_bg_color(btn_queue, bright, LV_STATE_PRESSED);
+}
+
+// Save final color as new baseline when animation completes
+static void color_anim_done_cb(lv_anim_t* a) {
+    current_bg_color = target_bg_color;
+}
+
+// Smoothly transition background color over 500ms
+void setBackgroundColor(uint32_t hex_color) {
+    target_bg_color = hex_color;
+
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, &target_bg_color);
+    lv_anim_set_values(&anim, 0, 255);
+    lv_anim_set_duration(&anim, 300);
+    lv_anim_set_exec_cb(&anim, color_anim_cb);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_out);
+    lv_anim_set_completed_cb(&anim, color_anim_done_cb);
+    lv_anim_start(&anim);
 }
 
 // Sample pixels for dominant color extraction
@@ -265,11 +287,9 @@ void albumArtTask(void* param) {
         Serial.println("[ART] Hardware JPEG decoder initialized!");
     }
 
-    // HTTPClient for album art
-    HTTPClient http;
-    WiFiClientSecure secure_client;
-    secure_client.setInsecure();  // Skip certificate validation for album art hosts
     static char url[512];
+    static char last_failed_url[512] = "";  // Track failed URLs to prevent infinite retry
+    static int consecutive_failures = 0;
 
     // Temporary buffer for decoded full-size image
     uint16_t* decoded_buffer = nullptr;
@@ -277,7 +297,8 @@ void albumArtTask(void* param) {
     while (1) {
         // Check if shutdown requested (for OTA update)
         if (art_shutdown_requested) {
-            Serial.println("[ART] Shutdown requested - exiting task");
+            Serial.println("[ART] Shutdown requested");
+            Serial.printf("[ART] Shutdown complete - Free DMA: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
             albumArtTaskHandle = NULL;  // Clear handle before deleting
             vTaskDelete(NULL);  // Delete self
             return;
@@ -303,34 +324,53 @@ void albumArtTask(void* param) {
             // Simple WiFi check - don't try to download if not connected
             if (WiFi.status() != WL_CONNECTED) {
                 Serial.println("[ART] WiFi not connected, skipping");
-                vTaskDelay(pdMS_TO_TICKS(1000));
+                // Mark as done to prevent retry loop when WiFi is down
+                if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                    last_art_url = url;
+                    xSemaphoreGive(art_mutex);
+                }
+                vTaskDelay(pdMS_TO_TICKS(2000));  // Wait longer for WiFi recovery
                 continue;
             }
 
             // Detect if URL is from Sonos device itself (e.g., /getaa for YouTube Music)
             // These don't need per-chunk mutex since Sonos HTTP server serializes requests anyway
             bool isFromSonosDevice = (strstr(url, ":1400/") != nullptr);
-
             bool use_https = (strncmp(url, "https://", 8) == 0);
-            if (use_https) {
-                http.begin(secure_client, url);
-            } else {
-                http.begin(url);
-            }
-            http.setTimeout(10000);
 
-            // REVERT TO v1.1.1: Hold network_mutex for ENTIRE download (no per-chunk)
-            // This prevents SDIO crashes but blocks SOAP during art download
-            if (!xSemaphoreTake(network_mutex, pdMS_TO_TICKS(NETWORK_MUTEX_TIMEOUT_ART_MS))) {
-                Serial.println("[ART] Failed to acquire network mutex - skipping download");
-                http.end();
-                continue;
-            }
+            // Scoped HTTP/HTTPS download - ensures TLS session is freed after each download
+            {
+                HTTPClient http;
+                WiFiClientSecure secure_client;  // Only used if HTTPS, destroyed at end of scope
+                bool mutex_acquired = false;
 
-            int code = http.GET();
-            // Keep mutex locked for entire download
+                if (use_https) {
+                    secure_client.setInsecure();  // Skip certificate validation
+                    http.begin(secure_client, url);
+                } else {
+                    http.begin(url);
+                }
+                http.setTimeout(10000);
 
-            if (code == 200) {
+                // REVERT TO v1.1.1: Hold network_mutex for ENTIRE download (no per-chunk)
+                // This prevents SDIO crashes but blocks SOAP during art download
+                mutex_acquired = xSemaphoreTake(network_mutex, pdMS_TO_TICKS(NETWORK_MUTEX_TIMEOUT_ART_MS));
+                if (!mutex_acquired) {
+                    Serial.println("[ART] Failed to acquire network mutex - skipping download");
+                }
+
+                if (mutex_acquired) {
+                    // CRITICAL: Wait for SDIO cooldown (200ms since last network operation)
+                    unsigned long now = millis();
+                    unsigned long elapsed = now - last_network_end_ms;
+                    if (last_network_end_ms > 0 && elapsed < 200) {
+                        vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
+                    }
+
+                    int code = http.GET();
+                    // Keep mutex locked for entire download
+
+                    if (code == 200) {
                 int len = http.getSize();
                 const size_t max_art_size = MAX_ART_SIZE;
                 const bool len_known = (len > 0);
@@ -391,32 +431,15 @@ void albumArtTask(void* param) {
                             readSuccess = false;
                         }
 
-                        // CRITICAL: Drain connection if aborted to prevent WiFi SDIO buffer overflow
-                        if (!readSuccess && len_known && bytesRead < len) {
-                            Serial.printf("[ART] Draining aborted connection: %d/%d bytes remaining\n", len - bytesRead, len);
-                            uint8_t drainBuf[512];
-                            size_t remaining = len - bytesRead;
-                            size_t drained = 0;
-                            unsigned long startDrain = millis();
-
-                            while (stream->connected() && drained < remaining) {
-                                size_t available = stream->available();
-                                if (available > 0) {
-                                    size_t toRead = min((size_t)512, available);
-                                    toRead = min(toRead, remaining - drained);
-                                    size_t read = stream->readBytes(drainBuf, toRead);
-                                    drained += read;
-                                } else {
-                                    vTaskDelay(pdMS_TO_TICKS(10));
-                                }
-                                // Abort drain if taking too long (max 2 seconds)
-                                if (millis() - startDrain > 2000) {
-                                    Serial.println("[ART] Drain timeout - closing connection");
-                                    break;
-                                }
-                            }
-                            Serial.printf("[ART] Drained %d bytes - waiting 2s for HTTPS cleanup\n", (int)drained);
-                            vTaskDelay(pdMS_TO_TICKS(2000));  // Wait for HTTPS/TLS resources to free
+                        // CRITICAL: If aborted, just close connection immediately
+                        // Don't try to drain - it overwhelms ESP32-C6 SDIO WiFi buffer
+                        // The HTTP client will handle cleanup when we call http.end()
+                        if (!readSuccess) {
+                            Serial.println("[ART] Download aborted - closing connection (no drain)");
+                            // Force close the stream to stop incoming data
+                            stream->stop();
+                            // Give SDIO driver time to flush any pending RX data
+                            vTaskDelay(pdMS_TO_TICKS(100));
                         }
 
                         Serial.printf("[ART] Album art read: %d bytes (len_known=%d)\n", (int)bytesRead, len_known ? 1 : 0);
@@ -544,6 +567,9 @@ void albumArtTask(void* param) {
                                                 color_ready = true;
                                                 xSemaphoreGive(art_mutex);
                                             }
+                                            // Reset failure counter on success
+                                            consecutive_failures = 0;
+                                            last_failed_url[0] = '\0';
                                         }
                                     } else {
                                         Serial.printf("[ART] Failed to allocate %d bytes for decoded image\n", (int)decoded_size);
@@ -638,6 +664,9 @@ void albumArtTask(void* param) {
                                                 color_ready = true;
                                                 xSemaphoreGive(art_mutex);
                                             }
+                                            // Reset failure counter on success
+                                            consecutive_failures = 0;
+                                            last_failed_url[0] = '\0';
                                         } else {
                                             Serial.printf("[ART] HW JPEG decode failed: %d\n", ret);
                                             heap_caps_free(hw_out_buf);
@@ -661,48 +690,73 @@ void albumArtTask(void* param) {
                     }
                 } else if (len >= (int)max_art_size) {
                     Serial.printf("[ART] Album art too large: %d bytes (max %dKB)\n", len, (int)(max_art_size/1000));
-                    // Must drain the connection to prevent WiFi RX buffer overflow
-                    // Server is already sending data even though we're rejecting it
+                    // Don't drain - just close the connection immediately
+                    // Draining overwhelms ESP32-C6 SDIO WiFi buffer and causes crashes
                     WiFiClient* stream = http.getStreamPtr();
-                    uint8_t drainBuf[512];
-                    int drained = 0;
-                    unsigned long startDrain = millis();
-                    while (stream->connected() && drained < len) {
-                        size_t available = stream->available();
-                        if (available > 0) {
-                            size_t toRead = min((size_t)512, available);
-                            toRead = min(toRead, (size_t)(len - drained));
-                            size_t read = stream->readBytes(drainBuf, toRead);
-                            drained += read;
-                        } else {
-                            vTaskDelay(pdMS_TO_TICKS(10));
-                        }
-                        // Abort drain if taking too long (max 3 seconds)
-                        if (millis() - startDrain > 3000) {
-                            Serial.println("[ART] Drain timeout - closing connection");
-                            break;
-                        }
-                    }
-                    Serial.printf("[ART] Drained %d/%d bytes from connection\n", drained, len);
+                    stream->stop();  // Force close to stop incoming data
+                    vTaskDelay(pdMS_TO_TICKS(100));  // Let SDIO driver flush
+                    Serial.println("[ART] Connection closed (oversized image)");
                     // Mark as done to prevent retry loop
                     if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                         last_art_url = url;
                         xSemaphoreGive(art_mutex);
                     }
-                } else {
-                    Serial.printf("[ART] Invalid album art size: %d bytes\n", len);
+                    } else {
+                        Serial.printf("[ART] Invalid album art size: %d bytes\n", len);
+                    }
+                    } else {
+                        // Translate HTTP error codes to human-readable messages
+                        const char* error_msg = "Unknown error";
+                        switch (code) {
+                            case -1: error_msg = "Connection failed"; break;
+                            case -2: error_msg = "Send header failed"; break;
+                            case -3: error_msg = "Send payload failed"; break;
+                            case -4: error_msg = "Not connected"; break;
+                            case -5: error_msg = "Connection lost/timeout"; break;
+                            case -6: error_msg = "No stream"; break;
+                            case -8: error_msg = "Too less RAM"; break;
+                            case -11: error_msg = "Read timeout"; break;
+                            default: break;
+                        }
+                        Serial.printf("[ART] HTTP %d: %s\n", code, error_msg);
+
+                        // Track consecutive failures to prevent infinite retry loop
+                        if (strcmp(url, last_failed_url) == 0) {
+                            consecutive_failures++;
+                        } else {
+                            strncpy(last_failed_url, url, sizeof(last_failed_url) - 1);
+                            last_failed_url[sizeof(last_failed_url) - 1] = '\0';
+                            consecutive_failures = 1;
+                        }
+
+                        // After 5 consecutive failures for same URL, mark as done to stop retrying
+                        if (consecutive_failures >= 5) {
+                            Serial.printf("[ART] Failed %d times, giving up on this URL\n", consecutive_failures);
+                            if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                last_art_url = url;  // Mark as done
+                                xSemaphoreGive(art_mutex);
+                            }
+                            consecutive_failures = 0;  // Reset for next URL
+                            last_failed_url[0] = '\0';
+                        }
+                    }
+
+                    // Update timestamp before releasing mutex (for SDIO cooldown tracking)
+                    last_network_end_ms = millis();
+
+                    // Release network_mutex after entire download completes
+                    xSemaphoreGive(network_mutex);
                 }
-            } else {
-                Serial.printf("[ART] HTTP error %d fetching album art\n", code);
-            }
-            http.end();
 
-            // Release network_mutex after entire download completes
-            xSemaphoreGive(network_mutex);
+                http.end();
 
-            // CRITICAL: Wait for WiFi buffers to stabilize after any download
-            // Prevents cumulative buffer exhaustion from rapid consecutive downloads + SOAP polling
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            } // http and secure_client destroyed here - TLS session freed
+
+            // CRITICAL: Wait for TLS cleanup to complete (mbedTLS resources, SSL session cache)
+            vTaskDelay(pdMS_TO_TICKS(100));
+
+            // Wait for WiFi buffers to stabilize after download
+            vTaskDelay(pdMS_TO_TICKS(500));
         }
         vTaskDelay(pdMS_TO_TICKS(100));  // Check for new URLs
     }
