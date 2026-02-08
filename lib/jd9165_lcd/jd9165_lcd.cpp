@@ -50,7 +50,23 @@ void jd9165_lcd::example_bsp_enable_dsi_phy_power()
 #endif
 }
 
-v_
+void jd9165_lcd::example_bsp_init_lcd_backlight()
+{
+#if EXAMPLE_PIN_NUM_BK_LIGHT >= 0
+    gpio_config_t bk_gpio_config = {
+        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT,
+        .mode = GPIO_MODE_OUTPUT
+        };
+    ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
+#endif
+}
+
+void jd9165_lcd::example_bsp_set_lcd_backlight(uint32_t level)
+{
+#if EXAMPLE_PIN_NUM_BK_LIGHT >= 0
+    gpio_set_level(EXAMPLE_PIN_NUM_BK_LIGHT, level);
+#endif
+}
 
 void jd9165_lcd::begin()
 {   
