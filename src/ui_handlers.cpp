@@ -246,11 +246,15 @@ void ev_wifi_scan(lv_event_t* e) {
         int32_t rssi = WiFi.RSSI(i);
 
         lv_obj_t* btn = lv_btn_create(list_wifi);
-        lv_obj_set_size(btn, 340, 50);
+        int btn_width = SCALE(340);
+        int btn_height = SCALE(50);
+        lv_obj_set_size(btn, btn_width, btn_height);
         lv_obj_set_user_data(btn, (void*)(intptr_t)i);
         lv_obj_set_style_bg_color(btn, COL_CARD, 0);
         lv_obj_set_style_bg_color(btn, COL_BTN_PRESSED, LV_STATE_PRESSED);
-        lv_obj_set_style_radius(btn, 10, 0);
+        
+        int btn_radius = SCALE(10);
+        lv_obj_set_style_radius(btn, btn_radius, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, [](lv_event_t* e) {
             int idx = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
@@ -266,14 +270,20 @@ void ev_wifi_scan(lv_event_t* e) {
         else if (rssi > -70) lv_label_set_text(icon, LV_SYMBOL_WIFI);
         else lv_label_set_text(icon, LV_SYMBOL_WIFI);
         lv_obj_set_style_text_color(icon, COL_ACCENT, 0);
-        lv_obj_align(icon, LV_ALIGN_LEFT_MID, 10, 0);
+        
+        int icon_x = SCALE(10);
+        lv_obj_align(icon, LV_ALIGN_LEFT_MID, icon_x, 0);
 
         lv_obj_t* ssid = lv_label_create(btn);
         lv_label_set_text(ssid, wifiNetworks[i].c_str());
         lv_obj_set_style_text_color(ssid, COL_TEXT, 0);
-        lv_obj_set_width(ssid, 260);
+        
+        int ssid_width = SCALE(260);
+        lv_obj_set_width(ssid, ssid_width);
         lv_label_set_long_mode(ssid, LV_LABEL_LONG_DOT);
-        lv_obj_align(ssid, LV_ALIGN_LEFT_MID, 40, 0);
+        
+        int ssid_x = SCALE(40);
+        lv_obj_align(ssid, LV_ALIGN_LEFT_MID, ssid_x, 0);
     }
     WiFi.scanDelete();
 }
@@ -696,7 +706,7 @@ void ev_install_update(lv_event_t* e) {
 }
 
 // ============================================================================
-// UI Update Function
+// UI Update Function 
 // ============================================================================
 void updateUI() {
     SonosDevice* d = sonos.getCurrentDevice();
@@ -819,7 +829,7 @@ void updateUI() {
         if (d->isPlaying) {
             lv_obj_center(lbl);  // Pause is centered
         } else {
-            lv_obj_align(lbl, LV_ALIGN_CENTER, 2, 0);  // Play needs 2px right offset
+            lv_obj_align(lbl, LV_ALIGN_CENTER, SCALE(2), 0);  // Play needs 2px right offset (scaled)
         }
 
         ui_playing = d->isPlaying;

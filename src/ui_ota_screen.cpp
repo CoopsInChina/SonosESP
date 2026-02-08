@@ -14,10 +14,14 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
 void createOTAScreen() {
     scr_ota = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_ota, lv_color_hex(0x121212), 0);
+    lv_obj_set_size(scr_ota, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
 
     // Create sidebar and get content area (Update is index 5)
     lv_obj_t* content = createSettingsSidebar(scr_ota, 5);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+    
+    int content_width = SCALE(720);
+    lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
 
     // Title
     lv_obj_t* lbl_title = lv_label_create(content);
@@ -28,12 +32,19 @@ void createOTAScreen() {
 
     // Version info card
     lv_obj_t* card_version = lv_obj_create(content);
-    lv_obj_set_size(card_version, lv_pct(100), 100);
-    lv_obj_set_pos(card_version, 0, 40);
+    int card_width = SCALE(720);
+    int card_height = SCALE(100);
+    int card_y = SCALE(40);
+    lv_obj_set_size(card_version, card_width, card_height);
+    lv_obj_set_pos(card_version, 0, card_y);
     lv_obj_set_style_bg_color(card_version, lv_color_hex(0x2A2A2A), 0);
-    lv_obj_set_style_radius(card_version, 12, 0);
+    
+    int card_radius = SCALE(12);
+    lv_obj_set_style_radius(card_version, card_radius, 0);
     lv_obj_set_style_border_width(card_version, 0, 0);
-    lv_obj_set_style_pad_all(card_version, 16, 0);
+    
+    int card_pad = SCALE(16);
+    lv_obj_set_style_pad_all(card_version, card_pad, 0);
     lv_obj_clear_flag(card_version, LV_OBJ_FLAG_SCROLLABLE);
 
     lbl_current_version = lv_label_create(card_version);
@@ -46,45 +57,58 @@ void createOTAScreen() {
     lv_label_set_text(lbl_latest_version, "Latest: Checking...");
     lv_obj_set_style_text_font(lbl_latest_version, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(lbl_latest_version, COL_TEXT2, 0);
-    lv_obj_align(lbl_latest_version, LV_ALIGN_TOP_LEFT, 0, 30);
+    lv_obj_align(lbl_latest_version, LV_ALIGN_TOP_LEFT, 0, SCALE(30));
 
     // Status label
     lbl_ota_status = lv_label_create(content);
-    lv_obj_set_pos(lbl_ota_status, 0, 160);
+    int status_y = SCALE(160);
+    lv_obj_set_pos(lbl_ota_status, 0, status_y);
     lv_label_set_text(lbl_ota_status, "Tap 'Check for Updates' to begin");
     lv_obj_set_style_text_color(lbl_ota_status, COL_TEXT2, 0);
     lv_obj_set_style_text_font(lbl_ota_status, &lv_font_montserrat_14, 0);
-    lv_obj_set_width(lbl_ota_status, lv_pct(100));
+    lv_obj_set_width(lbl_ota_status, SCALE(720));
     lv_label_set_long_mode(lbl_ota_status, LV_LABEL_LONG_WRAP);
 
     // Progress label
     lbl_ota_progress = lv_label_create(content);
-    lv_obj_set_pos(lbl_ota_progress, 0, 190);
+    int progress_y = SCALE(190);
+    lv_obj_set_pos(lbl_ota_progress, 0, progress_y);
     lv_label_set_text(lbl_ota_progress, "");
     lv_obj_set_style_text_color(lbl_ota_progress, COL_ACCENT, 0);
     lv_obj_set_style_text_font(lbl_ota_progress, &lv_font_montserrat_16, 0);
 
     // Visual progress bar (hidden by default)
     bar_ota_progress = lv_bar_create(content);
-    lv_obj_set_size(bar_ota_progress, lv_pct(100), 16);
-    lv_obj_set_pos(bar_ota_progress, 0, 220);
+    int bar_width = SCALE(720);
+    int bar_height = SCALE(16);
+    int bar_y = SCALE(220);
+    lv_obj_set_size(bar_ota_progress, bar_width, bar_height);
+    lv_obj_set_pos(bar_ota_progress, 0, bar_y);
     lv_bar_set_range(bar_ota_progress, 0, 100);
     lv_bar_set_value(bar_ota_progress, 0, LV_ANIM_OFF);
     lv_obj_set_style_bg_color(bar_ota_progress, lv_color_hex(0x333333), LV_PART_MAIN);
     lv_obj_set_style_bg_opa(bar_ota_progress, LV_OPA_COVER, LV_PART_MAIN);
-    lv_obj_set_style_radius(bar_ota_progress, 8, LV_PART_MAIN);
+    
+    int bar_radius = SCALE(8);
+    lv_obj_set_style_radius(bar_ota_progress, bar_radius, LV_PART_MAIN);
     lv_obj_set_style_bg_color(bar_ota_progress, COL_ACCENT, LV_PART_INDICATOR);
     lv_obj_set_style_bg_opa(bar_ota_progress, LV_OPA_COVER, LV_PART_INDICATOR);
-    lv_obj_set_style_radius(bar_ota_progress, 8, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(bar_ota_progress, bar_radius, LV_PART_INDICATOR);
     lv_obj_add_flag(bar_ota_progress, LV_OBJ_FLAG_HIDDEN);
 
     // Check for Updates button
     btn_check_update = lv_btn_create(content);
-    lv_obj_set_size(btn_check_update, 280, 50);
-    lv_obj_set_pos(btn_check_update, 0, 260);
+    int btn_width = SCALE(280);
+    int btn_height = SCALE(50);
+    int btn_y = SCALE(260);
+    lv_obj_set_size(btn_check_update, btn_width, btn_height);
+    lv_obj_set_pos(btn_check_update, 0, btn_y);
     lv_obj_set_style_bg_color(btn_check_update, COL_ACCENT, 0);
-    lv_obj_set_style_radius(btn_check_update, 12, 0);
+    
+    int btn_radius = SCALE(12);
+    lv_obj_set_style_radius(btn_check_update, btn_radius, 0);
     lv_obj_add_event_cb(btn_check_update, ev_check_update, LV_EVENT_CLICKED, NULL);
+    
     lv_obj_t* lbl_check = lv_label_create(btn_check_update);
     lv_label_set_text(lbl_check, LV_SYMBOL_REFRESH " Check for Updates");
     lv_obj_set_style_text_color(lbl_check, lv_color_hex(0x000000), 0);
@@ -93,11 +117,13 @@ void createOTAScreen() {
 
     // Install Update button (hidden by default)
     btn_install_update = lv_btn_create(content);
-    lv_obj_set_size(btn_install_update, 280, 50);
-    lv_obj_set_pos(btn_install_update, 310, 260);
+    int install_btn_x = SCALE(310);
+    lv_obj_set_size(btn_install_update, btn_width, btn_height);
+    lv_obj_set_pos(btn_install_update, install_btn_x, btn_y);
     lv_obj_set_style_bg_color(btn_install_update, lv_color_hex(0x4ECB71), 0);
-    lv_obj_set_style_radius(btn_install_update, 12, 0);
+    lv_obj_set_style_radius(btn_install_update, btn_radius, 0);
     lv_obj_add_event_cb(btn_install_update, ev_install_update, LV_EVENT_CLICKED, NULL);
+    
     lv_obj_t* lbl_install = lv_label_create(btn_install_update);
     lv_label_set_text(lbl_install, LV_SYMBOL_DOWNLOAD " Install Update");
     lv_obj_set_style_text_color(lbl_install, lv_color_hex(0x000000), 0);
@@ -107,12 +133,13 @@ void createOTAScreen() {
 
     // Info text
     lv_obj_t* lbl_info = lv_label_create(content);
+    int info_y = SCALE(330);
+    lv_obj_set_pos(lbl_info, 0, info_y);
     lv_label_set_text(lbl_info,
         LV_SYMBOL_WARNING "  Do not disconnect power during update!\n"
         "Updates are fetched from GitHub releases automatically.");
     lv_obj_set_style_text_color(lbl_info, COL_TEXT2, 0);
     lv_obj_set_style_text_font(lbl_info, &lv_font_montserrat_12, 0);
-    lv_obj_set_width(lbl_info, lv_pct(100));
+    lv_obj_set_width(lbl_info, SCALE(720));
     lv_label_set_long_mode(lbl_info, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(lbl_info, 0, 330);
 }

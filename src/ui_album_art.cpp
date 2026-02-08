@@ -26,6 +26,7 @@ static PNG png;
 void setBackgroundColor(uint32_t hex_color) {
     lv_color_t color = lv_color_hex(hex_color);
     if (panel_art) {
+        lv_obj_set_size(panel_art, SCALE(420), SCALE(420));  // Scaled album art panel
         lv_obj_set_style_bg_color(panel_art, color, LV_PART_MAIN);
     }
     if (panel_right) {
@@ -45,6 +46,7 @@ void setBackgroundColor(uint32_t hex_color) {
     lv_color_t bright_color = lv_color_make(r, g, b);
 
     if (slider_progress) {
+        lv_obj_set_size(slider_progress, SCALE(300), SCALE(8));
         lv_obj_set_style_bg_color(slider_progress, bright_color, LV_PART_INDICATOR);  // Bar
         lv_obj_set_style_bg_color(slider_progress, bright_color, LV_PART_KNOB);  // Circle/dot
     }
@@ -248,6 +250,7 @@ static String prepareAlbumArtURL(const String& rawUrl) {
 }
 
 void albumArtTask(void* param) {
+    size_t art_buffer_size = SCALE(420) * SCALE(420) * 2;  // 538×538 RGB565
     art_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
     art_temp_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
     if (!art_buffer || !art_temp_buffer) { vTaskDelete(NULL); return; }

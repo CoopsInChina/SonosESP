@@ -4,14 +4,25 @@
 #include <Arduino.h>
 #include "lvgl.h"
 
+
+// Code out the Original Screen , will reintegrate later 
 // Display specifications for ESP32-P4 JC4880P443C (MIPI DSI)
 // App sees LANDSCAPE 800x480, driver rotates to panel's portrait orientation
-#define DISPLAY_WIDTH  800  // Landscape width (app sees this)
-#define DISPLAY_HEIGHT 480  // Landscape height (app sees this)
-#define DISPLAY_BUF_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT)  // Full frame buffer
+// #define DISPLAY_WIDTH  800  // Landscape width (app sees this)
+// #define DISPLAY_HEIGHT 480  // Landscape height (app sees this)
+// #define DISPLAY_BUF_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT)  // Full frame buffer
+
+
+#define DISPLAY_WIDTH 1024
+#define DISPLAY_HEIGHT 600
+#define DISPLAY_MODEL "JC1060P470C"
+#define DISPLAY_BUF_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT) 
+
 
 // ST7701 LCD Controller pins
-#define LCD_RST     5  // Reset GPIO for ST7701
+//#define LCD_RST     5  // Reset GPIO for ST7701
+#define LCD_RST     23  // Reset GPIO for jd9165
+
 
 // Note: MIPI DSI interface uses dedicated hardware pins on ESP32-P4
 // No manual pin configuration needed for DSI data/clock

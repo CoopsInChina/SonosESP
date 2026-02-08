@@ -24,7 +24,7 @@
 #define GITHUB_API_URL "https://api.github.com/repos/" GITHUB_REPO "/releases/latest"
 
 // Album art configuration
-#define ART_SIZE 420
+#define ART_SIZE SCALE(420)        // 420 → ~538 pixels (1.28x scale)
 #define MAX_ART_SIZE 280000          // 280KB max - allows Spotify 640x640 images
 #define ART_CHUNK_SIZE 4096          // 4KB chunks for HTTP downloads
 #define ART_READ_TIMEOUT_MS 5000     // 5 second timeout for image downloads
@@ -40,6 +40,20 @@
 #define TASK_PRIORITY_NETWORK 2      // Medium priority
 #define TASK_PRIORITY_POLLING 3      // High priority - UI responsiveness
 #define TASK_STACK_ALBUM_ART 8192    // 8KB stack for album art task
+
+
+// Scaling Inputs 
+#define SCREEN_WIDTH_ORIGINAL 800
+#define SCREEN_HEIGHT_ORIGINAL 480
+#define SCREEN_WIDTH_TARGET 1024
+#define SCREEN_HEIGHT_TARGET 600
+
+// Scaling factors
+#define SCALE_X (SCREEN_WIDTH_TARGET / (float)SCREEN_WIDTH_ORIGINAL)    // 1.28
+#define SCALE_Y (SCREEN_HEIGHT_TARGET / (float)SCREEN_HEIGHT_ORIGINAL)  // 1.25
+
+// Helper macro to scale values
+#define SCALE(value) ((int)((value) * SCALE_X))  // Use X scaling for most elements
 
 // Sonos logo declaration
 LV_IMG_DECLARE(Sonos_idnu60bqes_1);

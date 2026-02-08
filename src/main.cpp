@@ -6,6 +6,8 @@
 
 #include "ui_common.h"
 
+
+
 // Sonos logo
 LV_IMG_DECLARE(Sonos_idnu60bqes_1);
 
@@ -51,6 +53,7 @@ void setup() {
     // Set initial brightness
     setBrightness(brightness_level);
     Serial.printf("[DISPLAY] Initial brightness: %d%%\n", brightness_level);
+
 
     // Show boot screen with Sonos logo
     lv_obj_t* boot_scr = lv_obj_create(NULL);
@@ -188,3 +191,5 @@ void loop() {
     checkAutoDim();  // Check if screen should be dimmed
     vTaskDelay(pdMS_TO_TICKS(3));  // More efficient than delay() - allows other tasks to run
 }
+
+

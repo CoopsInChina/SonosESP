@@ -17,6 +17,13 @@
 #define LV_COLOR_CHROMA_KEY lv_color_hex(0x00FF00)
 
 /**********************
+ * COLOR SETTINGS specific to jd9165
+ *********************/
+
+#define LV_COLOR_MIX_ROUND_OFS (LV_COLOR_DEPTH == 32 ? 0: 128)
+#define LV_COLOR_SCREEN_TRANSP 0
+
+/**********************
  * MEMORY SETTINGS (ESP32-P4 with 32MB PSRAM)
  *********************/
 #define LV_MEM_CUSTOM 1                         // Custom memory allocation
@@ -30,9 +37,9 @@
 /**********************
  * DISPLAY SETTINGS
  *********************/
-#define LV_DISPLAY_DEF_WIDTH  800              // Horizontal resolution
-#define LV_DISPLAY_DEF_HEIGHT 480              // Vertical resolution
-#define LV_DPI_DEF 130                         // DPI for 4.3" display
+#define LV_HOR_RES_MAX 1024   // ✅ Correct macro for horizontal (X) resolution
+#define LV_VER_RES_MAX 600    // ✅ Correct macro for vertical (Y) resolution
+#define LV_DPI_DEF 173                         // DPI for 7" display
 
 /**********************
  * RENDERING PERFORMANCE
