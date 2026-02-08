@@ -234,13 +234,36 @@ static String prepareAlbumArtURL(const String& rawUrl) {
     // Deezer: 1000x1000 → 400x400
     if (fetchUrl.indexOf("dzcdn.net") != -1) {
         fetchUrl.replace("/1000x1000-", "/400x400-");
-        Serial.println("[ART] Deezer - reduced to 400x400");
     }
     // TuneIn (cdn-profiles.tunein.com): keep original size
     // Note: logoq is 145x145, logog is 600x600 (too big for PNG decode)
     if (fetchUrl.indexOf("cdn-profiles.tunein.com") != -1 && fetchUrl.indexOf("?d=") != -1) {
         fetchUrl.replace("?d=1024", "?d=400");
         fetchUrl.replace("?d=600", "?d=400");
+    }
+    // Spotify: Keep original resolution (640x640) since HTTP is lightweight
+    // No size reduction needed - HTTP has no TLS overhead!
+
+    // CRITICAL FIX: Downgrade HTTPS → HTTP for public CDN URLs
+    // Removes ALL TLS overhead (handshake, encryption, DMA memory)
+    // This is the KEY to SDIO stability - no TLS = no crashes!
+    // Public album art doesn't need encryption
+    if (fetchUrl.startsWith("https://")) {
+        // Spotify CDN
+        if (fetchUrl.indexOf("i.scdn.co") != -1 ||
+            fetchUrl.indexOf("mosaic.scdn.co") != -1) {
+            fetchUrl.replace("https://", "http://");
+        }
+        // Deezer CDN
+        else if (fetchUrl.indexOf("dzcdn.net") != -1) {
+            fetchUrl.replace("https://", "http://");
+        }
+        // TuneIn CDN
+        else if (fetchUrl.indexOf("cdn-profiles.tunein.com") != -1 ||
+                 fetchUrl.indexOf("cdn-radiotime-logos.tunein.com") != -1) {
+            fetchUrl.replace("https://", "http://");
+        }
+        // Add other public CDNs as needed
     }
 
     // Sonos getaa URLs can contain unescaped '?' and '&' in the u= parameter; encode them only
@@ -341,31 +364,44 @@ void albumArtTask(void* param) {
             // Scoped HTTP/HTTPS download - ensures TLS session is freed after each download
             {
                 HTTPClient http;
-                WiFiClientSecure secure_client;  // Only used if HTTPS, destroyed at end of scope
+                WiFiClientSecure secure_client;
                 bool mutex_acquired = false;
 
-                if (use_https) {
-                    secure_client.setInsecure();  // Skip certificate validation
-                    http.begin(secure_client, url);
-                } else {
-                    http.begin(url);
-                }
-                http.setTimeout(10000);
-
-                // REVERT TO v1.1.1: Hold network_mutex for ENTIRE download (no per-chunk)
-                // This prevents SDIO crashes but blocks SOAP during art download
+                // Acquire network mutex FIRST, then set up HTTP (all network activity under mutex)
                 mutex_acquired = xSemaphoreTake(network_mutex, pdMS_TO_TICKS(NETWORK_MUTEX_TIMEOUT_ART_MS));
                 if (!mutex_acquired) {
                     Serial.println("[ART] Failed to acquire network mutex - skipping download");
                 }
 
                 if (mutex_acquired) {
-                    // CRITICAL: Wait for SDIO cooldown (200ms since last network operation)
+                    // CRITICAL: Wait for general SDIO cooldown (200ms since last network op)
                     unsigned long now = millis();
                     unsigned long elapsed = now - last_network_end_ms;
                     if (last_network_end_ms > 0 && elapsed < 200) {
                         vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
                     }
+
+                    // CRITICAL: Wait for HTTPS-specific cooldown (1500ms since last HTTPS)
+                    // TLS handshake/teardown stresses ESP32-C6 SDIO buffers heavily
+                    // Increased from 500ms → 1000ms → 1500ms to prevent transport_drv_sta_tx crashes
+                    if (use_https) {
+                        now = millis();
+                        elapsed = now - last_https_end_ms;
+                        if (last_https_end_ms > 0 && elapsed < 1500) {
+                            unsigned long wait_ms = 1500 - elapsed;
+                            Serial.printf("[ART] HTTPS cooldown: waiting %lums (elapsed: %lums)\n", wait_ms, elapsed);
+                            vTaskDelay(pdMS_TO_TICKS(wait_ms));
+                        }
+                    }
+
+                    // Set up HTTP connection (inside mutex - all network activity serialized)
+                    if (use_https) {
+                        secure_client.setInsecure();
+                        http.begin(secure_client, url);
+                    } else {
+                        http.begin(url);
+                    }
+                    http.setTimeout(10000);
 
                     int code = http.GET();
                     // Keep mutex locked for entire download
@@ -422,8 +458,10 @@ void albumArtTask(void* param) {
                             }
 
                             bytesRead += actualRead;
-                            // Yield to WiFi/SDIO task - 5ms prevents RX buffer overflow on large HTTPS downloads
-                            vTaskDelay(pdMS_TO_TICKS(5));
+                            // Yield to WiFi/SDIO task
+                            // HTTP: 5ms (no TLS overhead, much faster)
+                            // HTTPS: 15ms (TLS encryption overhead)
+                            vTaskDelay(pdMS_TO_TICKS(use_https ? 15 : 5));
                         }
 
                         if (!len_known && bytesRead >= max_art_size) {
@@ -431,18 +469,28 @@ void albumArtTask(void* param) {
                             readSuccess = false;
                         }
 
-                        // CRITICAL: If aborted, just close connection immediately
-                        // Don't try to drain - it overwhelms ESP32-C6 SDIO WiFi buffer
-                        // The HTTP client will handle cleanup when we call http.end()
-                        if (!readSuccess) {
-                            Serial.println("[ART] Download aborted - closing connection (no drain)");
-                            // Force close the stream to stop incoming data
-                            stream->stop();
-                            // Give SDIO driver time to flush any pending RX data
-                            vTaskDelay(pdMS_TO_TICKS(100));
-                        }
-
                         Serial.printf("[ART] Album art read: %d bytes (len_known=%d)\n", (int)bytesRead, len_known ? 1 : 0);
+
+                        // If download failed/aborted, close connection and free TLS/DMA resources
+                        if (!readSuccess) {
+                            Serial.println("[ART] Download failed/aborted - closing connection");
+                            stream->stop();  // TCP RST - kills connection immediately
+                            heap_caps_free(jpgBuf);
+                            // CRITICAL: http.end() + secure_client.stop() free TLS/DMA memory
+                            // After TCP RST, these won't send SDIO traffic (socket is dead)
+                            // but they WILL release DMA buffers used by esp-aes
+                            http.end();
+                            if (use_https) secure_client.stop();
+                            // Wait for in-flight packets to flush
+                            // HTTP: 300ms (simple TCP cleanup)
+                            // HTTPS: 1000ms (TLS session + TCP cleanup)
+                            vTaskDelay(pdMS_TO_TICKS(use_https ? 1000 : 300));
+                            last_network_end_ms = millis();
+                            if (use_https) last_https_end_ms = millis();
+                            xSemaphoreGive(network_mutex);
+                            mutex_acquired = false;
+                            continue;
+                        }
 
                         int read = bytesRead;
                         if ((len_known ? (read == len) : (read > 0)) && readSuccess) {
@@ -465,6 +513,14 @@ void albumArtTask(void* param) {
                                         png.close();
                                         heap_caps_free(jpgBuf);
                                         jpgBuf = nullptr;
+                                        // Cleanup HTTP and release mutex before continue
+                                        http.end();
+                                        if (use_https) secure_client.stop();
+                                        vTaskDelay(pdMS_TO_TICKS(200));
+                                        last_network_end_ms = millis();
+                                        if (use_https) last_https_end_ms = millis();
+                                        xSemaphoreGive(network_mutex);
+                                        mutex_acquired = false;
                                         continue;
                                     }
 
@@ -584,19 +640,44 @@ void albumArtTask(void* param) {
                                 // ESP32-P4 Hardware JPEG Decoder - fast and stable!
                                 Serial.printf("[ART] HW JPEG decode: %d bytes\n", read);
 
+                                // CRITICAL: ESP32-P4 HW decoder fails on COM markers (error 258)
+                                // Strip COM markers (0xFFFE) to prevent "COM marker data underflow" errors
+                                size_t cleaned_size = read;
+                                for (size_t i = 0; i < read - 1; ) {
+                                    if (jpgBuf[i] == 0xFF && jpgBuf[i+1] == 0xFE) {
+                                        // Found COM marker - get length
+                                        if (i + 3 < read) {
+                                            uint16_t len = (jpgBuf[i+2] << 8) | jpgBuf[i+3];
+                                            // Remove marker + length + data
+                                            size_t marker_total = 2 + len;
+                                            if (i + marker_total <= read) {
+                                                memmove(&jpgBuf[i], &jpgBuf[i + marker_total], read - i - marker_total);
+                                                cleaned_size -= marker_total;
+                                                Serial.printf("[ART] Stripped COM marker (%d bytes)\n", marker_total);
+                                                continue;  // Don't increment i, check same position again
+                                            }
+                                        }
+                                    }
+                                    i++;
+                                }
+
                                 // Get image dimensions from header (no hardware needed)
                                 jpeg_decode_picture_info_t pic_info;
-                                esp_err_t ret = jpeg_decoder_get_info(jpgBuf, read, &pic_info);
+                                esp_err_t ret = jpeg_decoder_get_info(jpgBuf, cleaned_size, &pic_info);
                                 if (ret == ESP_OK) {
                                     int w = pic_info.width;
                                     int h = pic_info.height;
                                     // Hardware outputs dimensions rounded to 16-pixel boundary
                                     int out_w = ((w + 15) / 16) * 16;
                                     int out_h = ((h + 15) / 16) * 16;
-                                    Serial.printf("[ART] JPEG: %dx%d (output: %dx%d)\n", w, h, out_w, out_h);
+                                    bool is_grayscale = (pic_info.sample_method == JPEG_DOWN_SAMPLING_GRAY);
+                                    Serial.printf("[ART] JPEG: %dx%d (output: %dx%d)%s\n", w, h, out_w, out_h,
+                                                  is_grayscale ? " [GRAYSCALE]" : "");
 
-                                    // Allocate output buffer for RGB565 - needs to be DMA capable
-                                    size_t decoded_size = out_w * out_h * 2;
+                                    // Allocate DMA output buffer
+                                    // Grayscale: 1 byte/pixel, Color: 2 bytes/pixel (RGB565)
+                                    size_t bytes_per_pixel = is_grayscale ? 1 : 2;
+                                    size_t decoded_size = out_w * out_h * bytes_per_pixel;
                                     jpeg_decode_memory_alloc_cfg_t rx_mem_cfg = {
                                         .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
                                     };
@@ -604,17 +685,37 @@ void albumArtTask(void* param) {
                                     uint8_t* hw_out_buf = (uint8_t*)jpeg_alloc_decoder_mem(decoded_size, &rx_mem_cfg, &rx_buffer_size);
 
                                     if (hw_out_buf) {
-                                        // Configure hardware decoder for RGB565 output
+                                        // Configure hardware decoder output format
                                         jpeg_decode_cfg_t decode_cfg = {
-                                            .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
+                                            .output_format = is_grayscale ? JPEG_DECODE_OUT_FORMAT_GRAY : JPEG_DECODE_OUT_FORMAT_RGB565,
                                             .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,  // Little endian
                                             .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
                                         };
 
                                         uint32_t out_size = 0;
-                                        ret = jpeg_decoder_process(hw_jpeg_decoder, &decode_cfg, jpgBuf, read, hw_out_buf, rx_buffer_size, &out_size);
+                                        ret = jpeg_decoder_process(hw_jpeg_decoder, &decode_cfg, jpgBuf, cleaned_size, hw_out_buf, rx_buffer_size, &out_size);
 
-                                        if (ret == ESP_OK) {
+                                        // For grayscale: convert GRAY8 to RGB565
+                                        if (ret == ESP_OK && is_grayscale) {
+                                            Serial.println("[ART] Converting grayscale to RGB565");
+                                            uint16_t* rgb_buf = (uint16_t*)heap_caps_malloc(out_w * out_h * 2, MALLOC_CAP_SPIRAM);
+                                            if (rgb_buf) {
+                                                int total_pixels = out_w * out_h;
+                                                for (int i = 0; i < total_pixels; i++) {
+                                                    uint8_t g = hw_out_buf[i];
+                                                    rgb_buf[i] = ((g >> 3) << 11) | ((g >> 2) << 5) | (g >> 3);
+                                                }
+                                                heap_caps_free(hw_out_buf);  // Free DMA gray buffer
+                                                hw_out_buf = (uint8_t*)rgb_buf;  // Now points to RGB565
+                                            } else {
+                                                Serial.println("[ART] Grayscale conversion alloc failed");
+                                                heap_caps_free(hw_out_buf);
+                                                hw_out_buf = nullptr;
+                                                ret = ESP_FAIL;
+                                            }
+                                        }
+
+                                        if (ret == ESP_OK && hw_out_buf) {
                                             Serial.printf("[ART] HW decoded: %d bytes\n", out_size);
 
                                             // Scale to 420x420 using bilinear interpolation
@@ -669,7 +770,24 @@ void albumArtTask(void* param) {
                                             last_failed_url[0] = '\0';
                                         } else {
                                             Serial.printf("[ART] HW JPEG decode failed: %d\n", ret);
-                                            heap_caps_free(hw_out_buf);
+                                            if (hw_out_buf) heap_caps_free(hw_out_buf);
+                                            // Track decode failures to prevent infinite retry
+                                            if (strcmp(url, last_failed_url) == 0) {
+                                                consecutive_failures++;
+                                            } else {
+                                                strncpy(last_failed_url, url, sizeof(last_failed_url) - 1);
+                                                last_failed_url[sizeof(last_failed_url) - 1] = '\0';
+                                                consecutive_failures = 1;
+                                            }
+                                            if (consecutive_failures >= 3) {
+                                                Serial.printf("[ART] Decode failed %d times, skipping URL\n", consecutive_failures);
+                                                if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                                    last_art_url = url;
+                                                    xSemaphoreGive(art_mutex);
+                                                }
+                                                consecutive_failures = 0;
+                                                last_failed_url[0] = '\0';
+                                            }
                                         }
                                     } else {
                                         Serial.printf("[ART] Failed to allocate %d bytes for HW decode\n", (int)decoded_size);
@@ -690,17 +808,24 @@ void albumArtTask(void* param) {
                     }
                 } else if (len >= (int)max_art_size) {
                     Serial.printf("[ART] Album art too large: %d bytes (max %dKB)\n", len, (int)(max_art_size/1000));
-                    // Don't drain - just close the connection immediately
-                    // Draining overwhelms ESP32-C6 SDIO WiFi buffer and causes crashes
+                    // Force close - don't drain (overwhelms SDIO buffer)
                     WiFiClient* stream = http.getStreamPtr();
-                    stream->stop();  // Force close to stop incoming data
-                    vTaskDelay(pdMS_TO_TICKS(100));  // Let SDIO driver flush
+                    stream->stop();
                     Serial.println("[ART] Connection closed (oversized image)");
-                    // Mark as done to prevent retry loop
                     if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                         last_art_url = url;
                         xSemaphoreGive(art_mutex);
                     }
+                    // CRITICAL: Free TLS/DMA resources before releasing mutex
+                    http.end();
+                    if (use_https) secure_client.stop();
+                    // Wait for in-flight packets to flush (HTTP: 300ms, HTTPS: 1000ms)
+                    vTaskDelay(pdMS_TO_TICKS(use_https ? 1000 : 300));
+                    last_network_end_ms = millis();
+                    if (use_https) last_https_end_ms = millis();
+                    xSemaphoreGive(network_mutex);
+                    mutex_acquired = false;
+                    continue;
                     } else {
                         Serial.printf("[ART] Invalid album art size: %d bytes\n", len);
                     }
@@ -741,22 +866,27 @@ void albumArtTask(void* param) {
                         }
                     }
 
-                    // Update timestamp before releasing mutex (for SDIO cooldown tracking)
-                    last_network_end_ms = millis();
+                    // CRITICAL: End HTTP and close TLS BEFORE releasing mutex
+                    // Prevents TLS close_notify from overlapping with the next network operation
+                    http.end();
+                    if (use_https) secure_client.stop();
 
-                    // Release network_mutex after entire download completes
+                    // Wait for cleanup and SDIO buffer stabilization
+                    // HTTP: 50ms (fast cleanup), HTTPS: 200ms (TLS cleanup)
+                    vTaskDelay(pdMS_TO_TICKS(use_https ? 200 : 50));
+
+                    // Update timestamps before releasing mutex
+                    last_network_end_ms = millis();
+                    if (use_https) last_https_end_ms = millis();
+
+                    // Release network_mutex after ALL network activity including TLS cleanup
                     xSemaphoreGive(network_mutex);
+                } else {
+                    // Mutex not acquired - clean up HTTP setup (no active connection)
+                    http.end();
                 }
 
-                http.end();
-
-            } // http and secure_client destroyed here - TLS session freed
-
-            // CRITICAL: Wait for TLS cleanup to complete (mbedTLS resources, SSL session cache)
-            vTaskDelay(pdMS_TO_TICKS(100));
-
-            // Wait for WiFi buffers to stabilize after download
-            vTaskDelay(pdMS_TO_TICKS(500));
+            } // http and secure_client destructors - no-op since already stopped
         }
         vTaskDelay(pdMS_TO_TICKS(100));  // Check for new URLs
     }

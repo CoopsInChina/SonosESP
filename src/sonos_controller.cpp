@@ -171,6 +171,15 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
         response = http.getString();
         dev->errorCount = 0;
         dev->connected = true;
+    } else if (code == 500) {
+        // Sonos returns 500 during source transitions (e.g. radio switching)
+        // This is transient - don't count as error
+        // Throttle logging to avoid spam (only log first 500 in a burst)
+        static unsigned long last_500_log = 0;
+        if (millis() - last_500_log > 2000) {  // 2s throttle
+            Serial.printf("[SOAP] Transient 500 for %s.%s (source changing)\n", service, action);
+            last_500_log = millis();
+        }
     } else {
         Serial.printf("[SOAP] HTTP error %d for %s.%s\n", code, service, action);
         dev->errorCount++;
@@ -999,6 +1008,7 @@ bool SonosController::updateMediaInfo() {
         // Extract station logo from upnp:albumArtURI
         String stationArt = extractXML(meta, "upnp:albumArtURI");
         stationArt = decodeHTML(stationArt);
+        Serial.printf("[RADIO] Extracted albumArtURI: '%s'\n", stationArt.c_str());
 
         // Store station name if valid (not URL junk)
         if (stationName.length() > 0) {
@@ -1021,6 +1031,9 @@ bool SonosController::updateMediaInfo() {
             } else {
                 dev->radioStationArtURL = stationArt;
             }
+            Serial.printf("[RADIO] Set radioStationArtURL: '%s'\n", dev->radioStationArtURL.c_str());
+        } else {
+            Serial.println("[RADIO] No station art found in metadata");
         }
 
         xSemaphoreGive(deviceMutex);
