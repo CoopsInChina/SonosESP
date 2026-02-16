@@ -418,11 +418,7 @@ static void checkForUpdates() {
         Serial.println("[OTA] Checking Nightly channel (fetching recent releases)");
     }
 
-    http.begin(client, apiUrl);
-    http.addHeader("Accept", "application/vnd.github.v3+json");
-    http.setTimeout(OTA_CHECK_TIMEOUT_MS);
-
-    // CRITICAL: Acquire network_mutex to prevent conflict with album art HTTPS downloads
+    // CRITICAL: Acquire network_mutex BEFORE http.begin() to prevent SDIO overlap
     if (!xSemaphoreTake(network_mutex, pdMS_TO_TICKS(NETWORK_MUTEX_TIMEOUT_MS))) {
         Serial.println("[OTA] Failed to acquire network mutex - check aborted");
         if (lbl_ota_status) {
@@ -430,9 +426,12 @@ static void checkForUpdates() {
             lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
         }
         if (btn_check_update) lv_obj_clear_state(btn_check_update, LV_STATE_DISABLED);
-        http.end();
         return;
     }
+
+    http.begin(client, apiUrl);
+    http.addHeader("Accept", "application/vnd.github.v3+json");
+    http.setTimeout(OTA_CHECK_TIMEOUT_MS);
 
     // CRITICAL: Wait for general SDIO cooldown (200ms since last network op)
     now = millis();
@@ -859,6 +858,7 @@ static void performOTAUpdate() {
             lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
         }
         http.end();
+        client.stop();
         otaRecovery();
         return;
     }
@@ -871,6 +871,7 @@ static void performOTAUpdate() {
             lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
         }
         http.end();
+        client.stop();
         otaRecovery();
         return;
     }
@@ -883,6 +884,7 @@ static void performOTAUpdate() {
             lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
         }
         http.end();
+        client.stop();
         otaRecovery();
         return;
     }
@@ -925,6 +927,7 @@ static void performOTAUpdate() {
             lv_refr_now(NULL);
             Update.abort();
             http.end();
+            client.stop();
             otaRecovery();
             return;
         }
@@ -941,6 +944,7 @@ static void performOTAUpdate() {
             lv_refr_now(NULL);
             Update.abort();
             http.end();
+            client.stop();
             otaRecovery();
             return;
         }
@@ -1075,6 +1079,7 @@ static void performOTAUpdate() {
     }
 
     http.end();
+    client.stop();
     otaRecovery();
 }
 

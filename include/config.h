@@ -90,7 +90,6 @@
 // Timeouts
 #define SONOS_SOAP_TIMEOUT_MS   2000    // SOAP request timeout
 #define SONOS_DEBOUNCE_MS       400     // Command debounce time
-#define SONOS_POLL_INTERVAL_MS  150     // Polling loop interval (optimized: was 100ms, saves ~30% CPU)
 
 // Polling tick modulos (base interval = 300ms, so N ticks = N * 300ms)
 #define POLL_VOLUME_MODULO      5       // Volume every 1.5s (5 * 300ms)

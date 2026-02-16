@@ -214,6 +214,7 @@ void setup() {
     delay(300);  // Show 100% briefly
 
     lv_screen_load(scr_main);  // Now load main screen
+    lv_obj_del(boot_scr);     // Free boot screen objects (~3KB LVGL memory)
     Serial.println("Ready!");
 }
 
