@@ -391,6 +391,16 @@ static String prepareAlbumArtURL(const String& rawUrl) {
     return fetchUrl;
 }
 
+// Check if URL points to a private/local network IP (no TLS, no SDIO pressure)
+static bool isPrivateIP(const char* url) {
+    const char* host = strstr(url, "://");
+    if (!host) return false;
+    host += 3;  // Skip past "://"
+    return (strncmp(host, "192.168.", 8) == 0 ||
+            strncmp(host, "10.", 3) == 0 ||
+            strncmp(host, "172.", 4) == 0);
+}
+
 void albumArtTask(void* param) {
     art_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
     art_temp_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
@@ -466,6 +476,7 @@ void albumArtTask(void* param) {
             // Detect if URL is from Sonos device itself (e.g., /getaa for YouTube Music)
             // These don't need per-chunk mutex since Sonos HTTP server serializes requests anyway
             bool isFromSonosDevice = (strstr(url, ":1400/") != nullptr);
+            bool isLocalNetwork = isFromSonosDevice || isPrivateIP(url);
             bool use_https = (strncmp(url, "https://", 8) == 0);
 
             // Scoped HTTP/HTTPS download - ensures TLS session is freed after each download
@@ -476,8 +487,8 @@ void albumArtTask(void* param) {
 
                 // PRE-WAIT: Wait for cooldowns BEFORE acquiring mutex
                 // This prevents blocking SOAP commands (Next/Prev/Play) during cooldown waits
-                // Local Sonos HTTP (port 1400) skips cooldowns - local network, no TLS
-                if (!isFromSonosDevice) {
+                // Local network HTTP (Sonos, NAS, Plex) skips cooldowns - no TLS overhead
+                if (!isLocalNetwork) {
                     // General SDIO cooldown (200ms since last network op)
                     unsigned long now = millis();
                     unsigned long elapsed = now - last_network_end_ms;
@@ -520,8 +531,8 @@ void albumArtTask(void* param) {
                     }
 
                     // Re-check cooldowns under mutex (another task may have used network while we waited)
-                    // Only for non-local URLs; local Sonos HTTP doesn't need cooldowns
-                    if (!isFromSonosDevice) {
+                    // Only for non-local URLs; local network HTTP doesn't need cooldowns
+                    if (!isLocalNetwork) {
                         unsigned long now = millis();
                         unsigned long elapsed = now - last_network_end_ms;
                         if (last_network_end_ms > 0 && elapsed < 200) {
@@ -543,9 +554,9 @@ void albumArtTask(void* param) {
                     } else {
                         http.begin(url);
                     }
-                    // Local Sonos: 3s timeout (LAN responds in <1s, 3s catches slow devices)
+                    // Local network: 3s timeout (LAN responds in <1s, 3s catches slow devices)
                     // Internet: 10s timeout (CDN/remote servers can be slow)
-                    http.setTimeout(isFromSonosDevice ? 3000 : 10000);
+                    http.setTimeout(isLocalNetwork ? 3000 : 10000);
 
                     int code = http.GET();
                     // Keep mutex locked for entire download
@@ -565,10 +576,10 @@ void albumArtTask(void* param) {
                     if (jpgBuf) {
                         WiFiClient* stream = http.getStreamPtr();
 
-                        // For local Sonos HTTP: release mutex during download
+                        // For local network HTTP: release mutex during download
                         // SOAP commands (Next/Prev/Play) can run while art downloads
                         // Local HTTP has no TLS, safe without mutex
-                        if (isFromSonosDevice && mutex_acquired) {
+                        if (isLocalNetwork && !use_https && mutex_acquired) {
                             xSemaphoreGive(network_mutex);
                             mutex_acquired = false;
                         }
@@ -614,10 +625,10 @@ void albumArtTask(void* param) {
 
                             bytesRead += actualRead;
                             // Yield to WiFi/SDIO task
-                            // Local Sonos: minimal yield (no TLS, fast local network)
+                            // Local network: minimal yield (no TLS, fast local network)
                             // Internet HTTP: 5ms (no TLS overhead)
                             // Internet HTTPS: 15ms (TLS encryption overhead)
-                            if (isFromSonosDevice) {
+                            if (isLocalNetwork) {
                                 taskYIELD();
                             } else {
                                 vTaskDelay(pdMS_TO_TICKS(use_https ? 15 : 5));
@@ -651,9 +662,10 @@ void albumArtTask(void* param) {
                             if (use_https) secure_client.stop();
                             // Wait for in-flight packets to flush
                             // Local Sonos: 50ms (minimal, no TLS)
+                            // Local NAS/Plex: 100ms (local HTTP, slightly more than Sonos)
                             // Internet HTTP: 300ms (simple TCP cleanup)
                             // Internet HTTPS: 1000ms (TLS session + TCP cleanup)
-                            vTaskDelay(pdMS_TO_TICKS(isFromSonosDevice ? 50 : (use_https ? 1000 : 300)));
+                            vTaskDelay(pdMS_TO_TICKS(isFromSonosDevice ? 50 : (isLocalNetwork ? 100 : (use_https ? 1000 : 300))));
                             last_network_end_ms = millis();
                             if (use_https) last_https_end_ms = millis();
                             if (mutex_acquired) {
@@ -806,18 +818,16 @@ void albumArtTask(void* param) {
                                                 new_color = (avg_r << 16) | (avg_g << 8) | avg_b;
                                             }
 
-                                            // Copy completed image from temp to display buffer atomically
-                                            memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
-
-                                            memset(&art_dsc, 0, sizeof(art_dsc));
-                                            art_dsc.header.w = ART_SIZE;
-                                            art_dsc.header.h = ART_SIZE;
-                                            art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-                                            art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
-                                            art_dsc.data = (const uint8_t*)art_buffer;
-
-                                            // Update all shared variables atomically under mutex
+                                            // Update display buffer + descriptor + flags atomically under mutex
+                                            // Prevents LVGL from reading half-written art_dsc during render
                                             if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                                memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                                memset(&art_dsc, 0, sizeof(art_dsc));
+                                                art_dsc.header.w = ART_SIZE;
+                                                art_dsc.header.h = ART_SIZE;
+                                                art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+                                                art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
+                                                art_dsc.data = (const uint8_t*)art_buffer;
                                                 last_art_url = url;
                                                 dominant_color = new_color;
                                                 art_ready = true;
@@ -1000,16 +1010,15 @@ void albumArtTask(void* param) {
                                         new_color = (avg_r << 16) | (avg_g << 8) | avg_b;
                                     }
 
-                                    memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
-
-                                    memset(&art_dsc, 0, sizeof(art_dsc));
-                                    art_dsc.header.w = ART_SIZE;
-                                    art_dsc.header.h = ART_SIZE;
-                                    art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-                                    art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
-                                    art_dsc.data = (const uint8_t*)art_buffer;
-
+                                    // Update display buffer + descriptor + flags atomically under mutex
                                     if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                        memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                        memset(&art_dsc, 0, sizeof(art_dsc));
+                                        art_dsc.header.w = ART_SIZE;
+                                        art_dsc.header.h = ART_SIZE;
+                                        art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+                                        art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
+                                        art_dsc.data = (const uint8_t*)art_buffer;
                                         last_art_url = url;
                                         dominant_color = new_color;
                                         art_ready = true;
@@ -1060,14 +1069,15 @@ void albumArtTask(void* param) {
                                         uint8_t avg_b = color_b_sum / color_sample_count;
                                         new_color = ((avg_r * 4 / 10) << 16) | ((avg_g * 4 / 10) << 8) | (avg_b * 4 / 10);
                                     }
-                                    memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
-                                    memset(&art_dsc, 0, sizeof(art_dsc));
-                                    art_dsc.header.w = ART_SIZE;
-                                    art_dsc.header.h = ART_SIZE;
-                                    art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-                                    art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
-                                    art_dsc.data = (const uint8_t*)art_buffer;
+                                    // Update display buffer + descriptor + flags atomically under mutex
                                     if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                        memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                        memset(&art_dsc, 0, sizeof(art_dsc));
+                                        art_dsc.header.w = ART_SIZE;
+                                        art_dsc.header.h = ART_SIZE;
+                                        art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+                                        art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
+                                        art_dsc.data = (const uint8_t*)art_buffer;
                                         last_art_url = url;
                                         dominant_color = new_color;
                                         art_ready = true;
@@ -1170,9 +1180,10 @@ void albumArtTask(void* param) {
 
                     // Wait for cleanup and SDIO buffer stabilization
                     // Local Sonos: 10ms (minimal, no TLS)
+                    // Local NAS/Plex: 30ms (local HTTP, slightly more than Sonos)
                     // Internet HTTP: 50ms (fast cleanup)
                     // Internet HTTPS: 200ms (TLS cleanup)
-                    vTaskDelay(pdMS_TO_TICKS(isFromSonosDevice ? 10 : (use_https ? 200 : 50)));
+                    vTaskDelay(pdMS_TO_TICKS(isFromSonosDevice ? 10 : (isLocalNetwork ? 30 : (use_https ? 200 : 50))));
 
                     // Update timestamps before releasing mutex
                     last_network_end_ms = millis();
