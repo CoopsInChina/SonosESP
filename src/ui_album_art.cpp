@@ -1,15 +1,22 @@
 /**
  * UI Album Art Handling
- * Album art loading with ESP32-P4 hardware JPEG decoder + PNGdec + bilinear scaling
+ * Album art loading with ESP32-P4 hardware JPEG decoder + JPEGDEC SW fallback + PNGdec + bilinear scaling
  */
 
 #include "ui_common.h"
 #include "config.h"
 #include <PNGdec.h>
+#include <JPEGDEC.h>
 
 // ESP32-P4 Hardware JPEG Decoder
 #include "driver/jpeg_decode.h"
 static jpeg_decoder_handle_t hw_jpeg_decoder = nullptr;
+
+// Software JPEG decoder (fallback for progressive, non-div-8, etc.)
+static JPEGDEC sw_jpeg;
+static uint16_t* sw_jpeg_output = nullptr;
+static int sw_jpeg_width = 0;
+static int sw_jpeg_height = 0;
 
 // Album Art Functions
 static uint32_t color_r_sum = 0, color_g_sum = 0, color_b_sum = 0;
@@ -113,8 +120,9 @@ void sampleDominantColor(uint16_t* buffer, int width, int height) {
     }
 }
 
-// Fast bilinear scaling using fixed-point math - solves JPEGDEC's 1/2/4/8 limitation!
-void scaleImageBilinear(uint16_t* src, int src_w, int src_h, uint16_t* dst, int dst_w, int dst_h) {
+// Fast bilinear scaling using fixed-point math
+// src_stride: row width in pixels of the source buffer (may differ from src_w due to HW decoder padding)
+void scaleImageBilinear(uint16_t* src, int src_w, int src_h, int src_stride, uint16_t* dst, int dst_w, int dst_h) {
     // Validate dimensions to prevent overflow (should never happen with 2048x2048 limit, but be safe)
     if (src_w <= 0 || src_h <= 0 || dst_w <= 0 || dst_h <= 0 ||
         src_w > 4096 || src_h > 4096 || dst_w > 4096 || dst_h > 4096) {
@@ -134,8 +142,8 @@ void scaleImageBilinear(uint16_t* src, int src_w, int src_h, uint16_t* dst, int 
         int y_weight = (src_y_fp >> 8) & 0xFF;  // 0-255
 
         uint16_t* dst_row = &dst[dst_y * dst_w];
-        uint16_t* src_row0 = &src[y0 * src_w];
-        uint16_t* src_row1 = &src[y1 * src_w];
+        uint16_t* src_row0 = &src[y0 * src_stride];
+        uint16_t* src_row1 = &src[y1 * src_stride];
 
         for (int dst_x = 0; dst_x < dst_w; dst_x++) {
             int src_x_fp = dst_x * x_ratio;
@@ -185,6 +193,75 @@ void scaleImageBilinear(uint16_t* src, int src_w, int src_h, uint16_t* dst, int 
             // Pack back to RGB565
             dst_row[dst_x] = (r << 11) | (g << 5) | b;
         }
+    }
+}
+
+// JPEGDEC SW callback - decode MCU blocks to PSRAM output buffer
+static int jpegDrawCallback(JPEGDRAW* pDraw) {
+    if (!sw_jpeg_output || !pDraw->pPixels) return 0;
+
+    // Copy decoded MCU block to output buffer
+    for (int y = 0; y < pDraw->iHeight; y++) {
+        int dst_y = pDraw->y + y;
+        if (dst_y < 0 || dst_y >= sw_jpeg_height) continue;
+        int dst_x = pDraw->x;
+        if (dst_x < 0 || dst_x >= sw_jpeg_width) continue;
+        int copy_w = min(pDraw->iWidth, sw_jpeg_width - dst_x);
+        memcpy(&sw_jpeg_output[dst_y * sw_jpeg_width + dst_x],
+               &pDraw->pPixels[y * pDraw->iWidth],
+               copy_w * sizeof(uint16_t));
+    }
+    return 1;  // Continue decoding
+}
+
+// Software JPEG decode fallback (handles progressive, non-div-8, etc.)
+// Returns true on success. Caller must heap_caps_free(*out_buffer) when done.
+static bool decodeJPEGSoftware(uint8_t* buf, size_t len, uint16_t** out_buffer, int* out_w, int* out_h) {
+    if (sw_jpeg.openRAM(buf, len, jpegDrawCallback)) {
+        int w = sw_jpeg.getWidth();
+        int h = sw_jpeg.getHeight();
+
+        if (w <= 0 || h <= 0 || w > 2048 || h > 2048) {
+            Serial.printf("[ART] SW JPEG invalid dimensions: %dx%d\n", w, h);
+            sw_jpeg.close();
+            return false;
+        }
+
+        // Allocate output buffer in PSRAM
+        size_t buf_size = (size_t)w * h * 2;
+        uint16_t* output = (uint16_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+        if (!output) {
+            Serial.printf("[ART] SW JPEG alloc failed: %d bytes\n", (int)buf_size);
+            sw_jpeg.close();
+            return false;
+        }
+        memset(output, 0, buf_size);
+
+        // Set globals for callback
+        sw_jpeg_output = output;
+        sw_jpeg_width = w;
+        sw_jpeg_height = h;
+
+        // Decode with RGB565 little-endian output (matches LVGL)
+        sw_jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+        int result = sw_jpeg.decode(0, 0, 0);  // Full decode, no scaling
+        sw_jpeg.close();
+        sw_jpeg_output = nullptr;
+
+        if (result == 1) {
+            Serial.printf("[ART] SW JPEG decoded: %dx%d\n", w, h);
+            *out_buffer = output;
+            *out_w = w;
+            *out_h = h;
+            return true;
+        } else {
+            Serial.printf("[ART] SW JPEG decode failed: %d\n", result);
+            heap_caps_free(output);
+            return false;
+        }
+    } else {
+        Serial.println("[ART] SW JPEG openRAM failed");
+        return false;
     }
 }
 
@@ -687,7 +764,7 @@ void albumArtTask(void* param) {
 
                                             // Scale to exact 420x420 using bilinear interpolation
                                             Serial.printf("[ART] Bilinear scaling %dx%d -> 420x420\n", out_w, out_h);
-                                            scaleImageBilinear(src_buffer, out_w, out_h, art_temp_buffer, ART_SIZE, ART_SIZE);
+                                            scaleImageBilinear(src_buffer, out_w, out_h, out_w, art_temp_buffer, ART_SIZE, ART_SIZE);
                                             Serial.println("[ART] Scaling complete");
 
                                             if (src_buffer != decoded_buffer) {
@@ -776,167 +853,219 @@ void albumArtTask(void* param) {
                                     i++;
                                 }
 
-                                // Get image dimensions from header (no hardware needed)
+                                // Determine decode strategy: HW fast path vs SW fallback
+                                bool use_sw_fallback = false;
+                                bool hw_decode_success = false;
+                                uint16_t* decoded_pixels = nullptr;  // Final RGB565 pixels for scaling
+                                int final_w = 0, final_h = 0;
+                                int final_stride = 0;  // Row stride in pixels (may differ from width for HW decode)
+
+                                // Step 1: Try HW decoder header parse
                                 jpeg_decode_picture_info_t pic_info;
                                 esp_err_t ret = jpeg_decoder_get_info(jpgBuf, cleaned_size, &pic_info);
-                                if (ret == ESP_OK) {
+
+                                if (ret == ESP_OK && pic_info.width > 0 && pic_info.height > 0 &&
+                                    pic_info.width <= 2048 && pic_info.height <= 2048) {
                                     int w = pic_info.width;
                                     int h = pic_info.height;
 
-                                    // Validate JPEG dimensions to prevent crashes/overflow from malformed files
-                                    if (w == 0 || h == 0 || w > 2048 || h > 2048) {
-                                        Serial.printf("[ART] Invalid JPEG dimensions: %dx%d (max 2048x2048)\n", w, h);
-                                        heap_caps_free(jpgBuf);
-                                        jpgBuf = nullptr;
-                                        http.end();
-                                        if (use_https) secure_client.stop();
-                                        vTaskDelay(pdMS_TO_TICKS(200));
-                                        last_network_end_ms = millis();
-                                        if (use_https) last_https_end_ms = millis();
-                                        xSemaphoreGive(network_mutex);
-                                        mutex_acquired = false;
-                                        continue;
-                                    }
+                                    // Check if HW decoder can handle this (dimensions must be div-8)
+                                    bool hw_compatible = (w % 8 == 0) && (h % 8 == 0);
 
-                                    // Hardware outputs dimensions rounded to 16-pixel boundary
-                                    int out_w = ((w + 15) / 16) * 16;
-                                    int out_h = ((h + 15) / 16) * 16;
-                                    bool is_grayscale = (pic_info.sample_method == JPEG_DOWN_SAMPLING_GRAY);
-                                    Serial.printf("[ART] JPEG: %dx%d (output: %dx%d)%s\n", w, h, out_w, out_h,
-                                                  is_grayscale ? " [GRAYSCALE]" : "");
+                                    if (hw_compatible && hw_jpeg_decoder) {
+                                        // HW fast path
+                                        int out_w = ((w + 15) / 16) * 16;
+                                        int out_h = ((h + 15) / 16) * 16;
+                                        bool is_grayscale = (pic_info.sample_method == JPEG_DOWN_SAMPLING_GRAY);
+                                        Serial.printf("[ART] JPEG: %dx%d (output: %dx%d)%s\n", w, h, out_w, out_h,
+                                                      is_grayscale ? " [GRAYSCALE]" : "");
 
-                                    // Allocate DMA output buffer
-                                    // Grayscale: 1 byte/pixel, Color: 2 bytes/pixel (RGB565)
-                                    size_t bytes_per_pixel = is_grayscale ? 1 : 2;
-                                    size_t decoded_size = out_w * out_h * bytes_per_pixel;
-                                    jpeg_decode_memory_alloc_cfg_t rx_mem_cfg = {
-                                        .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
-                                    };
-                                    size_t rx_buffer_size = 0;
-                                    uint8_t* hw_out_buf = (uint8_t*)jpeg_alloc_decoder_mem(decoded_size, &rx_mem_cfg, &rx_buffer_size);
-
-                                    if (hw_out_buf) {
-                                        // Configure hardware decoder output format
-                                        jpeg_decode_cfg_t decode_cfg = {
-                                            .output_format = is_grayscale ? JPEG_DECODE_OUT_FORMAT_GRAY : JPEG_DECODE_OUT_FORMAT_RGB565,
-                                            .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,  // Little endian
-                                            .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
+                                        size_t bytes_per_pixel = is_grayscale ? 1 : 2;
+                                        size_t decoded_size = out_w * out_h * bytes_per_pixel;
+                                        jpeg_decode_memory_alloc_cfg_t rx_mem_cfg = {
+                                            .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
                                         };
+                                        size_t rx_buffer_size = 0;
+                                        uint8_t* hw_out_buf = (uint8_t*)jpeg_alloc_decoder_mem(decoded_size, &rx_mem_cfg, &rx_buffer_size);
 
-                                        uint32_t out_size = 0;
-                                        ret = jpeg_decoder_process(hw_jpeg_decoder, &decode_cfg, jpgBuf, cleaned_size, hw_out_buf, rx_buffer_size, &out_size);
+                                        if (hw_out_buf) {
+                                            jpeg_decode_cfg_t decode_cfg = {
+                                                .output_format = is_grayscale ? JPEG_DECODE_OUT_FORMAT_GRAY : JPEG_DECODE_OUT_FORMAT_RGB565,
+                                                .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
+                                                .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
+                                            };
 
-                                        // For grayscale: convert GRAY8 to RGB565
-                                        if (ret == ESP_OK && is_grayscale) {
-                                            Serial.println("[ART] Converting grayscale to RGB565");
-                                            uint16_t* rgb_buf = (uint16_t*)heap_caps_malloc(out_w * out_h * 2, MALLOC_CAP_SPIRAM);
-                                            if (rgb_buf) {
-                                                int total_pixels = out_w * out_h;
-                                                for (int i = 0; i < total_pixels; i++) {
-                                                    uint8_t g = hw_out_buf[i];
-                                                    rgb_buf[i] = ((g >> 3) << 11) | ((g >> 2) << 5) | (g >> 3);
+                                            uint32_t out_size = 0;
+                                            ret = jpeg_decoder_process(hw_jpeg_decoder, &decode_cfg, jpgBuf, cleaned_size, hw_out_buf, rx_buffer_size, &out_size);
+
+                                            // For grayscale: convert GRAY8 to RGB565
+                                            if (ret == ESP_OK && is_grayscale) {
+                                                Serial.println("[ART] Converting grayscale to RGB565");
+                                                uint16_t* rgb_buf = (uint16_t*)heap_caps_malloc(out_w * out_h * 2, MALLOC_CAP_SPIRAM);
+                                                if (rgb_buf) {
+                                                    int total_pixels = out_w * out_h;
+                                                    for (int i = 0; i < total_pixels; i++) {
+                                                        uint8_t g = hw_out_buf[i];
+                                                        rgb_buf[i] = ((g >> 3) << 11) | ((g >> 2) << 5) | (g >> 3);
+                                                    }
+                                                    heap_caps_free(hw_out_buf);
+                                                    hw_out_buf = (uint8_t*)rgb_buf;
+                                                } else {
+                                                    Serial.println("[ART] Grayscale conversion alloc failed");
+                                                    heap_caps_free(hw_out_buf);
+                                                    hw_out_buf = nullptr;
+                                                    ret = ESP_FAIL;
                                                 }
-                                                heap_caps_free(hw_out_buf);  // Free DMA gray buffer
-                                                hw_out_buf = (uint8_t*)rgb_buf;  // Now points to RGB565
+                                            }
+
+                                            if (ret == ESP_OK && hw_out_buf) {
+                                                Serial.printf("[ART] HW decoded: %d bytes\n", out_size);
+                                                hw_decode_success = true;
+                                                decoded_pixels = (uint16_t*)hw_out_buf;
+                                                final_w = w;
+                                                final_h = h;
+                                                final_stride = out_w;  // HW buffer has padded stride
                                             } else {
-                                                Serial.println("[ART] Grayscale conversion alloc failed");
-                                                heap_caps_free(hw_out_buf);
-                                                hw_out_buf = nullptr;
-                                                ret = ESP_FAIL;
+                                                Serial.printf("[ART] HW decode failed: %d, trying SW fallback\n", ret);
+                                                if (hw_out_buf) heap_caps_free(hw_out_buf);
+                                                use_sw_fallback = true;
                                             }
-                                        }
-
-                                        if (ret == ESP_OK && hw_out_buf) {
-                                            Serial.printf("[ART] HW decoded: %d bytes\n", out_size);
-
-                                            // Scale to 420x420 using bilinear interpolation
-                                            memset(art_temp_buffer, 0, ART_SIZE * ART_SIZE * 2);
-                                            Serial.printf("[ART] Bilinear scaling %dx%d -> 420x420\n", w, h);
-                                            // Use actual image dimensions for scaling (not padded)
-                                            scaleImageBilinear((uint16_t*)hw_out_buf, out_w, out_h, art_temp_buffer, ART_SIZE, ART_SIZE);
-                                            Serial.println("[ART] Scaling complete");
-
-                                            // Free hardware buffer immediately
-                                            heap_caps_free(hw_out_buf);
-                                            hw_out_buf = nullptr;
-
-                                            // Sample dominant color from scaled image
-                                            sampleDominantColor(art_temp_buffer, ART_SIZE, ART_SIZE);
-
-                                            // Calculate dominant color
-                                            uint32_t new_color = 0x1a1a1a;  // Default dark color
-                                            if (color_sample_count > 0) {
-                                                uint8_t avg_r = color_r_sum / color_sample_count;
-                                                uint8_t avg_g = color_g_sum / color_sample_count;
-                                                uint8_t avg_b = color_b_sum / color_sample_count;
-
-                                                // Darken for background (multiply by 0.4)
-                                                avg_r = (avg_r * 4) / 10;
-                                                avg_g = (avg_g * 4) / 10;
-                                                avg_b = (avg_b * 4) / 10;
-
-                                                new_color = (avg_r << 16) | (avg_g << 8) | avg_b;
-                                            }
-
-                                            // Copy completed image from temp to display buffer atomically
-                                            memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
-
-                                            memset(&art_dsc, 0, sizeof(art_dsc));
-                                            art_dsc.header.w = ART_SIZE;
-                                            art_dsc.header.h = ART_SIZE;
-                                            art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-                                            art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
-                                            art_dsc.data = (const uint8_t*)art_buffer;
-
-                                            // Update all shared variables atomically under mutex
-                                            if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
-                                                last_art_url = url;
-                                                dominant_color = new_color;
-                                                art_ready = true;
-                                                color_ready = true;
-                                                xSemaphoreGive(art_mutex);
-                                            }
-                                            // Reset failure counter on success
-                                            consecutive_failures = 0;
-                                            last_failed_url[0] = '\0';
                                         } else {
-                                            Serial.printf("[ART] HW JPEG decode failed: %d\n", ret);
-                                            if (hw_out_buf) heap_caps_free(hw_out_buf);
-                                            // Track decode failures to prevent infinite retry
-                                            if (strcmp(url, last_failed_url) == 0) {
-                                                consecutive_failures++;
-                                            } else {
-                                                strncpy(last_failed_url, url, sizeof(last_failed_url) - 1);
-                                                last_failed_url[sizeof(last_failed_url) - 1] = '\0';
-                                                consecutive_failures = 1;
-                                            }
-                                            // Exponential backoff: 200ms, 400ms, 600ms... (prevents rapid retry hammering)
-                                            if (consecutive_failures > 1) {
-                                                vTaskDelay(pdMS_TO_TICKS(consecutive_failures * 200));
-                                            }
-                                            if (consecutive_failures >= 3) {
-                                                Serial.printf("[ART] Decode failed %d times, skipping URL\n", consecutive_failures);
-                                                if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
-                                                    last_art_url = url;
-                                                    xSemaphoreGive(art_mutex);
-                                                }
-                                                consecutive_failures = 0;
-                                                last_failed_url[0] = '\0';
-                                            }
+                                            Serial.printf("[ART] DMA alloc failed (%d bytes), trying SW fallback\n", (int)decoded_size);
+                                            use_sw_fallback = true;
                                         }
                                     } else {
-                                        Serial.printf("[ART] Failed to allocate %d bytes for HW decode\n", (int)decoded_size);
+                                        // Non-div-8 dimensions - HW can't handle, use SW
+                                        Serial.printf("[ART] JPEG %dx%d not HW-compatible (non-div-8), using SW fallback\n", w, h);
+                                        use_sw_fallback = true;
                                     }
+                                } else if (ret == ESP_OK) {
+                                    // HW parser returned OK but 0x0 dimensions (progressive JPEG)
+                                    Serial.printf("[ART] HW reports 0x0 (likely progressive), using SW fallback\n");
+                                    use_sw_fallback = true;
                                 } else {
-                                    Serial.printf("[ART] JPEG header parse failed: %d\n", ret);
+                                    // HW header parse completely failed
+                                    Serial.printf("[ART] HW header parse failed: %d, trying SW fallback\n", ret);
+                                    use_sw_fallback = true;
+                                }
+
+                                // Step 2: SW fallback if HW couldn't handle it
+                                if (use_sw_fallback && !hw_decode_success) {
+                                    uint16_t* sw_buf = nullptr;
+                                    int sw_w = 0, sw_h = 0;
+                                    if (decodeJPEGSoftware(jpgBuf, cleaned_size, &sw_buf, &sw_w, &sw_h)) {
+                                        decoded_pixels = sw_buf;
+                                        final_w = sw_w;
+                                        final_h = sw_h;
+                                        final_stride = sw_w;  // SW decode has no padding
+                                        hw_decode_success = true;  // Reuse success path
+                                    }
+                                }
+
+                                // Step 3: Scale and display (common path for both HW and SW)
+                                if (hw_decode_success && decoded_pixels) {
+                                    memset(art_temp_buffer, 0, ART_SIZE * ART_SIZE * 2);
+                                    Serial.printf("[ART] Bilinear scaling %dx%d -> 420x420 (stride=%d)\n", final_w, final_h, final_stride);
+                                    scaleImageBilinear(decoded_pixels, final_w, final_h, final_stride, art_temp_buffer, ART_SIZE, ART_SIZE);
+                                    Serial.println("[ART] Scaling complete");
+
+                                    heap_caps_free(decoded_pixels);
+                                    decoded_pixels = nullptr;
+
+                                    // Sample dominant color from scaled image
+                                    sampleDominantColor(art_temp_buffer, ART_SIZE, ART_SIZE);
+
+                                    uint32_t new_color = 0x1a1a1a;
+                                    if (color_sample_count > 0) {
+                                        uint8_t avg_r = color_r_sum / color_sample_count;
+                                        uint8_t avg_g = color_g_sum / color_sample_count;
+                                        uint8_t avg_b = color_b_sum / color_sample_count;
+                                        avg_r = (avg_r * 4) / 10;
+                                        avg_g = (avg_g * 4) / 10;
+                                        avg_b = (avg_b * 4) / 10;
+                                        new_color = (avg_r << 16) | (avg_g << 8) | avg_b;
+                                    }
+
+                                    memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+
+                                    memset(&art_dsc, 0, sizeof(art_dsc));
+                                    art_dsc.header.w = ART_SIZE;
+                                    art_dsc.header.h = ART_SIZE;
+                                    art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+                                    art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
+                                    art_dsc.data = (const uint8_t*)art_buffer;
+
+                                    if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                        last_art_url = url;
+                                        dominant_color = new_color;
+                                        art_ready = true;
+                                        color_ready = true;
+                                        xSemaphoreGive(art_mutex);
+                                    }
+                                    consecutive_failures = 0;
+                                    last_failed_url[0] = '\0';
+                                } else {
+                                    // Both HW and SW decode failed
+                                    if (decoded_pixels) { heap_caps_free(decoded_pixels); decoded_pixels = nullptr; }
+                                    Serial.println("[ART] All JPEG decode methods failed");
+                                    // Track failures to prevent infinite retry
+                                    if (strcmp(url, last_failed_url) == 0) {
+                                        consecutive_failures++;
+                                    } else {
+                                        strncpy(last_failed_url, url, sizeof(last_failed_url) - 1);
+                                        last_failed_url[sizeof(last_failed_url) - 1] = '\0';
+                                        consecutive_failures = 1;
+                                    }
+                                    if (consecutive_failures > 1) {
+                                        vTaskDelay(pdMS_TO_TICKS(consecutive_failures * 200));
+                                    }
+                                    if (consecutive_failures >= ART_DECODE_MAX_FAILURES) {
+                                        Serial.printf("[ART] Decode failed %d times, skipping URL\n", consecutive_failures);
+                                        if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                            last_art_url = url;
+                                            xSemaphoreGive(art_mutex);
+                                        }
+                                        consecutive_failures = 0;
+                                        last_failed_url[0] = '\0';
+                                    }
                                 }
                             } else if (isJPEG) {
-                                // Fallback: Software JPEG decode (if hardware not available)
-                                Serial.println("[ART] HW JPEG unavailable, skipping");
-                                // Mark as done to prevent retry
-                                if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
-                                    last_art_url = url;
-                                    xSemaphoreGive(art_mutex);
+                                // HW JPEG decoder not initialized - use SW only
+                                Serial.println("[ART] HW JPEG unavailable, using SW decode");
+                                uint16_t* sw_buf = nullptr;
+                                int sw_w = 0, sw_h = 0;
+                                if (decodeJPEGSoftware(jpgBuf, read, &sw_buf, &sw_w, &sw_h)) {
+                                    memset(art_temp_buffer, 0, ART_SIZE * ART_SIZE * 2);
+                                    scaleImageBilinear(sw_buf, sw_w, sw_h, sw_w, art_temp_buffer, ART_SIZE, ART_SIZE);
+                                    heap_caps_free(sw_buf);
+                                    sampleDominantColor(art_temp_buffer, ART_SIZE, ART_SIZE);
+                                    uint32_t new_color = 0x1a1a1a;
+                                    if (color_sample_count > 0) {
+                                        uint8_t avg_r = color_r_sum / color_sample_count;
+                                        uint8_t avg_g = color_g_sum / color_sample_count;
+                                        uint8_t avg_b = color_b_sum / color_sample_count;
+                                        new_color = ((avg_r * 4 / 10) << 16) | ((avg_g * 4 / 10) << 8) | (avg_b * 4 / 10);
+                                    }
+                                    memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                    memset(&art_dsc, 0, sizeof(art_dsc));
+                                    art_dsc.header.w = ART_SIZE;
+                                    art_dsc.header.h = ART_SIZE;
+                                    art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
+                                    art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
+                                    art_dsc.data = (const uint8_t*)art_buffer;
+                                    if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                        last_art_url = url;
+                                        dominant_color = new_color;
+                                        art_ready = true;
+                                        color_ready = true;
+                                        xSemaphoreGive(art_mutex);
+                                    }
+                                } else {
+                                    // SW also failed - mark as done
+                                    if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                        last_art_url = url;
+                                        xSemaphoreGive(art_mutex);
+                                    }
                                 }
                             } else {
                                 Serial.println("[ART] Unknown image format (not JPEG or PNG)");

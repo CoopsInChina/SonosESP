@@ -71,6 +71,8 @@
 #define ART_TASK_PRIORITY       0       // Album art task priority
 #define ART_DOWNLOAD_TIMEOUT_MS 8000    // Download timeout
 #define ART_CHECK_INTERVAL_MS   100     // How often to check for new art requests
+#define ART_DECODE_MAX_FAILURES 3       // Give up on URL after N decode failures
+#define ART_SW_JPEG_FALLBACK    1       // Enable JPEGDEC SW fallback (progressive, non-div-8)
 
 // =============================================================================
 // SONOS CONTROLLER
