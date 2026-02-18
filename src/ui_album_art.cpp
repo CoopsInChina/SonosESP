@@ -6,14 +6,18 @@
 #include "ui_common.h"
 #include "config.h"
 #include <PNGdec.h>
+// Undefine shared macros from PNGdec before JPEGDEC redefines them (same author, same macros)
+#undef INTELSHORT
+#undef INTELLONG
+#undef MOTOSHORT
+#undef MOTOLONG
 #include <JPEGDEC.h>
 
 // ESP32-P4 Hardware JPEG Decoder
 #include "driver/jpeg_decode.h"
 static jpeg_decoder_handle_t hw_jpeg_decoder = nullptr;
 
-// Software JPEG decoder (fallback for progressive, non-div-8, etc.)
-static JPEGDEC sw_jpeg;
+// Software JPEG decoder callback globals (set before decode, cleared after)
 static uint16_t* sw_jpeg_output = nullptr;
 static int sw_jpeg_width = 0;
 static int sw_jpeg_height = 0;
@@ -217,52 +221,62 @@ static int jpegDrawCallback(JPEGDRAW* pDraw) {
 // Software JPEG decode fallback (handles progressive, non-div-8, etc.)
 // Returns true on success. Caller must heap_caps_free(*out_buffer) when done.
 static bool decodeJPEGSoftware(uint8_t* buf, size_t len, uint16_t** out_buffer, int* out_w, int* out_h) {
-    if (sw_jpeg.openRAM(buf, len, jpegDrawCallback)) {
-        int w = sw_jpeg.getWidth();
-        int h = sw_jpeg.getHeight();
+    // Allocate JPEGDEC in PSRAM (~18KB struct - too large for stack, wastes DRAM if static)
+    JPEGDEC* sw_jpeg = (JPEGDEC*)heap_caps_malloc(sizeof(JPEGDEC), MALLOC_CAP_SPIRAM);
+    if (!sw_jpeg) {
+        Serial.println("[ART] SW JPEG alloc failed for decoder");
+        return false;
+    }
+    new (sw_jpeg) JPEGDEC();  // Placement new to construct
+
+    bool success = false;
+    if (sw_jpeg->openRAM(buf, len, jpegDrawCallback)) {
+        int w = sw_jpeg->getWidth();
+        int h = sw_jpeg->getHeight();
 
         if (w <= 0 || h <= 0 || w > 2048 || h > 2048) {
             Serial.printf("[ART] SW JPEG invalid dimensions: %dx%d\n", w, h);
-            sw_jpeg.close();
-            return false;
-        }
-
-        // Allocate output buffer in PSRAM
-        size_t buf_size = (size_t)w * h * 2;
-        uint16_t* output = (uint16_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-        if (!output) {
-            Serial.printf("[ART] SW JPEG alloc failed: %d bytes\n", (int)buf_size);
-            sw_jpeg.close();
-            return false;
-        }
-        memset(output, 0, buf_size);
-
-        // Set globals for callback
-        sw_jpeg_output = output;
-        sw_jpeg_width = w;
-        sw_jpeg_height = h;
-
-        // Decode with RGB565 little-endian output (matches LVGL)
-        sw_jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-        int result = sw_jpeg.decode(0, 0, 0);  // Full decode, no scaling
-        sw_jpeg.close();
-        sw_jpeg_output = nullptr;
-
-        if (result == 1) {
-            Serial.printf("[ART] SW JPEG decoded: %dx%d\n", w, h);
-            *out_buffer = output;
-            *out_w = w;
-            *out_h = h;
-            return true;
+            sw_jpeg->close();
         } else {
-            Serial.printf("[ART] SW JPEG decode failed: %d\n", result);
-            heap_caps_free(output);
-            return false;
+            // Allocate output buffer in PSRAM
+            size_t buf_size = (size_t)w * h * 2;
+            uint16_t* output = (uint16_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+            if (!output) {
+                Serial.printf("[ART] SW JPEG alloc failed: %d bytes\n", (int)buf_size);
+                sw_jpeg->close();
+            } else {
+                memset(output, 0, buf_size);
+
+                // Set globals for callback
+                sw_jpeg_output = output;
+                sw_jpeg_width = w;
+                sw_jpeg_height = h;
+
+                // Decode with RGB565 little-endian output (matches LVGL)
+                sw_jpeg->setPixelType(RGB565_LITTLE_ENDIAN);
+                int result = sw_jpeg->decode(0, 0, 0);
+                sw_jpeg->close();
+                sw_jpeg_output = nullptr;
+
+                if (result == 1) {
+                    Serial.printf("[ART] SW JPEG decoded: %dx%d\n", w, h);
+                    *out_buffer = output;
+                    *out_w = w;
+                    *out_h = h;
+                    success = true;
+                } else {
+                    Serial.printf("[ART] SW JPEG decode failed: %d\n", result);
+                    heap_caps_free(output);
+                }
+            }
         }
     } else {
         Serial.println("[ART] SW JPEG openRAM failed");
-        return false;
     }
+
+    sw_jpeg->~JPEGDEC();  // Explicit destructor
+    heap_caps_free(sw_jpeg);
+    return success;
 }
 
 // PNGdec callback - decode to temporary buffer
