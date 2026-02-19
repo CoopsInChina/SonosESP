@@ -576,14 +576,6 @@ void albumArtTask(void* param) {
                     if (jpgBuf) {
                         WiFiClient* stream = http.getStreamPtr();
 
-                        // For local network HTTP: release mutex during download
-                        // SOAP commands (Next/Prev/Play) can run while art downloads
-                        // Local HTTP has no TLS, safe without mutex
-                        if (isLocalNetwork && !use_https && mutex_acquired) {
-                            xSemaphoreGive(network_mutex);
-                            mutex_acquired = false;
-                        }
-
                         // Chunked reading to avoid WiFi buffer issues
                         const size_t chunkSize = ART_CHUNK_SIZE;
                         size_t bytesRead = 0;
@@ -624,15 +616,12 @@ void albumArtTask(void* param) {
                             }
 
                             bytesRead += actualRead;
-                            // Yield to WiFi/SDIO task
-                            // Local network: minimal yield (no TLS, fast local network)
-                            // Internet HTTP: 5ms (no TLS overhead)
-                            // Internet HTTPS: 15ms (TLS encryption overhead)
-                            if (isLocalNetwork) {
-                                taskYIELD();
-                            } else {
-                                vTaskDelay(pdMS_TO_TICKS(use_https ? 15 : 5));
-                            }
+                            // Yield to WiFi/SDIO task between chunks.
+                            // taskYIELD() = 0ms if no higher-prio task ready, so Sonos SOAP
+                            // response packets pile up in SDIO RX pool → sdio_push_data_to_queue crash.
+                            // 2ms guaranteed delay lets SDIO receive task drain packets between chunks.
+                            // Internet HTTP: 5ms, Internet HTTPS: 15ms (TLS overhead)
+                            vTaskDelay(pdMS_TO_TICKS(isLocalNetwork ? 2 : (use_https ? 15 : 5)));
                         }
 
                         // Re-acquire mutex for cleanup (http.end, timestamp update)
@@ -697,6 +686,7 @@ void albumArtTask(void* param) {
                                 Serial.printf("[ART] Incomplete %d times, giving up on this URL\n", consecutive_failures);
                                 if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                     last_art_url = url;
+                                    art_show_placeholder = true;
                                     xSemaphoreGive(art_mutex);
                                 }
                                 consecutive_failures = 0;
@@ -850,6 +840,7 @@ void albumArtTask(void* param) {
                                 // Mark as done to prevent infinite retry loop
                                 if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                     last_art_url = url;
+                                    art_show_placeholder = true;
                                     xSemaphoreGive(art_mutex);
                                 }
                             } else if (isJPEG && hw_jpeg_decoder) {
@@ -1046,6 +1037,7 @@ void albumArtTask(void* param) {
                                         Serial.printf("[ART] Decode failed %d times, skipping URL\n", consecutive_failures);
                                         if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                             last_art_url = url;
+                                            art_show_placeholder = true;
                                             xSemaphoreGive(art_mutex);
                                         }
                                         consecutive_failures = 0;
@@ -1088,6 +1080,7 @@ void albumArtTask(void* param) {
                                     // SW also failed - mark as done
                                     if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                         last_art_url = url;
+                                        art_show_placeholder = true;
                                         xSemaphoreGive(art_mutex);
                                     }
                                 }
@@ -1096,6 +1089,7 @@ void albumArtTask(void* param) {
                                 // Mark as done to prevent retry loop
                                 if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                     last_art_url = url;
+                                    art_show_placeholder = true;
                                     xSemaphoreGive(art_mutex);
                                 }
                             }
@@ -1106,6 +1100,7 @@ void albumArtTask(void* param) {
                         // Mark as done - memory issue, retry won't help
                         if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                             last_art_url = url;
+                            art_show_placeholder = true;
                             xSemaphoreGive(art_mutex);
                         }
                     }
@@ -1117,6 +1112,7 @@ void albumArtTask(void* param) {
                     Serial.println("[ART] Connection closed (oversized image)");
                     if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                         last_art_url = url;
+                        art_show_placeholder = true;
                         xSemaphoreGive(art_mutex);
                     }
                     // CRITICAL: Free TLS/DMA resources before releasing mutex
@@ -1167,6 +1163,7 @@ void albumArtTask(void* param) {
                             Serial.printf("[ART] Failed %d times, giving up on this URL\n", consecutive_failures);
                             if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                 last_art_url = url;  // Mark as done
+                                art_show_placeholder = true;
                                 xSemaphoreGive(art_mutex);
                             }
                             consecutive_failures = 0;  // Reset for next URL
