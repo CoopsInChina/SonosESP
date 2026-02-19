@@ -1530,11 +1530,20 @@ void updateUI() {
     }
     if (xSemaphoreTake(art_mutex, 0)) {
         if (art_ready) {
+            // Build art_dsc here on the main thread — same thread as lv_timer_handler() /
+            // LVGL renderer — so there is never concurrent read+write of the descriptor.
+            // The background art task only writes art_buffer (pixels); we set the header here.
+            memset(&art_dsc, 0, sizeof(art_dsc));
+            art_dsc.header.w    = ART_SIZE;
+            art_dsc.header.h    = ART_SIZE;
+            art_dsc.header.cf   = LV_COLOR_FORMAT_RGB565;
+            art_dsc.data_size   = ART_SIZE * ART_SIZE * 2;
+            art_dsc.data        = (const uint8_t*)art_buffer;
             lv_img_set_src(img_album, &art_dsc);
-            lv_obj_remove_flag(img_album, LV_OBJ_FLAG_HIDDEN);  // Show album art
-            lv_obj_add_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);  // Hide placeholder
+            lv_obj_remove_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+            lv_obj_add_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
             art_ready = false;
-            art_show_placeholder = false;  // Clear in case it was set before art loaded
+            art_show_placeholder = false;
         } else if (art_show_placeholder) {
             // Art permanently failed - hide old art, show placeholder
             lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);

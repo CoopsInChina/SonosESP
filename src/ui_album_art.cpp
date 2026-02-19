@@ -451,9 +451,14 @@ void albumArtTask(void* param) {
                 if (fetchUrl != last_art_url) {
                     strncpy(url, fetchUrl.c_str(), sizeof(url) - 1);
                     url[sizeof(url) - 1] = '\0';
-                    // New URL detected - reset failure tracking for clean start
-                    consecutive_failures = 0;
-                    last_failed_url[0] = '\0';
+                    // Only reset failure tracking for genuinely new URLs.
+                    // If this URL previously failed, keep the counter so it reaches
+                    // ART_DECODE_MAX_FAILURES and shows the placeholder instead of
+                    // looping forever (the old code reset to 0 on every retry).
+                    if (strcmp(url, last_failed_url) != 0) {
+                        consecutive_failures = 0;
+                        last_failed_url[0] = '\0';
+                    }
                 }
             }
             xSemaphoreGive(art_mutex);
@@ -808,16 +813,11 @@ void albumArtTask(void* param) {
                                                 new_color = (avg_r << 16) | (avg_g << 8) | avg_b;
                                             }
 
-                                            // Update display buffer + descriptor + flags atomically under mutex
-                                            // Prevents LVGL from reading half-written art_dsc during render
+                                            // Copy pixels and signal ready — art_dsc is written by
+                                            // the main thread in updateUI() to prevent a race with
+                                            // the LVGL renderer (both on main thread, no concurrency).
                                             if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                                 memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
-                                                memset(&art_dsc, 0, sizeof(art_dsc));
-                                                art_dsc.header.w = ART_SIZE;
-                                                art_dsc.header.h = ART_SIZE;
-                                                art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-                                                art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
-                                                art_dsc.data = (const uint8_t*)art_buffer;
                                                 last_art_url = url;
                                                 dominant_color = new_color;
                                                 art_ready = true;
@@ -1001,15 +1001,11 @@ void albumArtTask(void* param) {
                                         new_color = (avg_r << 16) | (avg_g << 8) | avg_b;
                                     }
 
-                                    // Update display buffer + descriptor + flags atomically under mutex
+                                    // Copy pixels and signal ready — art_dsc is written by
+                                    // the main thread in updateUI() to prevent a race with
+                                    // the LVGL renderer (both on main thread, no concurrency).
                                     if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                         memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
-                                        memset(&art_dsc, 0, sizeof(art_dsc));
-                                        art_dsc.header.w = ART_SIZE;
-                                        art_dsc.header.h = ART_SIZE;
-                                        art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-                                        art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
-                                        art_dsc.data = (const uint8_t*)art_buffer;
                                         last_art_url = url;
                                         dominant_color = new_color;
                                         art_ready = true;
@@ -1061,15 +1057,11 @@ void albumArtTask(void* param) {
                                         uint8_t avg_b = color_b_sum / color_sample_count;
                                         new_color = ((avg_r * 4 / 10) << 16) | ((avg_g * 4 / 10) << 8) | (avg_b * 4 / 10);
                                     }
-                                    // Update display buffer + descriptor + flags atomically under mutex
+                                    // Copy pixels and signal ready — art_dsc is written by
+                                    // the main thread in updateUI() to prevent a race with
+                                    // the LVGL renderer (both on main thread, no concurrency).
                                     if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                         memcpy(art_buffer, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
-                                        memset(&art_dsc, 0, sizeof(art_dsc));
-                                        art_dsc.header.w = ART_SIZE;
-                                        art_dsc.header.h = ART_SIZE;
-                                        art_dsc.header.cf = LV_COLOR_FORMAT_RGB565;
-                                        art_dsc.data_size = ART_SIZE * ART_SIZE * 2;
-                                        art_dsc.data = (const uint8_t*)art_buffer;
                                         last_art_url = url;
                                         dominant_color = new_color;
                                         art_ready = true;
