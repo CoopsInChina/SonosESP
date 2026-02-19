@@ -118,7 +118,7 @@
                                               // TLS uses ~115KB; if <15KB left, SDIO RX pool
                                               // exhausts mid-download → sdio_push_data_to_queue crash
                                               // Fresh boot has ~45KB+ after TLS; long-running has ~8KB
-#define OTA_TARGET_FREE_DMA     (125 * 1024)  // Need 125KB free before OTA TLS (was 110KB - too low)
+#define OTA_TARGET_FREE_DMA     (120 * 1024)  // Need 120KB free before OTA TLS (device max ~127KB running)
 #define OTA_DMA_WAIT_TIMEOUT_MS 10000   // Max wait for DMA cleanup
 #define OTA_HTTPS_COOLDOWN_MS   2000    // Wait for previous HTTPS cleanup
 #define OTA_CHECK_DEBOUNCE_MS   5000    // Min delay between update checks
