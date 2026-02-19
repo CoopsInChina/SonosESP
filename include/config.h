@@ -113,7 +113,6 @@
 #define OTA_DMA_CRITICAL        4096    // DMA critical threshold (80ms delay)
 #define OTA_DMA_LOW             8192    // DMA low threshold (30ms delay)
 #define OTA_BASE_DELAY_MS       15      // Base per-chunk delay (~65KB/s, ~25s for 1.5MB)
-#define OTA_SETTLE_AFTER_TLS_MS 1000    // Settle time after TLS handshake
 #define OTA_MIN_DMA_AFTER_TLS   (15 * 1024)  // Minimum free DMA needed after TLS handshake
                                               // TLS uses ~115KB; if <15KB left, SDIO RX pool
                                               // exhausts mid-download → sdio_push_data_to_queue crash
@@ -143,6 +142,8 @@
 #define NVS_KEY_OTA_CHANNEL     "ota_channel"
 #define NVS_KEY_CACHED_DEVICE   "cached_dev"
 #define NVS_KEY_LYRICS          "lyrics"
+#define NVS_KEY_OTA_PENDING     "ota_pending"    // Auto-reboot OTA flag
+#define NVS_KEY_OTA_URL         "ota_url"        // Saved firmware URL for auto-reboot OTA
 
 // =============================================================================
 // UI COLORS (hex values)

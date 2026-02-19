@@ -216,6 +216,13 @@ void setup() {
     lv_screen_load(scr_main);  // Now load main screen
     lv_obj_del(boot_scr);     // Free boot screen objects (~3KB LVGL memory)
     Serial.println("Ready!");
+
+    // Check if device rebooted to free DMA for OTA - auto-trigger the update
+    if (wifiPrefs.getBool(NVS_KEY_OTA_PENDING, false)) {
+        wifiPrefs.putBool(NVS_KEY_OTA_PENDING, false);
+        ota_auto_pending = true;
+        Serial.println("[OTA] Pending OTA detected - will auto-trigger from main loop");
+    }
 }
 
 // WiFi auto-reconnection check (runs every 10 seconds when disconnected)
@@ -278,6 +285,11 @@ void loop() {
         checkAutoDim();
         checkWiFiReconnect();
         logHeapStatus();  // Periodic memory monitoring
+
+        if (ota_auto_pending) {
+            ota_auto_pending = false;
+            triggerPendingOTA();
+        }
     }
 
     vTaskDelay(pdMS_TO_TICKS(3));

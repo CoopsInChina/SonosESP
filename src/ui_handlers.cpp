@@ -818,16 +818,23 @@ static void performOTAUpdate() {
     Serial.printf("[OTA] Pre-TLS DMA check: %d bytes free (need %d)\n", free_dma, OTA_TARGET_FREE_DMA);
 
     if (free_dma < OTA_TARGET_FREE_DMA) {
-        Serial.printf("[OTA] Insufficient DMA for TLS (%d bytes, need %d) - reboot device first\n",
+        Serial.printf("[OTA] Low DMA (%d bytes, need %d) - saving pending flag and rebooting\n",
             free_dma, OTA_TARGET_FREE_DMA);
+        // Save flag + URL: auto-trigger on reboot skips checkForUpdates() (no HTTPS = more DMA for TLS)
+        Preferences prefs;
+        prefs.begin(NVS_NAMESPACE, false);
+        prefs.putBool(NVS_KEY_OTA_PENDING, true);
+        prefs.putString(NVS_KEY_OTA_URL, download_url.c_str());
+        prefs.end();
         if (lbl_ota_status) {
-            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Low memory - reboot device, then update");
-            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Restarting to apply update...");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFFFFF), 0);
         }
         lv_tick_inc(10);
         lv_refr_now(NULL);
-        otaRecovery();
-        return;
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        ESP.restart();
+        return;  // unreachable
     }
 
     // Optimize WiFi for OTA download
@@ -916,17 +923,12 @@ static void performOTAUpdate() {
     uint32_t lastUIUpdate = millis();
     static uint8_t buff[OTA_BUFFER_SIZE];
 
-    // CRITICAL: Let SDIO buffers settle after TLS handshake
-    // TLS session consumes ~114KB DMA, leaving only ~5KB for SDIO
-    Serial.println("[OTA] Stabilizing SDIO after TLS handshake...");
-    vTaskDelay(pdMS_TO_TICKS(OTA_SETTLE_AFTER_TLS_MS));
-
+    // Check DMA BEFORE settle: incoming firmware data buffers during the settle period
+    // and consumes ~16KB of DMA. Checking after settle sees the drained value and
+    // incorrectly aborts. Check immediately after HTTP 200 while DMA is still healthy.
     size_t dma_after_tls = heap_caps_get_free_size(MALLOC_CAP_DMA);
-    Serial.printf("[OTA] Starting download - Free DMA: %d bytes\n", dma_after_tls);
+    Serial.printf("[OTA] Post-TLS DMA: %d bytes (need %d)\n", dma_after_tls, OTA_MIN_DMA_AFTER_TLS);
 
-    // If DMA is too low after TLS, SDIO RX packet pool exhausts mid-download → hard crash.
-    // Fresh boot leaves ~45KB+ after TLS; long-running device can leave <10KB → crash at ~10%.
-    // Abort gracefully here instead of crashing, and tell the user to restart.
     if (dma_after_tls < OTA_MIN_DMA_AFTER_TLS) {
         Serial.printf("[OTA] Insufficient DMA after TLS (%d bytes, need %d) - aborting\n",
             dma_after_tls, OTA_MIN_DMA_AFTER_TLS);
@@ -942,6 +944,8 @@ static void performOTAUpdate() {
         otaRecovery();
         return;
     }
+
+    Serial.printf("[OTA] Starting download - Free DMA: %d bytes\n", dma_after_tls);
 
     int chunk_count = 0;
     uint32_t download_start = millis();
@@ -1123,6 +1127,42 @@ void ev_check_update(lv_event_t* e) {
 
 void ev_install_update(lv_event_t* e) {
     performOTAUpdate();
+}
+
+// Called from loop() when ota_auto_pending is set (device rebooted for OTA due to low DMA).
+// Uses the URL saved before reboot - skips checkForUpdates() entirely so no HTTPS session
+// consumes DMA before the OTA TLS handshake. This breaks the reboot loop.
+void triggerPendingOTA() {
+    // Load saved URL - skip checkForUpdates() (its HTTPS session costs ~8KB DMA we can't afford)
+    Preferences prefs;
+    prefs.begin(NVS_NAMESPACE, false);
+    String saved_url = prefs.getString(NVS_KEY_OTA_URL, "");
+    prefs.remove(NVS_KEY_OTA_URL);
+    prefs.end();
+
+    lv_screen_load(scr_ota);
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    if (saved_url.length() > 0) {
+        Serial.printf("[OTA] Auto-trigger: using saved URL (no pre-OTA HTTPS - max DMA preserved)\n");
+        download_url = saved_url;
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Resuming update after restart...");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFFFFF), 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
+        performOTAUpdate();
+    } else {
+        // No saved URL (e.g. flag set manually) - fall back to normal check
+        Serial.println("[OTA] Auto-trigger: no saved URL - running check");
+        checkForUpdates();
+        if (download_url.length() > 0) {
+            performOTAUpdate();
+        }
+    }
 }
 
 // ============================================================================

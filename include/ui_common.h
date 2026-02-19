@@ -144,6 +144,7 @@ extern String latest_version;
 extern String download_url;
 extern int ota_channel;  // 0=Stable, 1=Nightly
 extern volatile bool ota_in_progress;  // Flag to skip non-essential tasks during OTA
+extern bool ota_auto_pending;          // Set on boot if device rebooted for OTA (low DMA)
 extern SemaphoreHandle_t ota_progress_mutex;  // Protects OTA progress updates and state
 
 // ============================================================================
@@ -204,6 +205,7 @@ void checkAutoDim();
 void requestAlbumArt(const String &url);
 void updateUI();
 void processUpdates();
+void triggerPendingOTA();  // Called from loop() when ota_auto_pending is set
 String urlEncode(const char *url);
 void cleanupBrowseData(lv_obj_t *list);
 lv_obj_t *createSettingsSidebar(lv_obj_t *screen, int activeIdx);
