@@ -834,10 +834,12 @@ void SonosController::notifyUI(UIUpdateType_e type) {
 
 // Helper: Detect if URI is a radio station
 // Based on research: x-sonosapi-stream:, x-rincon-mp3radio:, x-sonosapi-radio:, aac://, hls-radio:
+// x-sonosapi-hls: = BBC Sounds live radio (NOT x-sonosapi-hls-static: which is on-demand podcasts)
 static bool isRadioURI(const String& uri) {
     return uri.startsWith("x-sonosapi-stream:") ||
            uri.startsWith("x-rincon-mp3radio:") ||
            uri.startsWith("x-sonosapi-radio:") ||
+           uri.startsWith("x-sonosapi-hls:") ||
            uri.startsWith("aac://") ||
            uri.startsWith("hls-radio:");
 }

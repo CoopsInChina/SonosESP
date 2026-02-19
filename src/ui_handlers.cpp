@@ -1414,7 +1414,8 @@ void updateUI() {
                 // Check if it's pointing to the radio URI (generic icon)
                 if (artURL.indexOf("x-sonosapi-stream") > 0 ||
                     artURL.indexOf("x-rincon-mp3radio") > 0 ||
-                    artURL.indexOf("x-sonosapi-radio") > 0) {
+                    artURL.indexOf("x-sonosapi-radio") > 0 ||
+                    artURL.indexOf("x-sonosapi-hls") > 0) {
                     artURL = d->radioStationArtURL;
                     usingStationLogo = true;
                     Serial.println("[ART] Radio: Using station logo (replacing generic icon)");
