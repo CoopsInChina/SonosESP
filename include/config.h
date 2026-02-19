@@ -114,7 +114,11 @@
 #define OTA_DMA_LOW             8192    // DMA low threshold (30ms delay)
 #define OTA_BASE_DELAY_MS       15      // Base per-chunk delay (~65KB/s, ~25s for 1.5MB)
 #define OTA_SETTLE_AFTER_TLS_MS 1000    // Settle time after TLS handshake
-#define OTA_TARGET_FREE_DMA     (110 * 1024)  // Need 110KB free before OTA TLS
+#define OTA_MIN_DMA_AFTER_TLS   (15 * 1024)  // Minimum free DMA needed after TLS handshake
+                                              // TLS uses ~115KB; if <15KB left, SDIO RX pool
+                                              // exhausts mid-download → sdio_push_data_to_queue crash
+                                              // Fresh boot has ~45KB+ after TLS; long-running has ~8KB
+#define OTA_TARGET_FREE_DMA     (125 * 1024)  // Need 125KB free before OTA TLS (was 110KB - too low)
 #define OTA_DMA_WAIT_TIMEOUT_MS 10000   // Max wait for DMA cleanup
 #define OTA_HTTPS_COOLDOWN_MS   2000    // Wait for previous HTTPS cleanup
 #define OTA_CHECK_DEBOUNCE_MS   5000    // Min delay between update checks

@@ -775,6 +775,20 @@ static void performOTAUpdate() {
     Serial.println("[OTA] Suspending Sonos tasks...");
     sonos.suspendTasks();
 
+    // ================================================================
+    // NETWORK MUTEX SYNC: Guarantee all HTTP/HTTPS DMA is freed
+    // ================================================================
+    // Art and lyrics tasks free ALL TLS/HTTP DMA INSIDE network_mutex before releasing it.
+    // Taking the mutex here is a synchronization barrier — if we get it, we KNOW every
+    // previous HTTP/HTTPS session has fully cleaned up its DMA. Give it back immediately.
+    Serial.println("[OTA] Waiting for network DMA sync...");
+    if (xSemaphoreTake(network_mutex, pdMS_TO_TICKS(3000))) {
+        xSemaphoreGive(network_mutex);
+        Serial.println("[OTA] Network DMA sync complete");
+    } else {
+        Serial.println("[OTA] WARNING: Network mutex timeout - DMA may not be fully freed");
+    }
+
     // Set OTA-in-progress flag
     if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
         ota_in_progress = true;
@@ -791,9 +805,10 @@ static void performOTAUpdate() {
     lv_refr_now(NULL);
 
     // Force WiFi to flush pending operations (releases DMA buffers)
+    // 1500ms settle: TCP sockets need time to fully close after RST (lwIP TIME_WAIT drain)
     Serial.println("[OTA] Flushing WiFi buffers...");
     WiFi.setSleep(true);
-    vTaskDelay(pdMS_TO_TICKS(200));
+    vTaskDelay(pdMS_TO_TICKS(1500));
     WiFi.setSleep(false);
 
     // ACTIVELY MONITOR free DMA until target reached (verifies cleanup complete)
@@ -908,7 +923,28 @@ static void performOTAUpdate() {
     // TLS session consumes ~114KB DMA, leaving only ~5KB for SDIO
     Serial.println("[OTA] Stabilizing SDIO after TLS handshake...");
     vTaskDelay(pdMS_TO_TICKS(OTA_SETTLE_AFTER_TLS_MS));
-    Serial.printf("[OTA] Starting download - Free DMA: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
+
+    size_t dma_after_tls = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    Serial.printf("[OTA] Starting download - Free DMA: %d bytes\n", dma_after_tls);
+
+    // If DMA is too low after TLS, SDIO RX packet pool exhausts mid-download → hard crash.
+    // Fresh boot leaves ~45KB+ after TLS; long-running device can leave <10KB → crash at ~10%.
+    // Abort gracefully here instead of crashing, and tell the user to restart.
+    if (dma_after_tls < OTA_MIN_DMA_AFTER_TLS) {
+        Serial.printf("[OTA] Insufficient DMA after TLS (%d bytes, need %d) - aborting\n",
+            dma_after_tls, OTA_MIN_DMA_AFTER_TLS);
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Low memory - restart device and try again");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
+        Update.abort();
+        http.end();
+        client.stop();
+        otaRecovery();
+        return;
+    }
 
     int chunk_count = 0;
     uint32_t download_start = millis();
@@ -1041,6 +1077,7 @@ static void performOTAUpdate() {
         lv_refr_now(NULL);
         Update.abort();
         http.end();
+        client.stop();
         otaRecovery();
         return;
     }
