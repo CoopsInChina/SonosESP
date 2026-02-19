@@ -811,26 +811,23 @@ static void performOTAUpdate() {
     vTaskDelay(pdMS_TO_TICKS(1500));
     WiFi.setSleep(false);
 
-    // ACTIVELY MONITOR free DMA until target reached (verifies cleanup complete)
-    Serial.println("[OTA] Verifying DMA memory cleanup...");
-    uint32_t wait_start = millis();
+    // Check DMA is sufficient for TLS handshake + SDIO minimum.
+    // DMA after task cleanup is stable — waiting never helps. Abort immediately if insufficient.
+    // Fresh boot has ~160KB free (OTA works). Running state has ~122KB (TLS needs 130KB → reboot first).
     uint32_t free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
-
-    while (free_dma < OTA_TARGET_FREE_DMA && (millis() - wait_start) < OTA_DMA_WAIT_TIMEOUT_MS) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
-        if ((millis() - wait_start) % 1000 < 150) {
-            Serial.printf("[OTA] Waiting... Free DMA: %d bytes (target: %d bytes)\n",
-                free_dma, OTA_TARGET_FREE_DMA);
-        }
-    }
-
-    Serial.printf("[OTA] Cleanup complete - Free DMA: %d bytes (waited %lums)\n",
-        free_dma, millis() - wait_start);
+    Serial.printf("[OTA] Pre-TLS DMA check: %d bytes free (need %d)\n", free_dma, OTA_TARGET_FREE_DMA);
 
     if (free_dma < OTA_TARGET_FREE_DMA) {
-        Serial.printf("[OTA] WARNING: Only %d bytes free (target %d) - OTA may fail\n",
+        Serial.printf("[OTA] Insufficient DMA for TLS (%d bytes, need %d) - reboot device first\n",
             free_dma, OTA_TARGET_FREE_DMA);
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Low memory - reboot device, then update");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
+        otaRecovery();
+        return;
     }
 
     // Optimize WiFi for OTA download
