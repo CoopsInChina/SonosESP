@@ -208,13 +208,9 @@ void setup() {
             sonos.startTasks();
             sonos_started = true;
         } else {
-            // No cache or unreachable - run full SSDP discovery
-            int cnt = sonos.discoverDevices();
-            if (cnt > 0) {
-                sonos.selectDevice(0);
-                sonos.startTasks();
-                sonos_started = true;
-            }
+            // Cache miss or unreachable - skip SSDP at boot (device may not be ready yet)
+            // User can trigger discovery manually via Settings > Scan
+            Serial.println("[SONOS] Cached device unreachable at boot - use Settings to scan");
         }
     }
 
