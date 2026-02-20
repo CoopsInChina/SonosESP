@@ -8,6 +8,8 @@
 #include <HTTPClient.h>
 #include "lvgl.h"
 #include "ui_common.h"
+#include <new>  // placement new for PSRAM device array
+#include "esp_memory_utils.h"  // esp_ptr_external_ram()
 
 // Command debounce tracking
 static uint32_t lastCommandTime = 0;
@@ -21,6 +23,9 @@ static void encodeXML(String& s) {
 }
 
 SonosController::SonosController() {
+    // Keep constructor minimal - global objects are constructed before setup(),
+    // before PSRAM is guaranteed initialized. Allocation happens in begin().
+    devices = nullptr;
     deviceCount = 0;
     currentDeviceIndex = -1;
     deviceMutex = NULL;
@@ -36,9 +41,41 @@ SonosController::~SonosController() {
     if (deviceMutex) vSemaphoreDelete(deviceMutex);
     if (commandQueue) vQueueDelete(commandQueue);
     if (uiUpdateQueue) vQueueDelete(uiUpdateQueue);
+
+    // Explicitly call destructors (frees String heap allocations) then free PSRAM block
+    if (devices) {
+        for (int i = 0; i < MAX_SONOS_DEVICES; i++) {
+            devices[i].~SonosDevice();
+        }
+        heap_caps_free(devices);
+        devices = nullptr;
+    }
 }
 
 void SonosController::begin() {
+    // Allocate devices array in PSRAM here (not in constructor) - PSRAM is
+    // guaranteed initialized by the time begin() is called from setup().
+    // Keeps ~112KB out of DMA-capable SRAM, preventing SDIO RX buffer exhaustion.
+    devices = (SonosDevice*)heap_caps_malloc(
+        MAX_SONOS_DEVICES * sizeof(SonosDevice), MALLOC_CAP_SPIRAM);
+    if (!devices) {
+        // Fallback: DRAM (should never happen with 32MB PSRAM)
+        Serial.println("[SONOS] WARNING: PSRAM unavailable, falling back to DRAM for devices");
+        devices = (SonosDevice*)heap_caps_malloc(
+            MAX_SONOS_DEVICES * sizeof(SonosDevice), MALLOC_CAP_8BIT);
+    }
+    if (devices) {
+        // Placement new: runs constructors on all String members (initialises to empty)
+        for (int i = 0; i < MAX_SONOS_DEVICES; i++) {
+            new (&devices[i]) SonosDevice();
+        }
+        Serial.printf("[SONOS] Devices array: %u bytes in %s\n",
+            (unsigned)(MAX_SONOS_DEVICES * sizeof(SonosDevice)),
+            esp_ptr_external_ram(devices) ? "PSRAM" : "DRAM");
+    } else {
+        Serial.println("[SONOS] FATAL: Could not allocate devices array - discovery disabled");
+    }
+
     deviceMutex = xSemaphoreCreateMutex();
     commandQueue = xQueueCreate(SONOS_CMD_QUEUE_SIZE, sizeof(CommandRequest_t));
     uiUpdateQueue = xQueueCreate(SONOS_UI_QUEUE_SIZE, sizeof(UIUpdate_t));

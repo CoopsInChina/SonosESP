@@ -10,6 +10,7 @@
 // Discovery
 // ============================================================================
 int SonosController::discoverDevices() {
+    if (!devices) { Serial.println("[SONOS] devices array not allocated"); return 0; }
     Serial.printf("[SONOS] Starting discovery...\n");
     deviceCount = 0;
 
@@ -257,6 +258,7 @@ void SonosController::cacheSelectedDevice() {
 }
 
 bool SonosController::tryLoadCachedDevice() {
+    if (!devices) { Serial.println("[SONOS] devices array not allocated"); return false; }
     String cachedIP = prefs.getString("cached_ip", "");
     String cachedRoom = prefs.getString("cached_room", "");
     String cachedRincon = prefs.getString("cached_rincon", "");

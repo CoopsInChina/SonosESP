@@ -492,24 +492,24 @@ void albumArtTask(void* param) {
 
                 // PRE-WAIT: Wait for cooldowns BEFORE acquiring mutex
                 // This prevents blocking SOAP commands (Next/Prev/Play) during cooldown waits
-                // Local network HTTP (Sonos, NAS, Plex) skips cooldowns - no TLS overhead
-                if (!isLocalNetwork) {
-                    // General SDIO cooldown (200ms since last network op)
+                // 200ms general cooldown applies to ALL URLs - even local HTTP generates SDIO
+                // traffic when lyrics/SOAP releases mutex just before art fires (Crash B pattern)
+                {
                     unsigned long now = millis();
                     unsigned long elapsed = now - last_network_end_ms;
                     if (last_network_end_ms > 0 && elapsed < 200) {
                         vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
                     }
+                }
 
-                    // HTTPS-specific cooldown (2000ms since last HTTPS)
-                    if (use_https) {
-                        now = millis();
-                        elapsed = now - last_https_end_ms;
-                        if (last_https_end_ms > 0 && elapsed < 2000) {
-                            unsigned long wait_ms = 2000 - elapsed;
-                            Serial.printf("[ART] HTTPS cooldown: waiting %lums (elapsed: %lums)\n", wait_ms, elapsed);
-                            vTaskDelay(pdMS_TO_TICKS(wait_ms));
-                        }
+                // HTTPS-specific cooldown (2000ms) only for internet URLs - local has no TLS
+                if (!isLocalNetwork && use_https) {
+                    unsigned long now = millis();
+                    unsigned long elapsed = now - last_https_end_ms;
+                    if (last_https_end_ms > 0 && elapsed < 2000) {
+                        unsigned long wait_ms = 2000 - elapsed;
+                        Serial.printf("[ART] HTTPS cooldown: waiting %lums (elapsed: %lums)\n", wait_ms, elapsed);
+                        vTaskDelay(pdMS_TO_TICKS(wait_ms));
                     }
                 }
 
@@ -536,19 +536,19 @@ void albumArtTask(void* param) {
                     }
 
                     // Re-check cooldowns under mutex (another task may have used network while we waited)
-                    // Only for non-local URLs; local network HTTP doesn't need cooldowns
-                    if (!isLocalNetwork) {
+                    // 200ms applies to ALL URLs (even local HTTP can cause SDIO RX overflow)
+                    {
                         unsigned long now = millis();
                         unsigned long elapsed = now - last_network_end_ms;
                         if (last_network_end_ms > 0 && elapsed < 200) {
                             vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
                         }
-                        if (use_https) {
-                            now = millis();
-                            elapsed = now - last_https_end_ms;
-                            if (last_https_end_ms > 0 && elapsed < 2000) {
-                                vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
-                            }
+                    }
+                    if (!isLocalNetwork && use_https) {
+                        unsigned long now = millis();
+                        unsigned long elapsed = now - last_https_end_ms;
+                        if (last_https_end_ms > 0 && elapsed < 2000) {
+                            vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
                         }
                     }
 
@@ -624,9 +624,9 @@ void albumArtTask(void* param) {
                             // Yield to WiFi/SDIO task between chunks.
                             // taskYIELD() = 0ms if no higher-prio task ready, so Sonos SOAP
                             // response packets pile up in SDIO RX pool → sdio_push_data_to_queue crash.
-                            // 2ms guaranteed delay lets SDIO receive task drain packets between chunks.
-                            // Internet HTTP: 5ms, Internet HTTPS: 15ms (TLS overhead)
-                            vTaskDelay(pdMS_TO_TICKS(isLocalNetwork ? 2 : (use_https ? 15 : 5)));
+                            // 5ms guaranteed delay lets SDIO receive task drain packets between chunks.
+                            // Local HTTP: 5ms, Internet HTTP: 5ms, Internet HTTPS: 15ms (TLS overhead)
+                            vTaskDelay(pdMS_TO_TICKS(use_https ? 15 : 5));
                         }
 
                         // Re-acquire mutex for cleanup (http.end, timestamp update)
@@ -655,11 +655,12 @@ void albumArtTask(void* param) {
                             http.end();
                             if (use_https) secure_client.stop();
                             // Wait for in-flight packets to flush
-                            // Local Sonos: 50ms (minimal, no TLS)
-                            // Local NAS/Plex: 100ms (local HTTP, slightly more than Sonos)
+                            // Local Sonos: 300ms (was 50ms - insufficient for partial large download;
+                            //   ~28 TCP ACKs still in SDIO TX queue when retry TCP SYN fires → Crash A)
+                            // Local NAS/Plex: 300ms (same reasoning as Sonos)
                             // Internet HTTP: 300ms (simple TCP cleanup)
                             // Internet HTTPS: 1000ms (TLS session + TCP cleanup)
-                            vTaskDelay(pdMS_TO_TICKS(isFromSonosDevice ? 50 : (isLocalNetwork ? 100 : (use_https ? 1000 : 300))));
+                            vTaskDelay(pdMS_TO_TICKS(isLocalNetwork ? 300 : (use_https ? 1000 : 300)));
                             last_network_end_ms = millis();
                             if (use_https) last_https_end_ms = millis();
                             if (mutex_acquired) {

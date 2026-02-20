@@ -77,7 +77,7 @@
 // =============================================================================
 // SONOS CONTROLLER
 // =============================================================================
-#define SONOS_MAX_DEVICES       10      // Maximum discoverable devices
+#define SONOS_MAX_DEVICES       32      // Maximum discoverable devices (keep in sync with MAX_SONOS_DEVICES)
 #define SONOS_QUEUE_SIZE_MAX    500     // Maximum queue items to fetch
 #define SONOS_QUEUE_BATCH_SIZE  50      // Items per queue fetch request
 #define SONOS_CMD_QUEUE_SIZE    10      // Command queue depth

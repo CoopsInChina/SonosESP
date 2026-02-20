@@ -11,7 +11,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
-#define MAX_SONOS_DEVICES 10
+#define MAX_SONOS_DEVICES 32
 #define QUEUE_ITEMS_MAX 50  // Keep at 50 for stable performance
 
 // Command queue for network task
@@ -112,7 +112,9 @@ struct SonosDevice {
 
 class SonosController {
 private:
-    SonosDevice devices[MAX_SONOS_DEVICES];
+    // Allocated in PSRAM to preserve DMA-capable SRAM for SDIO WiFi ring buffers.
+    // MAX_SONOS_DEVICES × ~3.5KB = ~112KB - too large for DMA SRAM (~160KB total free).
+    SonosDevice* devices;
     int deviceCount;
     int currentDeviceIndex;
     WiFiUDP udp;
