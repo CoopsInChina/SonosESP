@@ -19,7 +19,7 @@
 #define DEFAULT_WIFI_PASSWORD ""
 
 // Firmware version
-#define FIRMWARE_VERSION "1.2.5-nightly.36c2562"
+#define FIRMWARE_VERSION "1.2.5-nightly.c0f7b8d"
 #define GITHUB_REPO "OpenSurface/SonosESP"
 #define GITHUB_API_URL "https://api.github.com/repos/" GITHUB_REPO "/releases/latest"
 
