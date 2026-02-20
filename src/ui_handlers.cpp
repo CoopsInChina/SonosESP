@@ -636,6 +636,12 @@ static void otaRecovery() {
     // Close HTTP/TLS cleanup
     Serial.println("[OTA] === RECOVERY: Restoring normal operation ===");
 
+    // Update HTTPS timestamps so art/lyrics tasks use proper cooldown after restarting.
+    // performOTAUpdate() always does HTTPS before calling otaRecovery() on failure,
+    // so art/lyrics must not fire HTTPS immediately after.
+    last_network_end_ms = millis();
+    last_https_end_ms = millis();
+
     // Hide progress bar and re-enable buttons
     if (bar_ota_progress) {
         lv_obj_add_flag(bar_ota_progress, LV_OBJ_FLAG_HIDDEN);
@@ -771,16 +777,14 @@ static void performOTAUpdate() {
             heap_caps_get_free_size(MALLOC_CAP_DMA));
     }
 
-    // Suspend Sonos tasks
-    Serial.println("[OTA] Suspending Sonos tasks...");
-    sonos.suspendTasks();
-
     // ================================================================
     // NETWORK MUTEX SYNC: Guarantee all HTTP/HTTPS DMA is freed
     // ================================================================
-    // Art and lyrics tasks free ALL TLS/HTTP DMA INSIDE network_mutex before releasing it.
-    // Taking the mutex here is a synchronization barrier — if we get it, we KNOW every
-    // previous HTTP/HTTPS session has fully cleaned up its DMA. Give it back immediately.
+    // CRITICAL: Do this BEFORE suspending Sonos. Sonos SOAP requests also hold
+    // network_mutex. If Sonos is suspended mid-SOAP while holding the mutex, the
+    // sync below would deadlock (3s timeout, then proceed with half-open TCP).
+    // By syncing first, we wait for any in-progress SOAP to release the mutex,
+    // THEN suspend Sonos safely.
     Serial.println("[OTA] Waiting for network DMA sync...");
     if (xSemaphoreTake(network_mutex, pdMS_TO_TICKS(3000))) {
         xSemaphoreGive(network_mutex);
@@ -788,6 +792,10 @@ static void performOTAUpdate() {
     } else {
         Serial.println("[OTA] WARNING: Network mutex timeout - DMA may not be fully freed");
     }
+
+    // Suspend Sonos tasks (AFTER mutex sync - guaranteed not holding network_mutex)
+    Serial.println("[OTA] Suspending Sonos tasks...");
+    sonos.suspendTasks();
 
     // Set OTA-in-progress flag
     if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
@@ -833,6 +841,8 @@ static void performOTAUpdate() {
         lv_tick_inc(10);
         lv_refr_now(NULL);
         vTaskDelay(pdMS_TO_TICKS(2000));
+        display_set_brightness(0);  // Black screen before reboot (panel default is blue)
+        vTaskDelay(pdMS_TO_TICKS(100));
         ESP.restart();
         return;  // unreachable
     }
@@ -1035,6 +1045,7 @@ static void performOTAUpdate() {
                 }
             }
         } else {
+            esp_task_wdt_reset();  // Feed watchdog when idle - stall timeout == watchdog timeout
             vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
@@ -1428,25 +1439,48 @@ void updateUI() {
     // Detect any URI change (track or source)
     bool uri_changed = (d->currentURI != last_track_uri);
 
-    if (uri_changed && d->currentURI.length() > 0) {
-        if (actual_source_change) {
-            Serial.printf("[ART] SOURCE CHANGE: %s -> %s\n", last_source_prefix.c_str(), current_source_prefix.c_str());
-            last_source_prefix = current_source_prefix;
-        } else {
-            Serial.printf("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
+    if (uri_changed) {
+        // Always update last_track_uri (even when empty) to prevent repeated firing
+        // when Sonos reports empty URI in stopped state
+        last_track_uri = d->currentURI;
+
+        if (d->currentURI.length() > 0) {
+            if (actual_source_change) {
+                Serial.printf("[ART] SOURCE CHANGE: %s -> %s\n", last_source_prefix.c_str(), current_source_prefix.c_str());
+                last_source_prefix = current_source_prefix;
+            } else {
+                Serial.printf("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
+            }
+            // CRITICAL: Abort any in-progress album art download immediately
+            // Applies to ALL track changes (not just source changes) so the art task
+            // doesn't wait for a 10-second HTTP timeout before processing the new track
+            art_abort_download = true;
+            // CRITICAL: Must hold art_mutex when writing last_art_url - the art task reads
+            // it under mutex, and String assignment is not atomic (race condition → corruption)
+            if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
+                last_art_url = "";  // Force art refresh on any URI change
+                xSemaphoreGive(art_mutex);
+            }
         }
-        // CRITICAL: Abort any in-progress album art download immediately
-        // Applies to ALL track changes (not just source changes) so the art task
-        // doesn't wait for a 10-second HTTP timeout before processing the new track
-        art_abort_download = true;
-        // CRITICAL: Must hold art_mutex when writing last_art_url - the art task reads
-        // it under mutex, and String assignment is not atomic (race condition → corruption)
+    }
+
+    // Show placeholder when device transitions to "Not Playing" (no active track)
+    // Without this, the last track's art stays frozen when playback stops
+    static bool had_track = false;
+    bool has_track = (d->currentTrack.length() > 0);
+    if (had_track && !has_track) {
+        Serial.println("[ART] Not playing - clearing art display");
+        art_abort_download = true;  // Stop any in-progress download immediately
+        if (img_album) lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+        if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
         if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
-            last_art_url = "";  // Force art refresh on any URI change
+            last_art_url = "";
+            pending_art_url = "";  // Prevent art task re-fetching the old URL
+            art_ready = false;     // Discard any just-completed download (prevents art flash)
             xSemaphoreGive(art_mutex);
         }
-        last_track_uri = d->currentURI;
     }
+    had_track = has_track;
 
     // Request album art if URL provided and (URL changed or track changed)
     // Note: Don't compare against last_art_url (HTTP) since d->albumArtURL is HTTPS
@@ -1460,7 +1494,19 @@ void updateUI() {
         artChanged = true;
     }
 
-    if (hasArt && artChanged) {
+    if (!hasArt && uri_changed) {
+        // Track changed but has NO art URL — clear old art and show placeholder immediately
+        // (Without this, the old track's art stays on screen forever)
+        Serial.println("[ART] No art URL for this track - showing placeholder");
+        if (img_album) lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+        if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+        if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
+            last_art_url = "";
+            pending_art_url = "";  // Prevent art task re-fetching the old URL
+            art_ready = false;     // Discard any just-completed download (prevents art flash)
+            xSemaphoreGive(art_mutex);
+        }
+    } else if (hasArt && artChanged) {
         String artURL = "";
         bool usingStationLogo = false;  // Track if we're using station logo (PNG allowed)
 
