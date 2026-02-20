@@ -188,12 +188,18 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
 
     // PRE-WAIT: Wait for SDIO cooldown BEFORE acquiring mutex
     // This prevents blocking other SOAP requests during cooldown waits
-    // SOAP goes to local Sonos device (plain HTTP, no TLS) so only needs general cooldown
+    // SOAP itself is plain HTTP, but must also respect the HTTPS cooldown — lyrics fetches
+    // (lrclib.net, always HTTPS) leave TLS teardown traffic on SDIO for ~2000ms after release.
+    // Without this, SOAP fires instantly after lyrics releases the mutex and crashes SDIO RX.
     {
         unsigned long now = millis();
         unsigned long elapsed = now - last_network_end_ms;
         if (last_network_end_ms > 0 && elapsed < 200) {
             vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
+        }
+        unsigned long elapsed_https = millis() - last_https_end_ms;
+        if (last_https_end_ms > 0 && elapsed_https < 2000) {
+            vTaskDelay(pdMS_TO_TICKS(2000 - elapsed_https));
         }
     }
 
@@ -202,6 +208,20 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
         Serial.println("[SOAP] Failed to acquire network mutex - request failed");
         http.end();
         return "";
+    }
+
+    // POST-MUTEX re-check: SOAP may have been waiting on xSemaphoreTake while lyrics ran a full
+    // HTTPS session. The pre-wait check above is stale in that case — re-check both cooldowns
+    // now that we hold the mutex and know exactly when the previous session ended.
+    {
+        unsigned long elapsed = millis() - last_network_end_ms;
+        if (last_network_end_ms > 0 && elapsed < 200) {
+            vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
+        }
+        unsigned long elapsed_https = millis() - last_https_end_ms;
+        if (last_https_end_ms > 0 && elapsed_https < 2000) {
+            vTaskDelay(pdMS_TO_TICKS(2000 - elapsed_https));
+        }
     }
 
     int code = http.POST(body);

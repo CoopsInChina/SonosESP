@@ -343,26 +343,13 @@ static String prepareAlbumArtURL(const String& rawUrl) {
     // Spotify: Keep original resolution (640x640) since HTTP is lightweight
     // No size reduction needed - HTTP has no TLS overhead!
 
-    // CRITICAL FIX: Downgrade HTTPS → HTTP for public CDN URLs
+    // Universal HTTP downgrade: try HTTP for ALL art HTTPS URLs
     // Removes ALL TLS overhead (handshake, encryption, DMA memory)
     // This is the KEY to SDIO stability - no TLS = no crashes!
-    // Public album art doesn't need encryption
+    // If a server refuses HTTP, the request returns non-200 and we show placeholder.
+    // Redirect following is disabled in the downloader to prevent unexpected HTTPS loops.
     if (fetchUrl.startsWith("https://")) {
-        // Spotify CDN
-        if (fetchUrl.indexOf("i.scdn.co") != -1 ||
-            fetchUrl.indexOf("mosaic.scdn.co") != -1) {
-            fetchUrl.replace("https://", "http://");
-        }
-        // Deezer CDN
-        else if (fetchUrl.indexOf("dzcdn.net") != -1) {
-            fetchUrl.replace("https://", "http://");
-        }
-        // TuneIn CDN
-        else if (fetchUrl.indexOf("cdn-profiles.tunein.com") != -1 ||
-                 fetchUrl.indexOf("cdn-radiotime-logos.tunein.com") != -1) {
-            fetchUrl.replace("https://", "http://");
-        }
-        // Add other public CDNs as needed
+        fetchUrl.replace("https://", "http://");
     }
 
     // Sonos getaa URLs can contain unescaped '?' and '&' in the u= parameter; encode them only
@@ -562,6 +549,10 @@ void albumArtTask(void* param) {
                     // Local network: 3s timeout (LAN responds in <1s, 3s catches slow devices)
                     // Internet: 10s timeout (CDN/remote servers can be slow)
                     http.setTimeout(isLocalNetwork ? 3000 : 10000);
+                    // Disable redirects: we downgrade https→http in prepareAlbumArtURL.
+                    // If a server redirects back to https, we must NOT follow it (would create
+                    // unexpected TLS session). Non-200 responses show placeholder instead.
+                    http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
 
                     int code = http.GET();
                     // Keep mutex locked for entire download
