@@ -1263,7 +1263,7 @@ void updateUI() {
     String lyrics_key = d->currentArtist + "|" + d->currentTrack;
     if (lyrics_key != lyrics_last_track && d->currentTrack.length() > 0) {
         lyrics_last_track = lyrics_key;
-        if (lyrics_enabled && !d->isRadioStation && d->durationSeconds > 0) {
+        if (lyrics_enabled && !d->isRadioStation) {
             requestLyrics(d->currentArtist, d->currentTrack, d->durationSeconds);
         } else {
             clearLyrics();
@@ -1586,6 +1586,8 @@ void updateUI() {
             art_dsc.data_size   = ART_SIZE * ART_SIZE * 2;
             art_dsc.data        = (const uint8_t*)art_buffer;
             lv_img_set_src(img_album, &art_dsc);
+            lv_obj_set_size(img_album, ART_SIZE, ART_SIZE);  // Re-enforce after LVGL v9 auto-resize
+            lv_obj_center(img_album);
             lv_obj_remove_flag(img_album, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
             art_ready = false;

@@ -13,6 +13,8 @@
 // Sonos logo
 LV_IMG_DECLARE(Sonos_idnu60bqes_1);
 
+static bool sonos_started = false;  // true once Sonos tasks are running
+
 void setup() {
     Serial.begin(SERIAL_BAUD_RATE);
     delay(500);
@@ -196,17 +198,23 @@ void setup() {
     sonos.begin();
     updateBootProgress(95);
 
-    // Try to load cached device first for fast boot (~2s vs ~15s)
-    bool loadedFromCache = sonos.tryLoadCachedDevice();
-    if (loadedFromCache) {
-        sonos.selectDevice(0);
-        sonos.startTasks();
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[SONOS] WiFi not connected at boot - deferring discovery");
     } else {
-        // No cache or unreachable - run full SSDP discovery
-        int cnt = sonos.discoverDevices();
-        if (cnt > 0) {
+        // Try to load cached device first for fast boot (~2s vs ~15s)
+        bool loadedFromCache = sonos.tryLoadCachedDevice();
+        if (loadedFromCache) {
             sonos.selectDevice(0);
             sonos.startTasks();
+            sonos_started = true;
+        } else {
+            // No cache or unreachable - run full SSDP discovery
+            int cnt = sonos.discoverDevices();
+            if (cnt > 0) {
+                sonos.selectDevice(0);
+                sonos.startTasks();
+                sonos_started = true;
+            }
         }
     }
 
@@ -236,6 +244,18 @@ void checkWiFiReconnect() {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[WIFI] Connection lost, attempting reconnect...");
         WiFi.reconnect();
+    } else if (!sonos_started) {
+        // WiFi connected but Sonos not yet started (WiFi was down at boot)
+        Serial.println("[SONOS] WiFi now connected - attempting deferred discovery from cache");
+        bool loadedFromCache = sonos.tryLoadCachedDevice();
+        if (loadedFromCache) {
+            sonos.selectDevice(0);
+            sonos.startTasks();
+            sonos_started = true;
+            Serial.println("[SONOS] Deferred discovery succeeded from cache");
+        } else {
+            Serial.println("[SONOS] No cached device - use Devices screen to discover");
+        }
     }
 }
 
