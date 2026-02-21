@@ -131,6 +131,8 @@ private:
     // Internal methods
     String sendSOAP(const char* service, const char* action, const char* args);
     void getRoomName(SonosDevice* dev);
+    int fetchTopologyCoordinators(IPAddress ip, String* coordinatorRINCONs, int maxCount);
+    bool fetchDevicePlayingState(SonosDevice* dev);
     int timeToSeconds(const String& time);
     void notifyUI(UIUpdateType_e type);
     
