@@ -74,6 +74,7 @@ extern bool screen_dimmed;
 // Screen objects
 extern lv_obj_t *scr_main, *scr_devices, *scr_queue, *scr_settings;
 extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_display, *scr_ota, *scr_groups, *scr_general;
+extern lv_obj_t *scr_clock, *scr_clock_settings;
 
 // Main screen UI elements
 extern lv_obj_t *img_album, *lbl_title, *lbl_artist, *lbl_album, *lbl_time, *lbl_time_remaining;
@@ -161,6 +162,8 @@ void createSourcesScreen();
 void createBrowseScreen();
 void createGroupsScreen();
 void createGeneralScreen();
+void createClockScreen();
+void createClockSettingsScreen();
 
 // ============================================================================
 // Function Declarations - UI Refresh
@@ -233,6 +236,11 @@ extern volatile bool lyrics_shutdown_requested;
 
 // Sonos task shutdown (for OTA)
 extern volatile bool sonos_tasks_shutdown_requested;
+
+// Clock / screensaver
+void checkClockTrigger();
+void exitClockScreen();
+void clockBgTask(void* param);
 
 // Radio mode UI adaptation
 void setRadioMode(bool enable);

@@ -164,6 +164,36 @@ String current_browse_title = "";
 int selected_group_coordinator = -1;
 
 // ============================================================================
+// Clock / Screensaver State
+// ============================================================================
+#include "clock_screen.h"
+
+int  clock_mode           = CLOCK_DEFAULT_MODE;
+int  clock_timeout_min    = CLOCK_DEFAULT_TIMEOUT;
+int  clock_tz_idx         = CLOCK_DEFAULT_TZ_IDX;
+bool clock_picsum_enabled = (bool)CLOCK_DEFAULT_PICSUM;
+int  clock_refresh_min    = CLOCK_DEFAULT_REFRESH;
+int  clock_bg_kw_idx      = CLOCK_DEFAULT_KW_IDX;
+bool clock_12h            = (bool)CLOCK_DEFAULT_12H;
+
+ClockState clock_state             = CLOCK_IDLE;
+uint32_t   clock_entering_start_ms = 0;
+uint32_t   clock_exiting_start_ms  = 0;
+uint32_t   last_clock_exit_ms      = 0;
+
+TaskHandle_t         clockBgTaskHandle          = nullptr;
+volatile bool        clock_bg_shutdown_requested = false;
+volatile bool        clock_bg_ready             = false;
+uint16_t*            clock_bg_buffer            = nullptr;
+lv_img_dsc_t         clock_bg_dsc;
+
+lv_obj_t* scr_clock          = nullptr;
+lv_obj_t* scr_clock_settings = nullptr;
+lv_obj_t* clock_bg_img       = nullptr;
+lv_obj_t* clock_time_lbl     = nullptr;
+lv_obj_t* clock_date_lbl     = nullptr;
+
+// ============================================================================
 // OTA Update State
 // ============================================================================
 lv_obj_t* lbl_ota_status = nullptr;

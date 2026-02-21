@@ -157,6 +157,37 @@
 #define COLOR_WARNING           0xFFA500
 
 // =============================================================================
+// CLOCK / SCREENSAVER
+// =============================================================================
+#define CLOCK_MODE_DISABLED    0  // Never show clock screen
+#define CLOCK_MODE_INACTIVITY  1  // Show after X mins no touch (any play state)
+#define CLOCK_MODE_PAUSED      2  // Show only when paused/stopped + X mins inactivity
+#define CLOCK_MODE_NOTHING     3  // Show only when nothing playing + X mins inactivity
+
+#define CLOCK_DEFAULT_MODE       0    // Disabled by default
+#define CLOCK_DEFAULT_TIMEOUT    5    // 5 minutes inactivity before clock
+#define CLOCK_DEFAULT_TZ_IDX     0    // Index 0 = UTC
+#define CLOCK_DEFAULT_PICSUM     1    // Enable random photo background
+#define CLOCK_DEFAULT_REFRESH    10   // Refresh background every 10 minutes
+#define CLOCK_DEFAULT_KW_IDX     0    // Index 0 = Random (no keyword)
+#define CLOCK_DEFAULT_12H        0    // 0 = 24h, 1 = 12h
+
+#define CLOCK_BG_MAX_DL_SIZE  (512 * 1024)  // Max background JPEG download buffer (512KB; Flickr baseline ~100-250KB)
+#define CLOCK_BG_WIDTH        800           // Clock background pixel width
+#define CLOCK_BG_HEIGHT       480           // Clock background pixel height
+#define CLOCK_BG_TASK_STACK   8192          // clockBgTask stack size
+#define CLOCK_ENTER_TIMEOUT_MS 3000         // Max wait for art/lyrics tasks to exit
+#define CLOCK_EXIT_COOLDOWN_MS 30000        // Prevent re-trigger for 30s after exit
+
+#define NVS_KEY_CLOCK_MODE      "clk_mode"
+#define NVS_KEY_CLOCK_TIMEOUT   "clk_timeout"
+#define NVS_KEY_CLOCK_TZ        "clk_tz"
+#define NVS_KEY_CLOCK_PICSUM    "clk_picsum"
+#define NVS_KEY_CLOCK_REFRESH   "clk_refresh"
+#define NVS_KEY_CLOCK_KW        "clk_kw"
+#define NVS_KEY_CLOCK_12H       "clk_12h"
+
+// =============================================================================
 // QUEUE / PLAYLIST
 // =============================================================================
 #define QUEUE_ADD_AT_END        4294967295  // Add to end of queue constant
