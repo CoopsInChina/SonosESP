@@ -317,8 +317,9 @@ void exitClockScreen() {
     last_clock_exit_ms = millis();
     resetScreenTimeout();
 
-    // Restart art task right away — Sonos may have a pending art URL
-    art_shutdown_requested = false;
+    // Restart art + lyrics tasks — Sonos may have a pending art URL
+    art_shutdown_requested    = false;
+    lyrics_shutdown_requested = false;  // Was set on clock entry; must clear on exit
     last_art_url = "";  // Force re-fetch since track may have changed
     if (!albumArtTaskHandle) {
         xTaskCreatePinnedToCore(

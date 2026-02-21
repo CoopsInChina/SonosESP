@@ -135,7 +135,7 @@ void createClockSettingsScreen() {
 
     // ── Time format ──────────────────────────────────────────────────────────
     addSectionLabel(content, "Time format:");
-    addDescLabel(content, "12-hour (AM/PM) or 24-hour clock");
+    addDescLabel(content, "12-hour (AM/PM)");
 
     lv_obj_t* sw_12h = addSwitch(content, clock_12h);
     lv_obj_add_event_cb(sw_12h, [](lv_event_t* e) {
