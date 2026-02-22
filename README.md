@@ -28,13 +28,10 @@ If you find this project helpful, consider supporting me on Ko-fi!
 - **Queue Management** - Browse and manage your playback queue
 - **Album Art Display** - Hardware JPEG decoder + PNG support with bilinear scaling and automatic dominant color extraction
 - **Synced Lyrics Display** - Time-synced lyrics from LRCLIB overlaid on album art with smart auto-hide, scroll effects, and color matching
+- **Clock Screensaver** - Full-screen clock activates after inactivity with random ambient background images, tap to dismiss
 - **Music Browsing** - Navigate your Sonos library, playlists, and favorites
-- **Multi-Room** - Switch between multiple Sonos devices
-- **WiFi Configuration** - Easy on-screen WiFi setup with built-in keyboard
-- **OTA Updates** - Automatic firmware updates from GitHub releases
-- **Thread-Safe** - FreeRTOS tasks with proper synchronization
-- **Performance Optimized** - PSRAM allocation, efficient string handling, robust networking, fast fixed-point math
-
+- **Multi-Room** - Switch between Sonos zones with live playing indicators showing which rooms are active
+- **OTA Updates** - Firmware updates from GitHub with Stable and Nightly release channel selection, auto-retry on low memory
 
 ![SonosESP Demo](assets/image1.gif)
 
@@ -93,11 +90,12 @@ The device supports automatic Over-The-Air (OTA) firmware updates from GitHub re
 - **FreeRTOS Tasks** - Separate tasks for UI, album art, lyrics, and Sonos polling
 - **Thread Safety** - Mutex protection for shared resources
 - **Memory Management** - PSRAM for album art and lyrics, heap monitoring
-- **Network Layer** - HTTPClient for SOAP requests, HTTPS for lyrics/art, UDP for discovery
+- **Network Layer** - HTTPClient for SOAP requests, HTTPS for lyrics/art, UDP for SSDP discovery
 - **UI Framework** - LVGL 9.4.0 with custom theme
 - **Image Processing** - ESP32-P4 hardware JPEG decoder + software PNG decoder, custom bilinear scaling with fixed-point math
 - **Lyrics System** - Time-synced LRC parsing with HTTPS fetching, auto-hide, and retry logic
-- **OTA Updates** - Automatic firmware updates from GitHub releases
+- **Clock Screensaver** - Inactivity-triggered fullscreen clock with random Unsplash backgrounds
+- **OTA Updates** - Stable and Nightly channels, 3-attempt retry loop with live countdown UI
 
 ## Configuration
 
@@ -108,6 +106,7 @@ WiFi credentials are stored persistently in NVS (Non-Volatile Storage). Once con
 - Version checking on demand
 - Progress indication during download
 - Safe rollback on failure
+
 
 ## Contributing
 
@@ -122,7 +121,9 @@ Thanks to these wonderful people who have contributed to this project:
 </a>
 
 Special thanks to:
-- **[@BaileyLawson](https://github.com/BaileyLawson)** - First external contributor! Added HTTPS album art support, dual buffers, speaker scanning fixes, and more.
+- **[@BaileyLawson](https://github.com/BaileyLawson)** - First external contributor!
+- **[@johnhenrick3-cpu](https://github.com/johnhenrick3-cpu)** - Outstanding community tester!
+
 
 ## License
 
@@ -133,6 +134,7 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) file for
 - Built with [LVGL](https://lvgl.io/) - Amazing embedded graphics library
 - [PlatformIO](https://platformio.org/) - Best embedded development platform
 - [LRCLIB](https://lrclib.net/) - Free synced lyrics API
+- [Unsplash](https://unsplash.com/) - Beautiful random background photos for the clock screensaver
 - Sonos UPnP/SOAP API documentation and community
 
 

@@ -661,11 +661,17 @@ static void otaRecovery() {
     // Resume Sonos background tasks
     sonos.resumeTasks();
 
-    // Restart album art task
+    // ALWAYS clear all shutdown/abort flags before restarting tasks.
+    // These must be cleared unconditionally - NOT inside the albumArtTaskHandle
+    // check below - because tasks can't start cleanly if flags are still set.
+    art_shutdown_requested    = false;
+    art_abort_download        = false;
+    lyrics_shutdown_requested = false;
+    lyrics_abort_requested    = false;
+
+    // Restart album art task if it isn't already running
     if (albumArtTaskHandle == NULL) {
         Serial.println("[OTA] Restarting album art task");
-        art_shutdown_requested = false;
-        lyrics_shutdown_requested = false;
         xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
     }
 
@@ -739,6 +745,7 @@ static void performOTAUpdate() {
         int wait_count = 0;
         while (albumArtTaskHandle != NULL && wait_count < 100) {  // 10s max
             vTaskDelay(pdMS_TO_TICKS(100));
+            esp_task_wdt_reset();  // 100ms * 100 = 10s total; feed WDT each iteration
             wait_count++;
         }
 
@@ -761,6 +768,7 @@ static void performOTAUpdate() {
         int wait_count = 0;
         while (lyricsTaskHandle != NULL && wait_count < 50) {  // 5s max
             vTaskDelay(pdMS_TO_TICKS(100));
+            esp_task_wdt_reset();  // 100ms * 50 = 5s total; feed WDT each iteration
             wait_count++;
         }
 
@@ -817,6 +825,7 @@ static void performOTAUpdate() {
     Serial.println("[OTA] Flushing WiFi buffers...");
     WiFi.setSleep(true);
     vTaskDelay(pdMS_TO_TICKS(1500));
+    esp_task_wdt_reset();
     WiFi.setSleep(false);
 
     // Check DMA is sufficient for TLS handshake + SDIO minimum.
@@ -852,8 +861,11 @@ static void performOTAUpdate() {
     WiFi.setSleep(false);
 
     // ================================================================
-    // PHASE 5: CONNECT AND DOWNLOAD
+    // PHASE 5: CONNECT AND DOWNLOAD (auto-retry on low post-TLS DMA)
     // ================================================================
+    // TLS handshake DMA usage is variable. If <15KB remains after handshake,
+    // SDIO pool exhausts mid-download. Close connection, wait for DMA to free,
+    // retry (up to OTA_TLS_MAX_RETRIES). Only full-recover if all retries fail.
     if (lbl_ota_status) {
         lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Connecting to server...");
     }
@@ -864,56 +876,120 @@ static void performOTAUpdate() {
     lv_refr_now(NULL);
     vTaskDelay(pdMS_TO_TICKS(100));
 
-    WiFiClientSecure client;
-    client.setInsecure();
+    WiFiClientSecure* clientPtr = nullptr;
+    HTTPClient* httpPtr = nullptr;
+    int httpCode = -1;
+    int contentLength = 0;
 
-    HTTPClient http;
-    Serial.println("[OTA] ========================================");
-    Serial.println("[OTA] STARTING OTA DOWNLOAD");
-    Serial.printf("[OTA] Free DMA: %d bytes | Free heap: %d bytes\n",
-        heap_caps_get_free_size(MALLOC_CAP_DMA), ESP.getFreeHeap());
-    Serial.println("[OTA] ========================================");
+    for (int attempt = 1; attempt <= OTA_TLS_MAX_RETRIES; attempt++) {
+        if (attempt > 1) {
+            uint32_t wait_sec = (uint32_t)(attempt - 1) * (OTA_TLS_RETRY_DELAY_MS / 1000);
+            Serial.printf("[OTA] Post-TLS DMA insufficient - waiting %lus before retry %d/%d\n",
+                (unsigned long)wait_sec, attempt, OTA_TLS_MAX_RETRIES);
 
-    http.begin(client, download_url);
-    http.setTimeout(60000);
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+            // Live countdown: updates UI each second and feeds the watchdog.
+            // A single vTaskDelay(10s) would freeze the display and risk WDT timeout.
+            for (uint32_t s = wait_sec; s > 0; s--) {
+                if (lbl_ota_status) {
+                    lv_label_set_text_fmt(lbl_ota_status,
+                        LV_SYMBOL_REFRESH " Low memory, retrying in %lus... (%d/%d)",
+                        (unsigned long)s, attempt, OTA_TLS_MAX_RETRIES);
+                    lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFA500), 0);
+                }
+                lv_tick_inc(1000);
+                lv_refr_now(NULL);
+                esp_task_wdt_reset();
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
 
-    int httpCode = http.GET();
-    Serial.printf("[OTA] HTTP %d - Free DMA: %d bytes\n", httpCode, heap_caps_get_free_size(MALLOC_CAP_DMA));
-
-    if (httpCode != 200) {
-        if (lbl_ota_status) {
-            lv_label_set_text_fmt(lbl_ota_status, LV_SYMBOL_WARNING " Download failed (HTTP %d)", httpCode);
-            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+            if (lbl_ota_status) {
+                lv_label_set_text_fmt(lbl_ota_status,
+                    LV_SYMBOL_DOWNLOAD " Connecting (attempt %d/%d)...", attempt, OTA_TLS_MAX_RETRIES);
+                lv_obj_set_style_text_color(lbl_ota_status, COL_ACCENT, 0);
+            }
+            lv_tick_inc(10);
+            lv_refr_now(NULL);
         }
-        http.end();
-        client.stop();
-        otaRecovery();
-        return;
-    }
 
-    int contentLength = http.getSize();
-    if (contentLength <= 0 || contentLength > OTA_MAX_FIRMWARE_SIZE) {
-        Serial.printf("[OTA] Invalid firmware size: %d bytes\n", contentLength);
-        if (lbl_ota_status) {
-            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Invalid firmware file");
-            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+        clientPtr = new WiFiClientSecure();
+        clientPtr->setInsecure();
+        httpPtr = new HTTPClient();
+
+        Serial.println("[OTA] ========================================");
+        Serial.printf("[OTA] STARTING OTA DOWNLOAD (attempt %d/%d)\n", attempt, OTA_TLS_MAX_RETRIES);
+        Serial.printf("[OTA] Free DMA: %d bytes | Free heap: %d bytes\n",
+            heap_caps_get_free_size(MALLOC_CAP_DMA), ESP.getFreeHeap());
+        Serial.println("[OTA] ========================================");
+
+        httpPtr->begin(*clientPtr, download_url);
+        httpPtr->setTimeout(60000);
+        httpPtr->setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+        httpCode = httpPtr->GET();
+        Serial.printf("[OTA] HTTP %d - Free DMA: %d bytes\n", httpCode, heap_caps_get_free_size(MALLOC_CAP_DMA));
+
+        if (httpCode != 200) {
+            if (lbl_ota_status) {
+                lv_label_set_text_fmt(lbl_ota_status, LV_SYMBOL_WARNING " Download failed (HTTP %d)", httpCode);
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+            }
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
+            httpPtr = nullptr; clientPtr = nullptr;
+            otaRecovery();
+            return;
         }
-        http.end();
-        client.stop();
-        otaRecovery();
-        return;
-    }
 
-    Serial.printf("[OTA] Firmware size: %d bytes (%.1f KB)\n", contentLength, contentLength / 1024.0);
+        contentLength = httpPtr->getSize();
+        if (contentLength <= 0 || contentLength > OTA_MAX_FIRMWARE_SIZE) {
+            Serial.printf("[OTA] Invalid firmware size: %d bytes\n", contentLength);
+            if (lbl_ota_status) {
+                lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Invalid firmware file");
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+            }
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
+            httpPtr = nullptr; clientPtr = nullptr;
+            otaRecovery();
+            return;
+        }
+
+        Serial.printf("[OTA] Firmware size: %d bytes (%.1f KB)\n", contentLength, contentLength / 1024.0);
+
+        // Check DMA immediately after TLS (before stream data fills buffers)
+        size_t dma_after_tls = heap_caps_get_free_size(MALLOC_CAP_DMA);
+        Serial.printf("[OTA] Post-TLS DMA: %d bytes (need %d)\n", dma_after_tls, OTA_MIN_DMA_AFTER_TLS);
+
+        if (dma_after_tls < OTA_MIN_DMA_AFTER_TLS) {
+            // Close this connection - DMA will be freed, then retry
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
+            httpPtr = nullptr; clientPtr = nullptr;
+
+            if (attempt == OTA_TLS_MAX_RETRIES) {
+                Serial.printf("[OTA] All %d attempts failed - DMA too low after TLS\n", OTA_TLS_MAX_RETRIES);
+                if (lbl_ota_status) {
+                    lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Low memory - restart device and try again");
+                    lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+                }
+                lv_tick_inc(10);
+                lv_refr_now(NULL);
+                otaRecovery();
+                return;
+            }
+            continue;  // retry with delay at top of loop
+        }
+
+        break;  // DMA OK - proceed to download
+    }
 
     if (!Update.begin(contentLength)) {
         if (lbl_ota_status) {
             lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Not enough space for OTA");
             lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
         }
-        http.end();
-        client.stop();
+        httpPtr->end(); clientPtr->stop();
+        delete httpPtr; delete clientPtr;
         otaRecovery();
         return;
     }
@@ -927,41 +1003,20 @@ static void performOTAUpdate() {
     lv_tick_inc(10);
     lv_refr_now(NULL);
 
-    WiFiClient* stream = http.getStreamPtr();
+    WiFiClient* stream = httpPtr->getStreamPtr();
     size_t written = 0;
     int lastPercent = -1;
     uint32_t lastUIUpdate = millis();
     static uint8_t buff[OTA_BUFFER_SIZE];
 
-    // Check DMA BEFORE settle: incoming firmware data buffers during the settle period
-    // and consumes ~16KB of DMA. Checking after settle sees the drained value and
-    // incorrectly aborts. Check immediately after HTTP 200 while DMA is still healthy.
-    size_t dma_after_tls = heap_caps_get_free_size(MALLOC_CAP_DMA);
-    Serial.printf("[OTA] Post-TLS DMA: %d bytes (need %d)\n", dma_after_tls, OTA_MIN_DMA_AFTER_TLS);
-
-    if (dma_after_tls < OTA_MIN_DMA_AFTER_TLS) {
-        Serial.printf("[OTA] Insufficient DMA after TLS (%d bytes, need %d) - aborting\n",
-            dma_after_tls, OTA_MIN_DMA_AFTER_TLS);
-        if (lbl_ota_status) {
-            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Low memory - restart device and try again");
-            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
-        }
-        lv_tick_inc(10);
-        lv_refr_now(NULL);
-        Update.abort();
-        http.end();
-        client.stop();
-        otaRecovery();
-        return;
-    }
-
-    Serial.printf("[OTA] Starting download - Free DMA: %d bytes\n", dma_after_tls);
+    Serial.printf("[OTA] Starting download - Free DMA: %d bytes\n",
+        heap_caps_get_free_size(MALLOC_CAP_DMA));
 
     int chunk_count = 0;
     uint32_t download_start = millis();
     uint32_t last_data_time = millis();  // Track last time we received data (stall detection)
 
-    while (http.connected() && (written < (size_t)contentLength)) {
+    while (httpPtr->connected() && (written < (size_t)contentLength)) {
         // STALL DETECTION: Abort if no data received for OTA_STALL_TIMEOUT_MS
         if ((millis() - last_data_time) > OTA_STALL_TIMEOUT_MS) {
             Serial.printf("[OTA] STALL DETECTED: No data for %dms at %d%% - aborting\n",
@@ -973,8 +1028,8 @@ static void performOTAUpdate() {
             lv_tick_inc(10);
             lv_refr_now(NULL);
             Update.abort();
-            http.end();
-            client.stop();
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
             otaRecovery();
             return;
         }
@@ -990,8 +1045,8 @@ static void performOTAUpdate() {
             lv_tick_inc(10);
             lv_refr_now(NULL);
             Update.abort();
-            http.end();
-            client.stop();
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
             otaRecovery();
             return;
         }
@@ -1088,8 +1143,8 @@ static void performOTAUpdate() {
         lv_tick_inc(10);
         lv_refr_now(NULL);
         Update.abort();
-        http.end();
-        client.stop();
+        httpPtr->end(); clientPtr->stop();
+        delete httpPtr; delete clientPtr;
         otaRecovery();
         return;
     }
@@ -1127,8 +1182,8 @@ static void performOTAUpdate() {
         }
     }
 
-    http.end();
-    client.stop();
+    httpPtr->end(); clientPtr->stop();
+    delete httpPtr; delete clientPtr;
     otaRecovery();
 }
 

@@ -7,6 +7,7 @@
 #include "ui_common.h"
 #include "config.h"
 #include "lyrics.h"
+#include "clock_screen.h"
 #include <esp_flash.h>
 #include <esp_task_wdt.h>
 
@@ -73,6 +74,24 @@ void setup() {
     Serial.printf("[DISPLAY] Loaded settings from NVS: brightness=%d%%, dimmed=%d%%, autodim=%dsec, lyrics=%s\n",
                   brightness_level, brightness_dimmed, autodim_timeout, lyrics_enabled ? "on" : "off");
 
+    // Load clock settings from NVS
+    clock_mode           = wifiPrefs.getInt(NVS_KEY_CLOCK_MODE,    CLOCK_DEFAULT_MODE);
+    clock_timeout_min    = wifiPrefs.getInt(NVS_KEY_CLOCK_TIMEOUT,  CLOCK_DEFAULT_TIMEOUT);
+    clock_tz_idx         = wifiPrefs.getInt(NVS_KEY_CLOCK_TZ,       CLOCK_DEFAULT_TZ_IDX);
+    clock_picsum_enabled = wifiPrefs.getBool(NVS_KEY_CLOCK_PICSUM,  (bool)CLOCK_DEFAULT_PICSUM);
+    clock_refresh_min    = wifiPrefs.getInt(NVS_KEY_CLOCK_REFRESH,  CLOCK_DEFAULT_REFRESH);
+    clock_bg_kw_idx      = wifiPrefs.getInt(NVS_KEY_CLOCK_KW,       CLOCK_DEFAULT_KW_IDX);
+    clock_12h            = wifiPrefs.getBool(NVS_KEY_CLOCK_12H,     (bool)CLOCK_DEFAULT_12H);
+    // Clamp indices in case lists changed between firmware versions
+    if (clock_tz_idx    < 0 || clock_tz_idx    >= CLOCK_ZONES_COUNT)   clock_tz_idx    = 0;
+    if (clock_bg_kw_idx < 0 || clock_bg_kw_idx >= CLOCK_BG_KW_COUNT)   clock_bg_kw_idx = 0;
+    Serial.printf("[CLOCK] mode=%d timeout=%dmin tz=%s picsum=%s refresh=%dmin kw=%s 12h=%s\n",
+                  clock_mode, clock_timeout_min,
+                  CLOCK_ZONES[clock_tz_idx].name,
+                  clock_picsum_enabled ? "on" : "off", clock_refresh_min,
+                  CLOCK_BG_KEYWORDS[clock_bg_kw_idx].label,
+                  clock_12h ? "yes" : "no");
+
     // Brightness will be set after display_init() is called
     Serial.println("[DISPLAY] ESP32-P4 uses ST7701 backlight control (no PWM needed)");
 
@@ -88,6 +107,12 @@ void setup() {
     }
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("\n[WIFI] Connected - IP: %s\n", WiFi.localIP().toString().c_str());
+        // Start NTP sync (SNTP daemon — no HTTPS, tiny UDP packets)
+        configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+        // Apply user-selected timezone via POSIX TZ string
+        setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
+        tzset();
+        Serial.printf("[NTP] Sync started, TZ=%s\n", CLOCK_ZONES[clock_tz_idx].name);
     } else {
         Serial.println("\n[WIFI] Connection failed - will retry from settings");
     }
@@ -189,6 +214,8 @@ void setup() {
 
     createGroupsScreen();
     createGeneralScreen();
+    createClockScreen();
+    createClockSettingsScreen();
     updateBootProgress(85);
 
     art_mutex = xSemaphoreCreateMutex();
@@ -242,6 +269,10 @@ void checkWiFiReconnect() {
         WiFi.reconnect();
     } else if (!sonos_started) {
         // WiFi connected but Sonos not yet started (WiFi was down at boot)
+        // (Re)start NTP sync now that we have connectivity
+        configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+        setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
+        tzset();
         Serial.println("[SONOS] WiFi now connected - attempting deferred discovery from cache");
         bool loadedFromCache = sonos.tryLoadCachedDevice();
         if (loadedFromCache) {
@@ -299,6 +330,7 @@ void loop() {
         lv_timer_handler();
         processUpdates();
         checkAutoDim();
+        checkClockTrigger();
         checkWiFiReconnect();
         logHeapStatus();  // Periodic memory monitoring
 

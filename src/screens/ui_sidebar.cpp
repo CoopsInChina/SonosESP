@@ -4,6 +4,7 @@
  */
 
 #include "ui_common.h"
+#include "clock_screen.h"
 
 // ============================================================================
 // Settings sidebar - creates sidebar and returns content area
@@ -50,12 +51,12 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
     lv_obj_set_style_text_font(ico_x, &lv_font_montserrat_14, 0);
     lv_obj_center(ico_x);
 
-    // Menu items (Order: General, Speaker, Group, Sources, Display, WiFi, Update)
-    const char* icons[] = {LV_SYMBOL_SETTINGS, LV_SYMBOL_AUDIO, LV_SYMBOL_SHUFFLE, LV_SYMBOL_LIST, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_WIFI, LV_SYMBOL_DOWNLOAD};
-    const char* labels[] = {"General", "Speakers", "Groups", "Sources", "Display", "WiFi", "Update"};
+    // Menu items (Order: General, Speakers, Groups, Sources, Display, WiFi, Clock, Update)
+    const char* icons[] = {LV_SYMBOL_SETTINGS, LV_SYMBOL_AUDIO, LV_SYMBOL_SHUFFLE, LV_SYMBOL_LIST, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_WIFI, LV_SYMBOL_BELL, LV_SYMBOL_DOWNLOAD};
+    const char* labels[] = {"General", "Speakers", "Groups", "Sources", "Display", "WiFi", "Clock", "Update"};
 
     int y = 55;
-    for (int i = 0; i < 7; i++) {
+    for (int i = 0; i < 8; i++) {
         lv_obj_t* btn = lv_button_create(sidebar);
         lv_obj_set_size(btn, 164, 42);
         lv_obj_set_pos(btn, 8, y);
@@ -83,13 +84,14 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
         lv_obj_add_event_cb(btn, [](lv_event_t* e) {
             int idx = (int)(intptr_t)lv_event_get_user_data(e);
             switch(idx) {
-                case 0: lv_screen_load(scr_general); break;
-                case 1: lv_screen_load(scr_devices); break;
-                case 2: lv_screen_load(scr_groups); break;
-                case 3: lv_screen_load(scr_sources); break;
-                case 4: lv_screen_load(scr_display); break;
-                case 5: lv_screen_load(scr_wifi); break;
-                case 6: lv_screen_load(scr_ota); break;
+                case 0: lv_screen_load(scr_general);        break;
+                case 1: lv_screen_load(scr_devices);        break;
+                case 2: lv_screen_load(scr_groups);         break;
+                case 3: lv_screen_load(scr_sources);        break;
+                case 4: lv_screen_load(scr_display);        break;
+                case 5: lv_screen_load(scr_wifi);           break;
+                case 6: lv_screen_load(scr_clock_settings); break;
+                case 7: lv_screen_load(scr_ota);            break;
             }
         }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
 

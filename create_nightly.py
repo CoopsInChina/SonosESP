@@ -4,8 +4,10 @@ Create Nightly Release for SonosESP
 Triggers GitHub Actions workflow to build and release a nightly version.
 
 Usage:
-    python create_nightly.py                 # Use current version from version.json
-    python create_nightly.py --version 1.2.0 # Specify base version explicitly
+    python create_nightly.py                              # Use current branch + version.json
+    python create_nightly.py --branch feature/my-branch  # Build from specific branch
+    python create_nightly.py --version 1.2.0             # Specify base version explicitly
+    python create_nightly.py --branch feature/x --version 1.3.0  # Both
 """
 
 import json
@@ -19,10 +21,20 @@ def get_current_version():
         data = json.load(f)
         return data['version']
 
-def get_git_commit_sha():
-    """Get current git commit SHA (short form)"""
+def get_current_branch():
+    """Get the current git branch name"""
     try:
-        result = subprocess.run(['git', 'rev-parse', '--short=7', 'HEAD'],
+        result = subprocess.run(['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
+                              capture_output=True, text=True, check=True)
+        return result.stdout.strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+
+def get_git_commit_sha(branch=None):
+    """Get git commit SHA (short form) for a branch, or HEAD if not specified"""
+    try:
+        ref = f'origin/{branch}' if branch else 'HEAD'
+        result = subprocess.run(['git', 'rev-parse', '--short=7', ref],
                               capture_output=True,
                               text=True,
                               check=True)
@@ -30,17 +42,21 @@ def get_git_commit_sha():
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
 
-def generate_nightly_tag(base_version):
+def generate_nightly_tag(base_version, branch=None):
     """Generate nightly tag: X.Y.Z-nightly.COMMITHASH"""
     # Remove any existing -nightly suffix
     if '-nightly' in base_version:
         base_version = base_version.split('-nightly')[0]
 
-    # Get git commit SHA
-    commit_sha = get_git_commit_sha()
+    # Get git commit SHA (from branch tip if specified, else local HEAD)
+    commit_sha = get_git_commit_sha(branch)
     if not commit_sha:
-        print("[ERROR] Could not get git commit SHA")
-        print("[INFO] Make sure you're in a git repository")
+        if branch:
+            print(f"[ERROR] Could not get commit SHA for branch '{branch}'")
+            print(f"[INFO] Make sure the branch is pushed: git push origin {branch}")
+        else:
+            print("[ERROR] Could not get git commit SHA")
+            print("[INFO] Make sure you're in a git repository")
         sys.exit(1)
 
     return f"{base_version}-nightly.{commit_sha}"
@@ -48,25 +64,28 @@ def generate_nightly_tag(base_version):
 def check_gh_cli():
     """Check if GitHub CLI (gh) is installed"""
     try:
-        result = subprocess.run(['gh', '--version'],
-                              capture_output=True,
-                              text=True,
-                              check=True)
+        subprocess.run(['gh', '--version'],
+                       capture_output=True,
+                       text=True,
+                       check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
 
-def trigger_workflow(nightly_tag):
+def trigger_workflow(nightly_tag, branch=None):
     """Trigger the nightly-release workflow using GitHub CLI"""
     print(f"\n[INFO] Triggering nightly release workflow...")
-    print(f"[INFO] Tag: v{nightly_tag}")
+    print(f"[INFO] Tag:    v{nightly_tag}")
+    print(f"[INFO] Branch: {branch or 'main (default)'}")
+
+    cmd = ['gh', 'workflow', 'run', 'nightly-release.yml',
+           '-f', f'version_tag={nightly_tag}']
+    if branch:
+        cmd += ['--ref', branch]
 
     try:
-        # Trigger workflow with version_tag input
-        result = subprocess.run([
-            'gh', 'workflow', 'run', 'nightly-release.yml',
-            '-f', f'version_tag={nightly_tag}'
-        ], capture_output=True, text=True, check=True)
+        # Trigger workflow with version_tag input (and optional branch ref)
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         print(f"\n[SUCCESS] Nightly release workflow triggered!")
         print(f"\n[INFO] Monitor progress:")
@@ -87,12 +106,32 @@ def main():
 
     # Parse command line args
     base_version = None
-    if len(sys.argv) > 1:
-        if sys.argv[1] in ['-h', '--help']:
+    branch = None
+    args = sys.argv[1:]
+    i = 0
+    while i < len(args):
+        if args[i] in ['-h', '--help']:
             print(__doc__)
             sys.exit(0)
-        if sys.argv[1] == '--version' and len(sys.argv) > 2:
-            base_version = sys.argv[2]
+        elif args[i] == '--version' and i + 1 < len(args):
+            base_version = args[i + 1]
+            i += 2
+        elif args[i] == '--branch' and i + 1 < len(args):
+            branch = args[i + 1]
+            i += 2
+        else:
+            i += 1
+
+    # Default branch to current local branch if not specified
+    if not branch:
+        branch = get_current_branch()
+        if branch and branch != 'main':
+            print(f"\n[INFO] Auto-detected branch: {branch}")
+            print(f"[INFO] (use --branch main to override)")
+
+    # Normalize: treat 'main' as no explicit branch (workflow default)
+    if branch == 'main':
+        branch = None
 
     # Get base version
     if not base_version:
@@ -106,8 +145,8 @@ def main():
         nightly_tag = base_version
         print(f"[INFO] Using nightly version as-is: v{nightly_tag}")
     else:
-        # If stable version, generate nightly tag
-        nightly_tag = generate_nightly_tag(base_version)
+        # If stable version, generate nightly tag from branch tip
+        nightly_tag = generate_nightly_tag(base_version, branch)
         print(f"[INFO] Generated nightly tag: v{nightly_tag}")
 
     # Check for GitHub CLI
@@ -134,7 +173,8 @@ def main():
         commit_author = "Unknown"
 
     print(f"\n[CONFIRM] This will create a nightly prerelease:")
-    print(f"  - Tag: v{nightly_tag}")
+    print(f"  - Tag:    v{nightly_tag}")
+    print(f"  - Branch: {branch or 'main (default)'}")
     print(f"  - Commit: {commit_msg}")
     print(f"  - Author: {commit_author}")
     print(f"  - Marked as: Prerelease (unstable)")
@@ -146,7 +186,7 @@ def main():
         sys.exit(0)
 
     # Trigger workflow
-    if trigger_workflow(nightly_tag):
+    if trigger_workflow(nightly_tag, branch):
         print(f"\n[NEXT STEPS]")
         print(f"  1. Wait for GitHub Actions to build (~5 minutes)")
         print(f"  2. Nightly release will appear at:")
