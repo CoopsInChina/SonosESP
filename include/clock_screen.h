@@ -138,6 +138,19 @@ static const ClockBgKeyword CLOCK_BG_KEYWORDS[] = {
     {"Abstract",      "abstract"},
     {"Travel",        "travel"},
     {"Space",         "space"},
+    {"Winter",        "winter"},
+    {"Autumn",        "autumn"},
+    {"Beach",         "beach"},
+    {"Desert",        "desert"},
+    {"Waterfall",     "waterfall"},
+    {"Aurora",        "aurora"},
+    {"Night",         "night"},
+    {"Minimal",       "minimal"},
+    {"Fog",           "fog"},
+    {"Flowers",       "flowers"},
+    {"Aerial",        "aerial"},
+    {"Rain",          "rain"},
+    {"Interior",      "interior"},
 };
 static const int CLOCK_BG_KW_COUNT = (int)(sizeof(CLOCK_BG_KEYWORDS) / sizeof(CLOCK_BG_KEYWORDS[0]));
 

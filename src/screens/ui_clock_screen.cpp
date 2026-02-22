@@ -448,7 +448,7 @@ void checkClockTrigger() {
                 lv_anim_init(&a);
                 lv_anim_set_var(&a, clock_bg_img);
                 lv_anim_set_values(&a, LV_OPA_TRANSP, LV_OPA_COVER);
-                lv_anim_set_duration(&a, 500);
+                lv_anim_set_duration(&a, 300);
                 lv_anim_set_exec_cb(&a, [](void* obj, int32_t v) {
                     lv_obj_set_style_img_opa((lv_obj_t*)obj, (lv_opa_t)v, 0);
                 });
