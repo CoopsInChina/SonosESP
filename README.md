@@ -31,11 +31,7 @@ If you find this project helpful, consider supporting me on Ko-fi!
 - **Clock Screensaver** - Full-screen clock activates after inactivity with random ambient background images, tap to dismiss
 - **Music Browsing** - Navigate your Sonos library, playlists, and favorites
 - **Multi-Room** - Switch between Sonos zones with live playing indicators showing which rooms are active
-- **WiFi Configuration** - Easy on-screen WiFi setup with built-in keyboard
 - **OTA Updates** - Firmware updates from GitHub with Stable and Nightly release channel selection, auto-retry on low memory
-- **Thread-Safe** - FreeRTOS tasks with proper synchronization
-- **Performance Optimized** - PSRAM allocation, efficient string handling, robust networking, fast fixed-point math
-
 
 ![SonosESP Demo](assets/image1.gif)
 
