@@ -64,10 +64,10 @@ def generate_nightly_tag(base_version, branch=None):
 def check_gh_cli():
     """Check if GitHub CLI (gh) is installed"""
     try:
-        result = subprocess.run(['gh', '--version'],
-                              capture_output=True,
-                              text=True,
-                              check=True)
+        subprocess.run(['gh', '--version'],
+                       capture_output=True,
+                       text=True,
+                       check=True)
         return True
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
@@ -85,7 +85,7 @@ def trigger_workflow(nightly_tag, branch=None):
 
     try:
         # Trigger workflow with version_tag input (and optional branch ref)
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        subprocess.run(cmd, capture_output=True, text=True, check=True)
 
         print(f"\n[SUCCESS] Nightly release workflow triggered!")
         print(f"\n[INFO] Monitor progress:")
