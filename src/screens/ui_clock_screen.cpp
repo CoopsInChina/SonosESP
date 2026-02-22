@@ -115,9 +115,8 @@ void clockBgTask(void* /*param*/) {
 
             // "Random" = empty keyword → pick a random keyword from the list (skip index 0)
             // so loremflickr always serves from its keyword cache, never hits Flickr API
-            if (kw[0] == '\0') {
-                const int total = sizeof(CLOCK_BG_KEYWORDS) / sizeof(CLOCK_BG_KEYWORDS[0]);
-                kw = CLOCK_BG_KEYWORDS[1 + (esp_random() % (total - 1))].kw;
+            if (kw[0] == '\0' && CLOCK_BG_KW_COUNT > 1) {
+                kw = CLOCK_BG_KEYWORDS[1 + (esp_random() % (CLOCK_BG_KW_COUNT - 1))].kw;
             }
 
             const int MAX_ATTEMPTS = 3;
