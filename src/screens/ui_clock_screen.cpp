@@ -100,81 +100,115 @@ void clockBgTask(void* /*param*/) {
     vTaskDelay(pdMS_TO_TICKS(1500));
 
     while (!clock_bg_shutdown_requested) {
-        // --- HTTPS cooldown (same guard as art/lyrics tasks) ---
-        while (!clock_bg_shutdown_requested) {
-            unsigned long since_https = millis() - last_https_end_ms;
-            if (since_https >= OTA_HTTPS_COOLDOWN_MS) break;
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        if (clock_bg_shutdown_requested) break;
-
-        // --- Acquire network mutex ---
-        if (xSemaphoreTake(network_mutex, pdMS_TO_TICKS(8000)) != pdTRUE) {
-            Serial.println("[CLKBG] Could not acquire network mutex, skipping");
-            vTaskDelay(pdMS_TO_TICKS(5000));
-            continue;
-        }
-        if (clock_bg_shutdown_requested) {
-            xSemaphoreGive(network_mutex);
-            break;
-        }
-
-        // --- Download loremflickr.com JPEG ---
+        // --- Download loremflickr.com JPEG (plain HTTP, no TLS, up to 3 attempts) ---
+        // Two-step: GET loremflickr.com → parse Location redirect → fetch actual photo.
+        // loremflickr serves from its own cache (/cache/resized/...) via HTTP.
+        // "Random" (no keyword) hits Flickr API directly = 500 since Flickr blocked them.
+        // Fix: for Random mode pick a random keyword from the list so cache is always hit.
+        // picsum.photos NOT used: serves progressive JPEG, JPEGDEC only decodes baseline.
         uint8_t* dl_buf = (uint8_t*)heap_caps_malloc(
             CLOCK_BG_MAX_DL_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         int dl_total = 0;
 
         if (dl_buf) {
-            WiFiClientSecure secure_client;
-            secure_client.setInsecure();  // No cert verification for photo CDN
-            HTTPClient http;
-            http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);  // loremflickr → Flickr CDN cross-domain
-            http.setTimeout(15000);
-
-            // loremflickr.com redirects to Flickr CDN photos (baseline JPEG — required, picsum serves
-            // progressive JPEG which JPEGDEC can only partially decode at 1/8 resolution).
-            // Keyword is user-selected from settings; empty = truly random (no tag filter).
-            // esp_random() gives a 32-bit seed so each refresh fetches a different image.
-            char url[96];
             const char* kw = CLOCK_BG_KEYWORDS[clock_bg_kw_idx].kw;
+
+            // "Random" = empty keyword → pick a random keyword from the list (skip index 0)
+            // so loremflickr always serves from its keyword cache, never hits Flickr API
             if (kw[0] == '\0') {
-                snprintf(url, sizeof(url),
-                         "https://loremflickr.com/%d/%d?lock=%lu",
-                         CLOCK_BG_WIDTH, CLOCK_BG_HEIGHT, (unsigned long)esp_random());
-            } else {
-                snprintf(url, sizeof(url),
-                         "https://loremflickr.com/%d/%d/%s?lock=%lu",
-                         CLOCK_BG_WIDTH, CLOCK_BG_HEIGHT, kw, (unsigned long)esp_random());
+                const int total = sizeof(CLOCK_BG_KEYWORDS) / sizeof(CLOCK_BG_KEYWORDS[0]);
+                kw = CLOCK_BG_KEYWORDS[1 + (esp_random() % (total - 1))].kw;
             }
 
-            if (http.begin(secure_client, url)) {
-                int code = http.GET();
-                if (code == HTTP_CODE_OK) {
-                    WiFiClient* stream = http.getStreamPtr();
-                    uint32_t t0 = millis();
-                    while (dl_total < CLOCK_BG_MAX_DL_SIZE && !clock_bg_shutdown_requested) {
-                        if (millis() - t0 > 20000) break;     // 20-second overall timeout
-                        if (!stream->connected() && !stream->available()) break;  // Server closed
-                        int avail = stream->available();
-                        if (avail <= 0) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
-                        int to_read = min(avail, CLOCK_BG_MAX_DL_SIZE - dl_total);
-                        int n = stream->readBytes(dl_buf + dl_total, to_read);
-                        if (n > 0) dl_total += n;
-                        vTaskDelay(pdMS_TO_TICKS(5));
-                    }
-                    Serial.printf("[CLKBG] Downloaded %d bytes\n", dl_total);
-                } else {
-                    Serial.printf("[CLKBG] HTTP error: %d\n", code);
+            const int MAX_ATTEMPTS = 3;
+
+            for (int attempt = 1; attempt <= MAX_ATTEMPTS && dl_total == 0 && !clock_bg_shutdown_requested; attempt++) {
+
+                // General network cooldown (HTTP — no TLS overhead)
+                while (!clock_bg_shutdown_requested) {
+                    if (millis() - last_network_end_ms >= 200) break;
+                    vTaskDelay(pdMS_TO_TICKS(50));
                 }
-                http.end();
-                secure_client.stop();
+                if (clock_bg_shutdown_requested) break;
+
+                if (xSemaphoreTake(network_mutex, pdMS_TO_TICKS(8000)) != pdTRUE) {
+                    Serial.printf("[CLKBG] No mutex (attempt %d)\n", attempt);
+                    break;
+                }
+                if (clock_bg_shutdown_requested) { xSemaphoreGive(network_mutex); break; }
+
+                if (attempt > 1) Serial.printf("[CLKBG] Retry %d/%d\n", attempt, MAX_ATTEMPTS);
+
+                // Step 1: HTTP GET loremflickr → parse Location redirect (relative or absolute)
+                char lf_url[128];
+                snprintf(lf_url, sizeof(lf_url),
+                         "http://loremflickr.com/%d/%d/%s?lock=%u",
+                         CLOCK_BG_WIDTH, CLOCK_BG_HEIGHT, kw, esp_random() % 10000);
+
+                String photoUrl = "";
+                {
+                    WiFiClient lf_client;
+                    HTTPClient lf_http;
+                    lf_http.setTimeout(10000);
+                    lf_http.setFollowRedirects(HTTPC_DISABLE_FOLLOW_REDIRECTS);
+                    const char* hdrs[] = {"Location"};
+                    lf_http.collectHeaders(hdrs, 1);
+
+                    if (lf_http.begin(lf_client, lf_url)) {
+                        int code = lf_http.GET();
+                        if (code == 301 || code == 302 || code == 303) {
+                            photoUrl = lf_http.header("Location");
+                            // Relative path → make absolute (loremflickr serves /cache/resized/...)
+                            if (photoUrl.startsWith("/"))
+                                photoUrl = String("http://loremflickr.com") + photoUrl;
+                            // Downgrade any HTTPS → HTTP (no TLS)
+                            else if (photoUrl.startsWith("https://"))
+                                photoUrl.replace("https://", "http://");
+                        } else {
+                            Serial.printf("[CLKBG] loremflickr %d (attempt %d/%d)\n", code, attempt, MAX_ATTEMPTS);
+                        }
+                        lf_http.end();
+                        lf_client.stop();
+                    }
+                }
+                last_network_end_ms = millis();
+
+                // Step 2: Fetch the actual photo over plain HTTP
+                if (photoUrl.length() > 0) {
+                    Serial.printf("[CLKBG] Fetching: %s\n", photoUrl.c_str());
+                    WiFiClient photo_client;
+                    HTTPClient photo_http;
+                    photo_http.setTimeout(15000);
+                    photo_http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+
+                    if (photo_http.begin(photo_client, photoUrl)) {
+                        int code = photo_http.GET();
+                        if (code == HTTP_CODE_OK) {
+                            WiFiClient* stream = photo_http.getStreamPtr();
+                            uint32_t t0 = millis();
+                            while (dl_total < CLOCK_BG_MAX_DL_SIZE && !clock_bg_shutdown_requested) {
+                                if (millis() - t0 > 20000) break;
+                                if (!stream->connected() && !stream->available()) break;
+                                int avail = stream->available();
+                                if (avail <= 0) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
+                                int n = stream->readBytes(dl_buf + dl_total,
+                                                          min(avail, CLOCK_BG_MAX_DL_SIZE - dl_total));
+                                if (n > 0) dl_total += n;
+                                vTaskDelay(pdMS_TO_TICKS(5));
+                            }
+                            Serial.printf("[CLKBG] Downloaded %d bytes\n", dl_total);
+                        } else {
+                            Serial.printf("[CLKBG] Photo %d (attempt %d/%d)\n", code, attempt, MAX_ATTEMPTS);
+                        }
+                        photo_http.end();
+                        photo_client.stop();
+                    }
+                    last_network_end_ms = millis();
+                }
+
+                xSemaphoreGive(network_mutex);
             }
-
-            last_https_end_ms   = millis();
-            last_network_end_ms = millis();
         }
-
-        xSemaphoreGive(network_mutex);
 
         // --- Decode JPEG into clock_bg_buffer ---
         if (dl_total > 0 && clock_bg_buffer && !clock_bg_shutdown_requested) {
