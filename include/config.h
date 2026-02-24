@@ -173,6 +173,10 @@
 #define CLOCK_DEFAULT_REFRESH    10   // Refresh background every 10 minutes
 #define CLOCK_DEFAULT_KW_IDX     0    // Index 0 = Random (no keyword)
 #define CLOCK_DEFAULT_12H        0    // 0 = 24h, 1 = 12h
+#define CLOCK_DEFAULT_WEATHER_EN   1  // Weather widget enabled by default
+#define CLOCK_DEFAULT_WEATHER_CITY 0  // 0 = Auto-detect from IP
+#define CLOCK_WX_REFRESH_MIN      15  // Re-fetch weather every 15 min (independent of photo rate)
+#define CLOCK_DEFAULT_WEATHER_FAHR 0  // 0 = Celsius, 1 = Fahrenheit
 
 #define CLOCK_BG_MAX_DL_SIZE  (512 * 1024)  // Max background JPEG download buffer (512KB; Flickr baseline ~100-250KB)
 #define CLOCK_BG_WIDTH        800           // Clock background pixel width
@@ -188,6 +192,9 @@
 #define NVS_KEY_CLOCK_REFRESH   "clk_refresh"
 #define NVS_KEY_CLOCK_KW        "clk_kw"
 #define NVS_KEY_CLOCK_12H       "clk_12h"
+#define NVS_KEY_CLOCK_WEATHER_EN   "clk_wx_en"
+#define NVS_KEY_CLOCK_WEATHER_CITY "clk_wx_city"
+#define NVS_KEY_CLOCK_WEATHER_FAHR "clk_wx_fahr"
 
 // =============================================================================
 // QUEUE / PLAYLIST

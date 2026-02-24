@@ -141,9 +141,9 @@ static void lyricsTaskFunc(void* param) {
         return;
     }
 
-    // Early exit if OTA is preparing (check own flag, not art's flag)
+    // Early exit if shutdown requested (OTA or clock screen entry)
     if (lyrics_shutdown_requested) {
-        Serial.println("[LYRICS] Shutdown requested (OTA), aborting");
+        Serial.println("[LYRICS] Shutdown requested, aborting");
         lyrics_fetching = false;
         lyricsTaskHandle = NULL;
         vTaskDelete(NULL);

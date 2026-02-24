@@ -85,12 +85,18 @@ void setup() {
     // Clamp indices in case lists changed between firmware versions
     if (clock_tz_idx    < 0 || clock_tz_idx    >= CLOCK_ZONES_COUNT)   clock_tz_idx    = 0;
     if (clock_bg_kw_idx < 0 || clock_bg_kw_idx >= CLOCK_BG_KW_COUNT)   clock_bg_kw_idx = 0;
-    Serial.printf("[CLOCK] mode=%d timeout=%dmin tz=%s picsum=%s refresh=%dmin kw=%s 12h=%s\n",
+    clock_weather_enabled  = wifiPrefs.getBool(NVS_KEY_CLOCK_WEATHER_EN,   (bool)CLOCK_DEFAULT_WEATHER_EN);
+    clock_weather_city_idx = wifiPrefs.getInt(NVS_KEY_CLOCK_WEATHER_CITY,  CLOCK_DEFAULT_WEATHER_CITY);
+    if (clock_weather_city_idx < 0 || clock_weather_city_idx >= CLOCK_CITY_COUNT) clock_weather_city_idx = 0;
+    clock_wx_fahrenheit    = wifiPrefs.getBool(NVS_KEY_CLOCK_WEATHER_FAHR, (bool)CLOCK_DEFAULT_WEATHER_FAHR);
+    Serial.printf("[CLOCK] mode=%d timeout=%dmin tz=%s picsum=%s refresh=%dmin kw=%s 12h=%s weather=%s city=%s\n",
                   clock_mode, clock_timeout_min,
                   CLOCK_ZONES[clock_tz_idx].name,
                   clock_picsum_enabled ? "on" : "off", clock_refresh_min,
                   CLOCK_BG_KEYWORDS[clock_bg_kw_idx].label,
-                  clock_12h ? "yes" : "no");
+                  clock_12h ? "yes" : "no",
+                  clock_weather_enabled ? "on" : "off",
+                  CLOCK_CITIES[clock_weather_city_idx].label);
 
     // Brightness will be set after display_init() is called
     Serial.println("[DISPLAY] ESP32-P4 uses ST7701 backlight control (no PWM needed)");

@@ -6,6 +6,7 @@
 #include "ui_common.h"
 #include "config.h"
 #include "lyrics.h"
+#include "clock_screen.h"
 #include <esp_task_wdt.h>
 
 // ============================================================================
@@ -664,10 +665,11 @@ static void otaRecovery() {
     // ALWAYS clear all shutdown/abort flags before restarting tasks.
     // These must be cleared unconditionally - NOT inside the albumArtTaskHandle
     // check below - because tasks can't start cleanly if flags are still set.
-    art_shutdown_requested    = false;
-    art_abort_download        = false;
-    lyrics_shutdown_requested = false;
-    lyrics_abort_requested    = false;
+    art_shutdown_requested      = false;
+    art_abort_download          = false;
+    lyrics_shutdown_requested   = false;
+    lyrics_abort_requested      = false;
+    clock_bg_shutdown_requested = false;  // Allow clock bg task to start again if clock re-enters
 
     // Restart album art task if it isn't already running
     if (albumArtTaskHandle == NULL) {
@@ -734,10 +736,11 @@ static void performOTAUpdate() {
     lv_refr_now(NULL);
 
     // Signal ALL tasks to stop FIRST, then wait
-    art_abort_download = true;
-    art_shutdown_requested = true;
-    lyrics_shutdown_requested = true;
-    lyrics_abort_requested = true;
+    art_abort_download          = true;
+    art_shutdown_requested      = true;
+    lyrics_shutdown_requested   = true;
+    lyrics_abort_requested      = true;
+    clock_bg_shutdown_requested = true;  // Stop clock bg task if clock screen is active
 
     // Stop album art task and WAIT for it to finish
     if (albumArtTaskHandle) {
@@ -782,6 +785,28 @@ static void performOTAUpdate() {
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
         Serial.printf("[OTA] After lyrics cleanup - Free DMA: %d bytes\n",
+            heap_caps_get_free_size(MALLOC_CAP_DMA));
+    }
+
+    // Stop clock background task (runs when clock/screensaver is active)
+    if (clockBgTaskHandle != NULL) {
+        Serial.println("[OTA] Waiting for clock bg task to exit...");
+        int wait_count = 0;
+        while (clockBgTaskHandle != NULL && wait_count < 50) {  // 5s max
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_task_wdt_reset();
+            wait_count++;
+        }
+        if (clockBgTaskHandle == NULL) {
+            Serial.println("[OTA] Clock bg task exited cleanly");
+            vTaskDelay(pdMS_TO_TICKS(500));
+        } else {
+            Serial.println("[OTA] WARNING: Force-killing clock bg task (may leak DMA)");
+            vTaskDelete(clockBgTaskHandle);
+            clockBgTaskHandle = NULL;
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+        Serial.printf("[OTA] After clock bg cleanup - Free DMA: %d bytes\n",
             heap_caps_get_free_size(MALLOC_CAP_DMA));
     }
 
