@@ -113,18 +113,24 @@
 #define OTA_DMA_CRITICAL        4096    // DMA critical threshold (80ms delay)
 #define OTA_DMA_LOW             8192    // DMA low threshold (30ms delay)
 #define OTA_BASE_DELAY_MS       15      // Base per-chunk delay (~65KB/s, ~25s for 1.5MB)
-#define OTA_TLS_MAX_RETRIES     3             // Auto-retry TLS connection on low post-TLS DMA
-#define OTA_TLS_RETRY_DELAY_MS  5000          // Wait between TLS retry attempts (ms per attempt)
-#define OTA_MIN_DMA_AFTER_TLS   (15 * 1024)  // Minimum free DMA needed after TLS handshake
-                                              // TLS uses ~115KB; if <15KB left, SDIO RX pool
-                                              // exhausts mid-download → sdio_push_data_to_queue crash
-                                              // Fresh boot has ~45KB+ after TLS; long-running has ~8KB
-#define OTA_TARGET_FREE_DMA     (130 * 1024)  // Need 130KB free before OTA TLS (115KB TLS + 15KB SDIO min)
-                                              // Fresh boot: ~160KB → OTA works; running state: ~122KB → abort
+#define OTA_TLS_MAX_RETRIES     3             // Retry full connect+download on connection failure
+#define OTA_TLS_RETRY_DELAY_MS  5000          // Wait between retry attempts (ms per attempt)
+#define OTA_MIN_DMA_AFTER_TLS   (8 * 1024)   // Min total free DMA after TLS GET completes.
+                                              // < 8KB → SDIO RX pool starved → assert crash.
+                                              // Normal full handshake leaves ~17-21KB (safe).
+                                              // heap_caps_get_largest_free_block(MALLOC_CAP_DMA)
+                                              // always returns 0 on ESP32-P4, so total only.
+#define OTA_TARGET_FREE_DMA     (120 * 1024) // Min free DMA before starting OTA TLS handshake
+                                              // Hardware ceiling with full app = ~129KB (160KB total
+                                              // minus ~31KB permanent: display DMA + SDIO + lwIP base)
+                                              // 120KB is safely reachable after all tasks exit cleanly
 #define OTA_HTTPS_COOLDOWN_MS   2000    // Wait for previous HTTPS cleanup
 #define OTA_CHECK_DEBOUNCE_MS   5000    // Min delay between update checks
 #define OTA_CHECK_TIMEOUT_MS    15000   // HTTP timeout for version check
 #define OTA_CHECK_CLEANUP_MS    500     // Delay after version check TLS cleanup
+#define OTA_DMA_POLL_MS         15000   // Max wait for TIME_WAIT sockets to expire
+                                        // lwIP TIME_WAIT = 2×MSL ≈ 12s; 15s gives 3s margin
+#define OTA_DMA_PLATEAU_COUNT   3       // Consecutive seconds with no DMA growth → reboot early
 
 // =============================================================================
 // MBEDTLS / SSL
