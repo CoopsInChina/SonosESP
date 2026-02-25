@@ -284,7 +284,9 @@ static int pngDraw(PNGDRAW* pDraw) {
     if (!jpeg_decode_buffer) return 0;
 
     // Get RGB565 pixels from PNG decoder
-    uint16_t lineBuffer[512];  // Max width we support
+    // Static: png is a single global instance, pngDraw is only ever called from the
+    // art task — no reentrancy. Avoids 1KB stack allocation per row during PNG decode.
+    static uint16_t lineBuffer[512];
     int w = pDraw->iWidth;
     if (w > 512) w = 512;
 
