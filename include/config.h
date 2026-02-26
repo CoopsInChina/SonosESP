@@ -67,8 +67,8 @@
 // ALBUM ART
 // =============================================================================
 #define ART_MAX_DOWNLOAD_SIZE   (280 * 1024)  // Max JPEG download buffer (280KB)
-#define ART_TASK_STACK_SIZE     12000   // Album art task stack — PNG decode stacks TLS + software
-                                        // decoder on same task; 7KB was insufficient (stack=0)
+#define ART_TASK_STACK_SIZE     20000   // Album art task stack — PNG decode stacks TLS + software
+                                        // decoder on same task; 12KB hit stack=0 on HTTPS PNG (BBC R4)
 #define ART_TASK_PRIORITY       0       // Album art task priority
 #define ART_DOWNLOAD_TIMEOUT_MS 8000    // Download timeout
 #define ART_CHECK_INTERVAL_MS   100     // How often to check for new art requests
