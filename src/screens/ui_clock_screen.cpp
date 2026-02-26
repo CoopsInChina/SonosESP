@@ -373,6 +373,11 @@ static void fetchClockWeather() {
                         hourly[i].temp = (src < arr_sz) ? (int)roundf(h_temp[src].as<float>()) : cur_temp;
                     }
 
+                    // NWP model (hourly) is more responsive to active precipitation than
+                    // AWS observation (current.weather_code). Use hourly[skip] — the same
+                    // entry as the first strip column — so icon/text match the strip.
+                    if (arr_sz > skip) wmo = h_wmo[skip].as<int>();
+
                     clock_wx_temp     = cur_temp;
                     clock_wx_humidity = humidity;
                     clock_wx_wind     = wind;
