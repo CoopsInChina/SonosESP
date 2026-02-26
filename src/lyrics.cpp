@@ -311,7 +311,7 @@ static void lyricsTaskFunc(void* param) {
         }
 
         // Spawn new retry task BEFORE deleting self (keep lyrics_fetching = true)
-        xTaskCreatePinnedToCore(lyricsTaskFunc, "lyrics", 4096, NULL, 1, &lyricsTaskHandle, 0);
+        xTaskCreatePinnedToCore(lyricsTaskFunc, "lyrics", LYRICS_TASK_STACK, NULL, LYRICS_TASK_PRIORITY, &lyricsTaskHandle, 0);
         vTaskDelete(NULL);  // Delete self, new task continues with retry
         return;
     }
@@ -387,7 +387,7 @@ void requestLyrics(const String& artist, const String& title, int durationSec) {
     updateLyricsStatus();  // Show "fetching" status
 
     // Spawn one-shot background task (reduced stack: lyrics task is lightweight)
-    xTaskCreatePinnedToCore(lyricsTaskFunc, "lyrics", 4096, NULL, 1, &lyricsTaskHandle, 0);
+    xTaskCreatePinnedToCore(lyricsTaskFunc, "lyrics", LYRICS_TASK_STACK, NULL, LYRICS_TASK_PRIORITY, &lyricsTaskHandle, 0);
 }
 
 void clearLyrics() {

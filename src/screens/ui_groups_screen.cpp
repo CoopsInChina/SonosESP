@@ -171,9 +171,9 @@ void refreshGroupsList() {
                 lv_obj_add_event_cb(removeBtn, [](lv_event_t* e) {
                     lv_event_stop_bubbling(e);
                     int idx = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
-                    sonos.leaveGroup(idx);
                     lv_label_set_text(lbl_groups_status, "Removing from group...");
-                    lv_timer_handler();
+                    lv_refr_now(NULL);
+                    sonos.leaveGroup(idx);
                     vTaskDelay(pdMS_TO_TICKS(500));
                     sonos.updateGroupInfo();
                     refreshGroupsList();
@@ -236,9 +236,9 @@ void refreshGroupsList() {
                 lv_obj_add_event_cb(addBtn, [](lv_event_t* e) {
                     int idx = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
                     if (selected_group_coordinator >= 0) {
-                        sonos.joinGroup(idx, selected_group_coordinator);
                         lv_label_set_text(lbl_groups_status, "Adding to group...");
-                        lv_timer_handler();
+                        lv_refr_now(NULL);
+                        sonos.joinGroup(idx, selected_group_coordinator);
                         vTaskDelay(pdMS_TO_TICKS(500));
                         sonos.updateGroupInfo();
                         refreshGroupsList();

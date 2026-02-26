@@ -46,6 +46,7 @@
 #define WIFI_CONNECT_TIMEOUT_MS 500     // Per-attempt timeout
 #define WIFI_CONNECT_RETRIES    40      // Max connection attempts (40 x 500ms = 20s)
 #define WIFI_MAX_NETWORKS       20      // Max networks to scan/store
+#define WIFI_CHECK_INTERVAL_MS  10000   // Main loop: WiFi health check interval
 
 // =============================================================================
 // DISPLAY SETTINGS
@@ -65,7 +66,6 @@
 // =============================================================================
 // ALBUM ART
 // =============================================================================
-#define ART_DISPLAY_SIZE        420     // Album art display size (pixels)
 #define ART_MAX_DOWNLOAD_SIZE   (280 * 1024)  // Max JPEG download buffer (280KB)
 #define ART_TASK_STACK_SIZE     12000   // Album art task stack — PNG decode stacks TLS + software
                                         // decoder on same task; 7KB was insufficient (stack=0)
@@ -89,6 +89,8 @@
 #define SONOS_POLL_TASK_STACK   3000    // Polling task stack size (was 4096, ~4KB saved)
 #define SONOS_NET_TASK_PRIORITY 2       // Network task priority
 #define SONOS_POLL_TASK_PRIORITY 3      // Polling task priority
+#define LYRICS_TASK_STACK       4096    // Lyrics task stack size
+#define LYRICS_TASK_PRIORITY    1       // Lyrics task priority
 
 // Timeouts
 #define SONOS_SOAP_TIMEOUT_MS   2000    // SOAP request timeout
@@ -104,8 +106,10 @@
 // =============================================================================
 // OTA UPDATES
 // =============================================================================
-#define OTA_BUFFER_SIZE         1024    // Download buffer size
-#define OTA_READ_SIZE           1024    // Max bytes per read (1KB - safe with adaptive throttling)
+#define OTA_BUFFER_SIZE         2048    // Download buffer (static in main loop — not FreeRTOS stack)
+#define OTA_READ_SIZE           2048    // Max bytes per read. 2KB: same adaptive delay, 2× throughput.
+                                        // Critical zone (DMA<4KB): 2KB+80ms = 25KB/s vs old 12.5KB/s
+                                        // → ~40s download instead of ~68s for 2MB firmware
 #define OTA_MAX_FIRMWARE_SIZE   (10 * 1024 * 1024)  // 10MB max firmware
 #define OTA_DOWNLOAD_TIMEOUT_MS 300000  // 5 minutes max for entire download
 #define OTA_STALL_TIMEOUT_MS    30000   // 30 seconds max with no data received
@@ -121,10 +125,15 @@
                                               // Normal full handshake leaves ~17-21KB (safe).
                                               // heap_caps_get_largest_free_block(MALLOC_CAP_DMA)
                                               // always returns 0 on ESP32-P4, so total only.
-#define OTA_TARGET_FREE_DMA     (120 * 1024) // Min free DMA before starting OTA TLS handshake
-                                              // Hardware ceiling with full app = ~129KB (160KB total
-                                              // minus ~31KB permanent: display DMA + SDIO + lwIP base)
-                                              // 120KB is safely reachable after all tasks exit cleanly
+#define OTA_TARGET_FREE_DMA     (112 * 1024) // Min free DMA before attempting the OTA TLS handshake.
+                                              // Lowered 120→112KB: the post-TLS check (OTA_MIN_DMA_AFTER_TLS)
+                                              // is the real SDIO safety gate. At 112KB pre-TLS:
+                                              //   attempt 1: 112-106=6KB post-TLS → fails 8KB check → retry
+                                              //   TLS cleanup returns ~106KB → DMA recovers to ~117KB
+                                              //   attempt 2: 117-106=11KB → passes → downloads (no reboot!)
+                                              // Typical running-app DMA: 110-112KB. Was always rebooting;
+                                              // now handles borderline cases with one extra TLS retry (~5s).
+                                              // Genuinely low cases (<110KB) still reboot via plateau detection.
 #define OTA_HTTPS_COOLDOWN_MS   2000    // Wait for previous HTTPS cleanup
 #define OTA_CHECK_DEBOUNCE_MS   5000    // Min delay between update checks
 #define OTA_CHECK_TIMEOUT_MS    15000   // HTTP timeout for version check

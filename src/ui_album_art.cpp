@@ -38,6 +38,16 @@ static PNG png;
 static uint32_t current_bg_color = 0x1a1a1a;
 static uint32_t target_bg_color = 0x1a1a1a;
 
+// 2-slot LRU album art cache in PSRAM — instant display on prev/next, no re-download
+struct ArtCacheEntry {
+    char url[512];
+    uint16_t* pixels;        // ART_SIZE*ART_SIZE*2 bytes (~352KB each)
+    uint32_t dominant_color;
+    bool valid;
+};
+static ArtCacheEntry art_cache[2] = {};
+static int art_cache_lru = 0;  // Index of most recently used slot
+
 // Interpolate a single 8-bit channel
 static inline uint8_t lerp8(uint8_t a, uint8_t b, int t) {
     return (uint8_t)(a + ((int)(b - a) * t) / 255);
@@ -391,9 +401,21 @@ static bool isPrivateIP(const char* url) {
 }
 
 void albumArtTask(void* param) {
-    art_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
-    art_temp_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
+    // Guard against PSRAM leak on OTA recovery: task may be killed/recreated while globals
+    // already hold valid pointers. Only allocate if not yet allocated.
+    if (!art_buffer)
+        art_buffer     = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
+    if (!art_temp_buffer)
+        art_temp_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
     if (!art_buffer || !art_temp_buffer) { vTaskDelete(NULL); return; }
+
+    if (!art_cache[0].pixels)
+        art_cache[0].pixels = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
+    if (!art_cache[1].pixels)
+        art_cache[1].pixels = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
+    if (!art_cache[0].pixels || !art_cache[1].pixels) {
+        Serial.println("[ART] LRU cache allocation failed — cache disabled");
+    }
 
     // Initialize ESP32-P4 Hardware JPEG Decoder
     jpeg_decode_engine_cfg_t hw_jpeg_cfg = {
@@ -454,6 +476,29 @@ void albumArtTask(void* param) {
         }
         if (url[0] != '\0') {
             Serial.printf("[ART] URL: %s\n", url);
+
+            // LRU cache check — serve instantly without network if we already have this art
+            {
+                bool cache_hit = false;
+                for (int i = 0; i < 2; i++) {
+                    if (art_cache[i].valid && art_cache[i].pixels &&
+                        strncmp(art_cache[i].url, url, sizeof(art_cache[i].url)) == 0) {
+                        Serial.printf("[ART] Cache hit slot %d — skipping download\n", i);
+                        if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                            memcpy(art_buffer, art_cache[i].pixels, ART_SIZE * ART_SIZE * 2);
+                            last_art_url = url;
+                            dominant_color = art_cache[i].dominant_color;
+                            art_ready = true;
+                            color_ready = true;
+                            art_cache_lru = i;
+                            xSemaphoreGive(art_mutex);
+                        }
+                        cache_hit = true;
+                        break;
+                    }
+                }
+                if (cache_hit) continue;
+            }
 
             // Simple WiFi check - don't try to download if not connected
             if (WiFi.status() != WL_CONNECTED) {
@@ -818,6 +863,16 @@ void albumArtTask(void* param) {
                                                 color_ready = true;
                                                 xSemaphoreGive(art_mutex);
                                             }
+                                            // Store to LRU cache (art_cache is art-task-private, no mutex needed)
+                                            if (art_cache[0].pixels && art_cache[1].pixels) {
+                                                int slot = 1 - art_cache_lru;
+                                                memcpy(art_cache[slot].pixels, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                                strncpy(art_cache[slot].url, url, sizeof(art_cache[slot].url) - 1);
+                                                art_cache[slot].url[sizeof(art_cache[slot].url) - 1] = '\0';
+                                                art_cache[slot].dominant_color = new_color;
+                                                art_cache[slot].valid = true;
+                                                art_cache_lru = slot;
+                                            }
                                             // Reset failure counter on success
                                             consecutive_failures = 0;
                                             last_failed_url[0] = '\0';
@@ -1006,6 +1061,16 @@ void albumArtTask(void* param) {
                                         color_ready = true;
                                         xSemaphoreGive(art_mutex);
                                     }
+                                    // Store to LRU cache (art_cache is art-task-private, no mutex needed)
+                                    if (art_cache[0].pixels && art_cache[1].pixels) {
+                                        int slot = 1 - art_cache_lru;
+                                        memcpy(art_cache[slot].pixels, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                        strncpy(art_cache[slot].url, url, sizeof(art_cache[slot].url) - 1);
+                                        art_cache[slot].url[sizeof(art_cache[slot].url) - 1] = '\0';
+                                        art_cache[slot].dominant_color = new_color;
+                                        art_cache[slot].valid = true;
+                                        art_cache_lru = slot;
+                                    }
                                     consecutive_failures = 0;
                                     last_failed_url[0] = '\0';
                                 } else {
@@ -1061,6 +1126,16 @@ void albumArtTask(void* param) {
                                         art_ready = true;
                                         color_ready = true;
                                         xSemaphoreGive(art_mutex);
+                                    }
+                                    // Store to LRU cache (art_cache is art-task-private, no mutex needed)
+                                    if (art_cache[0].pixels && art_cache[1].pixels) {
+                                        int slot = 1 - art_cache_lru;
+                                        memcpy(art_cache[slot].pixels, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                        strncpy(art_cache[slot].url, url, sizeof(art_cache[slot].url) - 1);
+                                        art_cache[slot].url[sizeof(art_cache[slot].url) - 1] = '\0';
+                                        art_cache[slot].dominant_color = new_color;
+                                        art_cache[slot].valid = true;
+                                        art_cache_lru = slot;
                                     }
                                 } else {
                                     // SW also failed - mark as done

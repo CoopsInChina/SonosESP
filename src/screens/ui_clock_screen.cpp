@@ -76,7 +76,7 @@ static bool  clock_auto_loc_valid = false;  // true once ip-api.com responded OK
 // Layout:
 //   Top-left card (10,10 → ~370×135): city + big temp + condition + H/W
 //   Top-right icon (screen x=600, y=12): 64px condition icon + "Today" label
-//   Bottom strip (0,380 → 800×100): 6-day daily forecast columns
+//   Bottom strip (0,380 → 800×100): 6-hour hourly forecast columns
 // ============================================================================
 static lv_obj_t* clock_wx_tl_panel   = nullptr;  // Top-left container (transparent)
 static lv_obj_t* clock_wx_city_lbl   = nullptr;  // City name — montserrat_20
@@ -695,7 +695,7 @@ void createClockScreen() {
     lv_obj_set_pos(clock_wx_icon, 155, 10);
     lv_obj_clear_flag(clock_wx_icon, LV_OBJ_FLAG_CLICKABLE);
 
-    // ── Bottom strip: 6-day daily forecast (no background, no separator) ───────
+    // ── Bottom strip: 6-hour hourly forecast (no background, no separator) ─────
     clock_wx_bottom = lv_obj_create(scr_clock);
     lv_obj_set_pos(clock_wx_bottom, 0, 375);
     lv_obj_set_size(clock_wx_bottom, 800, 105);

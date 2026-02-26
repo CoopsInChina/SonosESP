@@ -262,12 +262,11 @@ void setup() {
     }
 }
 
-// WiFi auto-reconnection check (runs every 10 seconds when disconnected)
+// WiFi auto-reconnection check (runs every WIFI_CHECK_INTERVAL_MS when disconnected)
 static unsigned long lastWifiCheck = 0;
-static const unsigned long WIFI_CHECK_INTERVAL = 10000;  // 10 seconds
 
 void checkWiFiReconnect() {
-    if (millis() - lastWifiCheck < WIFI_CHECK_INTERVAL) return;
+    if (millis() - lastWifiCheck < WIFI_CHECK_INTERVAL_MS) return;
     lastWifiCheck = millis();
 
     if (WiFi.status() != WL_CONNECTED) {
