@@ -84,9 +84,12 @@
 #define SONOS_CMD_QUEUE_SIZE    10      // Command queue depth
 #define SONOS_UI_QUEUE_SIZE     20      // UI update queue depth
 
-// Task configuration (profiled: Net uses ~16KB, Poll uses ~7.5KB of allocated)
-#define SONOS_NET_TASK_STACK    3500    // Network task stack size (was 6144, ~10KB saved)
-#define SONOS_POLL_TASK_STACK   3000    // Polling task stack size (was 4096, ~4KB saved)
+// Task configuration (stack sizes in BYTES — ESP-IDF xTaskCreate takes bytes, not words)
+// High water marks (before fix) showed Poll=684 bytes free / 3000 total = DANGER.
+// sendSOAP chain can push 600-800 more bytes → overflow on deeper paths (queue, media info).
+// Net=1504 bytes free / 3500 total — also tight. Both doubled for safety.
+#define SONOS_NET_TASK_STACK    6000    // Network task stack size (was 3500; actual free was ~1.5KB)
+#define SONOS_POLL_TASK_STACK   6000    // Polling task stack size (was 3000; actual free was ~684 bytes!)
 #define SONOS_NET_TASK_PRIORITY 2       // Network task priority
 #define SONOS_POLL_TASK_PRIORITY 3      // Polling task priority
 #define LYRICS_TASK_STACK       4096    // Lyrics task stack size

@@ -305,14 +305,15 @@ void logHeapStatus() {
     Serial.printf("[HEAP] Free: %dKB | Min: %dKB | PSRAM: %dKB\n",
                   free_heap / 1024, min_heap / 1024, free_psram / 1024);
 
-    // Log task stack high water marks (unused stack space in words * 4 = bytes)
+    // Log task stack high water marks — minimum free bytes ever observed.
+    // On ESP-IDF 5.x (ESP32-P4 RISC-V), uxTaskGetStackHighWaterMark returns bytes directly.
     // Lower number = more stack used, closer to overflow. 0 = already overflowed.
-    Serial.printf("[STACK] Loop:%d ", uxTaskGetStackHighWaterMark(NULL) * 4);  // NULL = this task
-    Serial.printf("Art:%d ", albumArtTaskHandle ? uxTaskGetStackHighWaterMark(albumArtTaskHandle) * 4 : 0);
-    Serial.printf("Net:%d ", sonos.getNetworkTaskHandle() ? uxTaskGetStackHighWaterMark(sonos.getNetworkTaskHandle()) * 4 : 0);
-    Serial.printf("Poll:%d ", sonos.getPollingTaskHandle() ? uxTaskGetStackHighWaterMark(sonos.getPollingTaskHandle()) * 4 : 0);
-    Serial.printf("ClkBg:%d ", clockBgTaskHandle ? uxTaskGetStackHighWaterMark(clockBgTaskHandle) * 4 : 0);
-    Serial.printf("Lyrics:%d bytes free\n", lyricsTaskHandle ? uxTaskGetStackHighWaterMark(lyricsTaskHandle) * 4 : 0);
+    Serial.printf("[STACK] Loop:%d ", uxTaskGetStackHighWaterMark(NULL));  // NULL = this task
+    Serial.printf("Art:%d ", albumArtTaskHandle ? uxTaskGetStackHighWaterMark(albumArtTaskHandle) : 0);
+    Serial.printf("Net:%d ", sonos.getNetworkTaskHandle() ? uxTaskGetStackHighWaterMark(sonos.getNetworkTaskHandle()) : 0);
+    Serial.printf("Poll:%d ", sonos.getPollingTaskHandle() ? uxTaskGetStackHighWaterMark(sonos.getPollingTaskHandle()) : 0);
+    Serial.printf("ClkBg:%d ", clockBgTaskHandle ? uxTaskGetStackHighWaterMark(clockBgTaskHandle) : 0);
+    Serial.printf("Lyrics:%d bytes free\n", lyricsTaskHandle ? uxTaskGetStackHighWaterMark(lyricsTaskHandle) : 0);
 
     // Warn if heap is getting low
     if (free_heap < 50000) {
