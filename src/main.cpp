@@ -104,6 +104,7 @@ void setup() {
     Serial.println("[DISPLAY] ESP32-P4 uses ST7701 backlight control (no PWM needed)");
 
     WiFi.mode(WIFI_STA);
+    WiFi.setSleep(false);  // keep C6 radio always active — no modem sleep on mains-powered device
     // ESP32-C6 WiFi initialization delay - fixes ESP-Hosted SDIO timing issues
     vTaskDelay(pdMS_TO_TICKS(WIFI_INIT_DELAY_MS));
     WiFi.begin(ssid.c_str(), pass.c_str());
