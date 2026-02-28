@@ -27,6 +27,10 @@ static int pending_duration = 0;
 static int lyrics_retry_count = 0;  // Track retry attempts for failed fetches
 static char lyrics_status_msg[64] = "";         // Status shown briefly after fetch completes
 static unsigned long lyrics_status_until_ms = 0; // Show status until this timestamp
+// Track which song already failed so requestLyrics() doesn't re-spawn for same track.
+// Cleared when a genuinely new track is detected (different artist or title).
+static char lyrics_failed_artist[128] = "";
+static char lyrics_failed_title[128]  = "";
 
 // UI overlay objects
 static lv_obj_t* lyrics_container = nullptr;
@@ -126,25 +130,15 @@ void initLyrics() {
     }
 }
 
-// Background task: fetch lyrics from LRCLIB
+// Background task: fetch lyrics from LRCLIB.
+// Retry loop is internal (no self-spawn) so a single PSRAM stack can be reused safely.
 static void lyricsTaskFunc(void* param) {
-    // Delay to let album art finish first - reduces SDIO contention (optimized: was 1500ms, now 1000ms since HTTP is faster)
+    // Initial delay: lets album art start first, reduces SDIO contention
     vTaskDelay(pdMS_TO_TICKS(1000));
 
-    // Check abort flag (track changed during initial delay)
-    if (lyrics_abort_requested) {
-        Serial.println("[LYRICS] Abort requested (track changed), stopping fetch");
+    if (lyrics_abort_requested || lyrics_shutdown_requested) {
         lyrics_fetching = false;
         lyrics_abort_requested = false;
-        lyricsTaskHandle = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // Early exit if shutdown requested (OTA or clock screen entry)
-    if (lyrics_shutdown_requested) {
-        Serial.println("[LYRICS] Shutdown requested, aborting");
-        lyrics_fetching = false;
         lyricsTaskHandle = NULL;
         vTaskDelete(NULL);
         return;
@@ -152,156 +146,45 @@ static void lyricsTaskFunc(void* param) {
 
     Serial.printf("[LYRICS] Fetching: %s - %s\n", pending_artist, pending_title);
 
-    // Build URL (HTTPS required by lrclib.net)
+    // Build URL once — same URL for all retry attempts
     static char url[512];
-    String artist_enc = lyricsUrlEncode(pending_artist);
-    String title_enc = lyricsUrlEncode(pending_title);
-    if (pending_duration > 0) {
-        snprintf(url, sizeof(url), "https://lrclib.net/api/get?artist_name=%s&track_name=%s&duration=%d",
-            artist_enc.c_str(), title_enc.c_str(), pending_duration);
-    } else {
-        snprintf(url, sizeof(url), "https://lrclib.net/api/get?artist_name=%s&track_name=%s",
-            artist_enc.c_str(), title_enc.c_str());
-    }
-
-    // PRE-WAIT: Wait for cooldowns BEFORE acquiring mutex
-    // This prevents blocking SOAP commands (Next/Prev/Play) during cooldown waits
     {
-        unsigned long now = millis();
-        unsigned long elapsed = now - last_network_end_ms;
-        if (last_network_end_ms > 0 && elapsed < 200) {
-            vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
-        }
-        now = millis();
-        elapsed = now - last_https_end_ms;
-        if (last_https_end_ms > 0 && elapsed < 2000) {
-            unsigned long wait_ms = 2000 - elapsed;
-            Serial.printf("[LYRICS] HTTPS cooldown: waiting %lums (elapsed: %lums)\n", wait_ms, elapsed);
-            vTaskDelay(pdMS_TO_TICKS(wait_ms));
-        }
-    }
-
-    // Check abort/shutdown after cooldown (track may have changed or OTA starting)
-    if (lyrics_shutdown_requested) {
-        Serial.println("[LYRICS] Shutdown requested after cooldown, stopping");
-        lyrics_fetching = false;
-        lyricsTaskHandle = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-    if (lyrics_abort_requested) {
-        Serial.println("[LYRICS] Abort requested after cooldown, stopping");
-        lyrics_fetching = false;
-        lyrics_abort_requested = false;
-        lyricsTaskHandle = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // Acquire network mutex (shorter timeout to not block SOAP requests)
-    if (!xSemaphoreTake(network_mutex, pdMS_TO_TICKS(3000))) {
-        Serial.println("[LYRICS] Network busy, skipping fetch");
-        lyrics_fetching = false;
-        // Don't call updateLyricsStatus() here - we're in a background task,
-        // LVGL functions are NOT thread-safe (causes lv_inv_area assertion)
-        // The main UI loop will pick up lyrics_fetching=false and update status
-        lyricsTaskHandle = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // Re-check cooldowns under mutex (another task may have used network while we waited)
-    {
-        unsigned long now = millis();
-        unsigned long elapsed = now - last_network_end_ms;
-        if (last_network_end_ms > 0 && elapsed < 200) {
-            vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
-        }
-        now = millis();
-        elapsed = now - last_https_end_ms;
-        if (last_https_end_ms > 0 && elapsed < 2000) {
-            vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
-        }
-    }
-
-    // HTTPS fetch - use scoped block to ensure WiFiClientSecure is destroyed immediately
-    String payload = "";
-    {
-        WiFiClientSecure client;
-        client.setInsecure();  // Skip certificate validation to save memory
-        HTTPClient http;
-        http.begin(client, url);
-        http.setTimeout(10000);  // 10s timeout (lrclib.net can be slow)
-        http.addHeader("User-Agent", "SonosESP/1.0");
-
-        int code = http.GET();
-        if (code == 200) {
-            payload = http.getString();
-            lyrics_retry_count = 0;  // Reset on success
+        String artist_enc = lyricsUrlEncode(pending_artist);
+        String title_enc  = lyricsUrlEncode(pending_title);
+        if (pending_duration > 0) {
+            snprintf(url, sizeof(url),
+                "https://lrclib.net/api/get?artist_name=%s&track_name=%s&duration=%d",
+                artist_enc.c_str(), title_enc.c_str(), pending_duration);
         } else {
-            // Translate HTTP client error codes to readable messages
-            const char* error_msg;
-            switch(code) {
-                case -1: error_msg = "Connection failed"; break;
-                case -2: error_msg = "Send header failed"; break;
-                case -3: error_msg = "Send payload failed"; break;
-                case -4: error_msg = "Not connected"; break;
-                case -5: error_msg = "Connection lost/timeout"; break;
-                case -6: error_msg = "No stream"; break;
-                case -7: error_msg = "No HTTP server"; break;
-                case -8: error_msg = "Too less RAM"; break;
-                case -9: error_msg = "Encoding error"; break;
-                case -10: error_msg = "Stream write error"; break;
-                case -11: error_msg = "Read timeout"; break;
-                default: error_msg = "Unknown error"; break;
-            }
-            Serial.printf("[LYRICS] HTTP %d (%s)\n", code, error_msg);
-            Serial.flush();  // CRITICAL: Flush serial buffer to prevent output corruption
+            snprintf(url, sizeof(url),
+                "https://lrclib.net/api/get?artist_name=%s&track_name=%s",
+                artist_enc.c_str(), title_enc.c_str());
+        }
+    }
 
-            // Retry logic: 2 retries with short delays (total 3 attempts)
-            // Each HTTPS retry stresses SDIO and blocks art downloads via network_mutex
-            lyrics_retry_count++;
-            if (lyrics_retry_count < 2) {
-                Serial.printf("[LYRICS] Retry %d/2 in 2s...\n", lyrics_retry_count);
-            } else {
-                Serial.println("[LYRICS] Max retries reached, giving up");
-                lyrics_retry_count = 0;  // Reset for next track
+    String payload = "";
+
+    // Retry loop: max 2 attempts for transient errors.
+    // HTTP -1 (connection failed) and 404 (no lyrics) give up immediately.
+    // No self-spawn: loops internally so the single PSRAM stack is reused safely.
+    while (true) {
+        // PRE-WAIT cooldowns outside mutex so SOAP commands aren't blocked
+        {
+            unsigned long now = millis();
+            unsigned long elapsed = now - last_network_end_ms;
+            if (last_network_end_ms > 0 && elapsed < 200)
+                vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
+            now = millis();
+            elapsed = now - last_https_end_ms;
+            if (last_https_end_ms > 0 && elapsed < 2000) {
+                unsigned long wait_ms = 2000 - elapsed;
+                Serial.printf("[LYRICS] HTTPS cooldown: waiting %lums\n", wait_ms);
+                vTaskDelay(pdMS_TO_TICKS(wait_ms));
             }
         }
 
-        http.end();
-        client.stop();
-        // client and http destroyed here when leaving scope - frees TLS session
-    }
-
-    // Wait for TLS cleanup and SDIO buffer stabilization
-    vTaskDelay(pdMS_TO_TICKS(200));
-
-    // Update timestamps before releasing mutex
-    last_network_end_ms = millis();
-    last_https_end_ms = millis();
-
-    xSemaphoreGive(network_mutex);
-
-    // Check abort flag before retrying (track changed)
-    if (lyrics_abort_requested) {
-        Serial.println("[LYRICS] Abort requested (track changed), stopping retries");
-        lyrics_fetching = false;
-        lyrics_abort_requested = false;
-        lyrics_retry_count = 0;  // Reset retry counter
-        lyricsTaskHandle = NULL;
-        vTaskDelete(NULL);
-        return;
-    }
-
-    // If failed and retries remaining, spawn retry task after short delay
-    if (payload.length() == 0 && lyrics_retry_count > 0 && lyrics_retry_count < 2) {
-        // Fixed 2s delay (short to minimize art blocking)
-        vTaskDelay(pdMS_TO_TICKS(2000));
-
-        // Check abort flag again after delay
-        if (lyrics_abort_requested) {
-            Serial.println("[LYRICS] Abort requested during retry delay, stopping");
+        // Abort/shutdown after cooldown
+        if (lyrics_abort_requested || lyrics_shutdown_requested) {
             lyrics_fetching = false;
             lyrics_abort_requested = false;
             lyrics_retry_count = 0;
@@ -310,15 +193,121 @@ static void lyricsTaskFunc(void* param) {
             return;
         }
 
-        // Spawn new retry task BEFORE deleting self (keep lyrics_fetching = true)
-        xTaskCreatePinnedToCore(lyricsTaskFunc, "lyrics", LYRICS_TASK_STACK, NULL, LYRICS_TASK_PRIORITY, &lyricsTaskHandle, 0);
-        vTaskDelete(NULL);  // Delete self, new task continues with retry
-        return;
+        // Acquire mutex (3s timeout — short so SOAP commands aren't blocked for long)
+        if (!xSemaphoreTake(network_mutex, pdMS_TO_TICKS(3000))) {
+            Serial.println("[LYRICS] Network busy, skipping fetch");
+            lyrics_fetching = false;
+            lyricsTaskHandle = NULL;
+            vTaskDelete(NULL);
+            return;
+        }
+
+        // Re-check cooldowns under mutex (another task may have run while we waited)
+        {
+            unsigned long now = millis();
+            unsigned long elapsed = now - last_network_end_ms;
+            if (last_network_end_ms > 0 && elapsed < 200)
+                vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
+            now = millis();
+            elapsed = now - last_https_end_ms;
+            if (last_https_end_ms > 0 && elapsed < 2000)
+                vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
+        }
+
+        // HTTPS fetch — scoped so WiFiClientSecure destructor frees TLS memory immediately
+        {
+            WiFiClientSecure client;
+            client.setInsecure();
+            HTTPClient http;
+            http.begin(client, url);
+            http.setTimeout(10000);
+            http.addHeader("User-Agent", "SonosESP/1.0");
+
+            int code = http.GET();
+            if (code == 200) {
+                payload = http.getString();
+                lyrics_retry_count = 0;
+            } else {
+                const char* error_msg;
+                switch (code) {
+                    case -1:  error_msg = "Connection failed"; break;
+                    case -2:  error_msg = "Send header failed"; break;
+                    case -3:  error_msg = "Send payload failed"; break;
+                    case -4:  error_msg = "Not connected"; break;
+                    case -5:  error_msg = "Connection lost/timeout"; break;
+                    case -6:  error_msg = "No stream"; break;
+                    case -7:  error_msg = "No HTTP server"; break;
+                    case -8:  error_msg = "Too less RAM"; break;
+                    case -9:  error_msg = "Encoding error"; break;
+                    case -10: error_msg = "Stream write error"; break;
+                    case -11: error_msg = "Read timeout"; break;
+                    default:  error_msg = "Unknown error"; break;
+                }
+                Serial.printf("[LYRICS] HTTP %d (%s)\n", code, error_msg);
+                Serial.flush();
+
+                if (code == -1 || code == 404) {
+                    // No retry: -1 = SDIO stressed, 404 = no lyrics exist
+                    Serial.printf("[LYRICS] No retry for HTTP %d — marking song as failed\n", code);
+                    strncpy(lyrics_failed_artist, pending_artist, sizeof(lyrics_failed_artist) - 1);
+                    lyrics_failed_artist[sizeof(lyrics_failed_artist) - 1] = '\0';
+                    strncpy(lyrics_failed_title, pending_title, sizeof(lyrics_failed_title) - 1);
+                    lyrics_failed_title[sizeof(lyrics_failed_title) - 1] = '\0';
+                    lyrics_retry_count = 0;
+                } else {
+                    lyrics_retry_count++;
+                    if (lyrics_retry_count < 2) {
+                        Serial.printf("[LYRICS] Retry %d/2 in 2s...\n", lyrics_retry_count);
+                    } else {
+                        Serial.println("[LYRICS] Max retries reached, giving up");
+                        strncpy(lyrics_failed_artist, pending_artist, sizeof(lyrics_failed_artist) - 1);
+                        lyrics_failed_artist[sizeof(lyrics_failed_artist) - 1] = '\0';
+                        strncpy(lyrics_failed_title, pending_title, sizeof(lyrics_failed_title) - 1);
+                        lyrics_failed_title[sizeof(lyrics_failed_title) - 1] = '\0';
+                        lyrics_retry_count = 0;
+                    }
+                }
+            }
+
+            http.end();
+            client.stop();
+        }  // WiFiClientSecure + HTTPClient destroyed here
+
+        // TLS cleanup wait + timestamp update before releasing mutex
+        vTaskDelay(pdMS_TO_TICKS(200));
+        last_network_end_ms = millis();
+        last_https_end_ms   = millis();
+        xSemaphoreGive(network_mutex);
+
+        // Abort check after mutex release
+        if (lyrics_abort_requested) {
+            lyrics_fetching = false;
+            lyrics_abort_requested = false;
+            lyrics_retry_count = 0;
+            lyricsTaskHandle = NULL;
+            vTaskDelete(NULL);
+            return;
+        }
+
+        // Exit loop if we have a response OR no retries remain
+        if (payload.length() > 0) break;
+        if (lyrics_retry_count == 0) break;  // gave up (marked as failed or -1/404)
+
+        // Transient error: wait before retry
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        if (lyrics_abort_requested) {
+            lyrics_fetching = false;
+            lyrics_abort_requested = false;
+            lyrics_retry_count = 0;
+            lyricsTaskHandle = NULL;
+            vTaskDelete(NULL);
+            return;
+        }
     }
 
-    // Parse JSON response (use fixed 4KB buffer to save DRAM)
+    // Parse JSON response
     if (payload.length() > 0) {
-        DynamicJsonDocument doc(2048);  // Heap-allocated: StaticJsonDocument<4096> would overflow 4096-byte task stack
+        DynamicJsonDocument doc(2048);
         DeserializationError err = deserializeJson(doc, payload);
         if (!err) {
             const char* synced = doc["syncedLyrics"];
@@ -339,17 +328,14 @@ static void lyricsTaskFunc(void* param) {
             strncpy(lyrics_status_msg, "No lyrics", sizeof(lyrics_status_msg) - 1);
         }
     } else {
-        // All retries exhausted with no response
         strncpy(lyrics_status_msg, "No lyrics", sizeof(lyrics_status_msg) - 1);
     }
 
-    // Set status display window (5 seconds) before signalling UI thread
     lyrics_status_msg[sizeof(lyrics_status_msg) - 1] = '\0';
     lyrics_status_until_ms = millis() + 5000;
 
     lyrics_fetching = false;
-    // Status will be updated by main UI loop
-    lyricsTaskHandle = NULL;  // Clear handle before self-deletion
+    lyricsTaskHandle = NULL;
     vTaskDelete(NULL);
 }
 
@@ -358,6 +344,23 @@ void requestLyrics(const String& artist, const String& title, int durationSec) {
     if (!lyric_lines) {
         Serial.println("[LYRICS] Buffer not initialized - call initLyrics() first");
         return;
+    }
+
+    bool sameTrack = (strcmp(artist.c_str(), pending_artist) == 0 &&
+                      strcmp(title.c_str(), pending_title) == 0);
+
+    // If this exact song already failed (network error / no lyrics), don't retry.
+    // SOAP polls every 300ms for the same song — without this guard, every poll would
+    // spawn a new lyrics task, creating an HTTPS retry storm that exhausts C6 SDIO buffers.
+    if (strcmp(artist.c_str(), lyrics_failed_artist) == 0 &&
+        strcmp(title.c_str(), lyrics_failed_title) == 0) {
+        return;  // Already attempted this track — skip silently
+    }
+
+    // New song: clear the failed-song record so it gets a fresh attempt
+    if (!sameTrack) {
+        lyrics_failed_artist[0] = '\0';
+        lyrics_failed_title[0]  = '\0';
     }
 
     // If already fetching, abort the previous task (track changed)

@@ -15,6 +15,9 @@
 LV_IMG_DECLARE(Sonos_idnu60bqes_1);
 
 static bool sonos_started = false;  // true once Sonos tasks are running
+static TaskHandle_t mainAppTaskHandle = nullptr;
+static StaticTask_t mainAppTaskTCB;            // TCB in internal SRAM (accessed on every context switch)
+static void mainAppTask(void* param);  // forward declaration — defined after loop()
 
 void setup() {
     Serial.begin(SERIAL_BAUD_RATE);
@@ -134,8 +137,8 @@ void setup() {
         .trigger_panic = true // Reboot on timeout
     };
     esp_task_wdt_reconfigure(&wdt_config);
-    esp_task_wdt_add(NULL);  // Add main task to watchdog
-    Serial.printf("[WDT] Watchdog enabled: %d sec timeout\n", WATCHDOG_TIMEOUT_SEC);
+    // mainAppTask registers itself with the watchdog on startup (not loopTask — it becomes idle)
+    Serial.printf("[WDT] Watchdog configured: %d sec timeout\n", WATCHDOG_TIMEOUT_SEC);
 
     // Set initial brightness
     setBrightness(brightness_level);
@@ -225,7 +228,7 @@ void setup() {
     updateBootProgress(85);
 
     art_mutex = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
+    createArtTask();  // PSRAM stack — frees 20KB internal SRAM for SDIO/WiFi DMA
     updateBootProgress(90);
 
     sonos.begin();
@@ -253,6 +256,22 @@ void setup() {
     lv_screen_load(scr_main);  // Now load main screen
     lv_obj_del(boot_scr);     // Free boot screen objects (~3KB LVGL memory)
     Serial.println("Ready!");
+
+    // Launch mainAppTask. Stack is PSRAM-allocated so it does NOT consume DMA-capable
+    // internal SRAM — critical because WiFi/SDIO DMA receive buffers draw from the same
+    // internal SRAM pool. On b17a3b9 the loopTask's 8KB stack was overflowing (976 bytes
+    // free) causing Store access fault crashes. xTaskCreateStaticPinnedToCore lets us place
+    // the 32KB stack in PSRAM while keeping the TCB (tiny, ~88 bytes) in internal SRAM.
+    StackType_t* mainStack = (StackType_t*)heap_caps_malloc(MAIN_APP_TASK_STACK, MALLOC_CAP_SPIRAM);
+    if (mainStack) {
+        mainAppTaskHandle = xTaskCreateStaticPinnedToCore(
+            mainAppTask, "Main", MAIN_APP_TASK_STACK / sizeof(StackType_t),
+            NULL, MAIN_APP_TASK_PRIORITY, mainStack, &mainAppTaskTCB, 1);
+    } else {
+        Serial.println("[MAIN] PSRAM stack alloc failed — falling back to internal SRAM");
+        xTaskCreatePinnedToCore(mainAppTask, "Main", MAIN_APP_TASK_STACK, NULL,
+                                MAIN_APP_TASK_PRIORITY, &mainAppTaskHandle, 1);
+    }
 
     // Check if device rebooted to free DMA for OTA - auto-trigger the update
     if (wifiPrefs.getBool(NVS_KEY_OTA_PENDING, false)) {
@@ -308,7 +327,7 @@ void logHeapStatus() {
     // Log task stack high water marks — minimum free bytes ever observed.
     // On ESP-IDF 5.x (ESP32-P4 RISC-V), uxTaskGetStackHighWaterMark returns bytes directly.
     // Lower number = more stack used, closer to overflow. 0 = already overflowed.
-    Serial.printf("[STACK] Loop:%d ", uxTaskGetStackHighWaterMark(NULL));  // NULL = this task
+    Serial.printf("[STACK] Main:%d ", uxTaskGetStackHighWaterMark(NULL));  // NULL = mainAppTask
     Serial.printf("Art:%d ", albumArtTaskHandle ? uxTaskGetStackHighWaterMark(albumArtTaskHandle) : 0);
     Serial.printf("Net:%d ", sonos.getNetworkTaskHandle() ? uxTaskGetStackHighWaterMark(sonos.getNetworkTaskHandle()) : 0);
     Serial.printf("Poll:%d ", sonos.getPollingTaskHandle() ? uxTaskGetStackHighWaterMark(sonos.getPollingTaskHandle()) : 0);
@@ -321,32 +340,44 @@ void logHeapStatus() {
     }
 }
 
-void loop() {
-    // Feed watchdog to prevent reboot (must call regularly)
-    esp_task_wdt_reset();
+// Main application task — runs all LVGL and UI logic with a proper 32KB stack.
+// The Arduino loopTask (fixed 8KB) becomes idle below; it was regularly hitting
+// only ~976 bytes free, causing Store access fault crashes via LVGL buffer corruption.
+static void mainAppTask(void* param) {
+    esp_task_wdt_add(NULL);  // Register this task with watchdog (not loopTask)
 
-    lv_tick_inc(3);
+    for (;;) {
+        esp_task_wdt_reset();
 
-    // Skip LVGL timer during OTA to prevent PSRAM access during flash writes
-    bool skip_updates = false;
-    if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(10))) {
-        skip_updates = ota_in_progress;
-        xSemaphoreGive(ota_progress_mutex);
-    }
+        lv_tick_inc(3);
 
-    if (!skip_updates) {
-        lv_timer_handler();
-        processUpdates();
-        checkAutoDim();
-        checkClockTrigger();
-        checkWiFiReconnect();
-        logHeapStatus();  // Periodic memory monitoring
-
-        if (ota_auto_pending) {
-            ota_auto_pending = false;
-            triggerPendingOTA();
+        // Skip LVGL timer during OTA to prevent PSRAM access during flash writes
+        bool skip_updates = false;
+        if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(10))) {
+            skip_updates = ota_in_progress;
+            xSemaphoreGive(ota_progress_mutex);
         }
-    }
 
-    vTaskDelay(pdMS_TO_TICKS(3));
+        if (!skip_updates) {
+            lv_timer_handler();
+            processUpdates();
+            checkAutoDim();
+            checkClockTrigger();
+            checkWiFiReconnect();
+            logHeapStatus();  // Periodic memory monitoring
+
+            if (ota_auto_pending) {
+                ota_auto_pending = false;
+                triggerPendingOTA();
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(3));
+    }
+}
+
+void loop() {
+    // Idle — all UI/LVGL work is done in mainAppTask (32KB stack).
+    // loopTask hard-coded 8KB stack cannot be changed via build flags.
+    vTaskDelay(pdMS_TO_TICKS(100));
 }

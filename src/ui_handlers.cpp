@@ -687,7 +687,7 @@ static void otaRecovery() {
     // Restart album art task if it isn't already running
     if (albumArtTaskHandle == NULL) {
         Serial.println("[OTA] Restarting album art task");
-        xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
+        createArtTask();  // PSRAM stack — frees 20KB internal SRAM for SDIO/WiFi DMA
     }
 
     Serial.println("[OTA] === Recovery complete ===");

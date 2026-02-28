@@ -215,14 +215,19 @@ inline String decodeHTMLEntities(const String& str) {
     return result;
 }
 
-// Album art task
+// Album art task — stack lives in PSRAM to free internal SRAM for SDIO/WiFi DMA buffers
 extern TaskHandle_t albumArtTaskHandle;
+extern StaticTask_t albumArtTaskTCB;
+extern StackType_t* art_task_stack;
 extern volatile bool art_shutdown_requested;
 extern volatile bool art_abort_download;
 void albumArtTask(void *param);
+void createArtTask();   // PSRAM-stack wrapper — use instead of xTaskCreatePinnedToCore directly
 
-// Lyrics task
+// Lyrics task — stack lives in PSRAM for same reason
 extern TaskHandle_t lyricsTaskHandle;
+extern StaticTask_t lyricsTaskTCB;
+extern StackType_t* lyrics_task_stack;
 extern volatile bool lyrics_shutdown_requested;
 
 // Sonos task shutdown (for OTA)

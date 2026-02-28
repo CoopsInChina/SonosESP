@@ -115,7 +115,11 @@ volatile bool art_ready = false;
 volatile bool art_show_placeholder = false;  // Signal UI to show placeholder (art permanently failed)
 SemaphoreHandle_t art_mutex = nullptr;
 TaskHandle_t albumArtTaskHandle = nullptr;
+StaticTask_t albumArtTaskTCB;               // TCB in internal SRAM (tiny, ~88 bytes)
+StackType_t* art_task_stack = nullptr;      // Stack in PSRAM — allocated once in createArtTask()
 TaskHandle_t lyricsTaskHandle = nullptr;
+StaticTask_t lyricsTaskTCB;                 // TCB in internal SRAM
+StackType_t* lyrics_task_stack = nullptr;   // Stack in PSRAM — allocated once in initLyrics()
 volatile bool lyrics_shutdown_requested = false;  // Signal lyrics task to stop for OTA
 volatile bool art_shutdown_requested = false;  // Signal album art to stop gracefully
 volatile bool art_abort_download = false;      // Signal to abort current download (source changed)

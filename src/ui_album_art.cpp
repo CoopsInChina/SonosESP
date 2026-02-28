@@ -341,6 +341,25 @@ static String prepareAlbumArtURL(const String& rawUrl) {
         Serial.printf("[ART] Extracted: %s\n", fetchUrl.c_str());
     }
 
+    // Plex Media Server photo transcoder: bump small thumbnail requests to 600px.
+    // Plex Sonos integration can request tiny thumbnails (e.g. width=64&height=64) resulting
+    // in a heavily-upscaled pixelated image that appears "tiny" quality on screen.
+    // Pattern: http://x.x.x.x:32400/photo/:/transcode?width=N&height=N&...
+    if (fetchUrl.indexOf(":32400/photo/:/transcode") != -1) {
+        const char* params[2] = {"width=", "height="};
+        for (int pi = 0; pi < 2; pi++) {
+            int idx = fetchUrl.indexOf(params[pi]);
+            if (idx != -1) {
+                int numStart = idx + strlen(params[pi]);
+                int numEnd = numStart;
+                while (numEnd < (int)fetchUrl.length() && isDigit(fetchUrl[numEnd])) numEnd++;
+                if (numEnd > numStart && fetchUrl.substring(numStart, numEnd).toInt() < 400) {
+                    fetchUrl = fetchUrl.substring(0, numStart) + "600" + fetchUrl.substring(numEnd);
+                }
+            }
+        }
+    }
+
     // Reduce image size for known providers to stay under size limit
     // Deezer: 1000x1000 → 400x400
     if (fetchUrl.indexOf("dzcdn.net") != -1) {
@@ -398,6 +417,24 @@ static bool isPrivateIP(const char* url) {
     return (strncmp(host, "192.168.", 8) == 0 ||
             strncmp(host, "10.", 3) == 0 ||
             strncmp(host, "172.", 4) == 0);
+}
+
+// Create (or recreate) the album art task with a PSRAM-allocated stack.
+// PSRAM stack frees ~20KB of DMA-capable internal SRAM for WiFi/SDIO buffers.
+// The stack pointer is allocated once and reused across task recreations (OTA restart, clock screen).
+void createArtTask() {
+    if (!art_task_stack) {
+        art_task_stack = (StackType_t*)heap_caps_malloc(ART_TASK_STACK_SIZE, MALLOC_CAP_SPIRAM);
+    }
+    if (art_task_stack) {
+        albumArtTaskHandle = xTaskCreateStaticPinnedToCore(
+            albumArtTask, "Art", ART_TASK_STACK_SIZE / sizeof(StackType_t),
+            NULL, ART_TASK_PRIORITY, art_task_stack, &albumArtTaskTCB, 0);
+    } else {
+        Serial.println("[ART] PSRAM stack alloc failed — using internal SRAM");
+        xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL,
+                                ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
+    }
 }
 
 void albumArtTask(void* param) {
@@ -470,6 +507,13 @@ void albumArtTask(void* param) {
                         consecutive_failures = 0;
                         last_failed_url[0] = '\0';
                     }
+                } else {
+                    // fetchUrl already matches last_art_url — art is already displayed.
+                    // Sync pending_art_url to the processed URL so the outer guard
+                    // (pending_art_url != last_art_url) catches it on the next poll.
+                    // Without this, Sonos Radio URLs (raw != extracted) spam the log
+                    // every 100ms because pending_art_url never equals last_art_url.
+                    pending_art_url = last_art_url;
                 }
             }
             xSemaphoreGive(art_mutex);
@@ -536,13 +580,15 @@ void albumArtTask(void* param) {
                     }
                 }
 
-                // HTTPS-specific cooldown (2000ms) only for internet URLs - local has no TLS
-                if (!isLocalNetwork && use_https) {
+                // HTTPS residue cooldown (2000ms) - C6 needs time to free TLS buffers after any HTTPS session.
+                // Applied to ALL subsequent internet downloads (HTTP or HTTPS), not just the next HTTPS one.
+                // Bug when skipped: lyrics does HTTPS → art immediately starts HTTP → transport_drv_sta_tx crash.
+                if (!isLocalNetwork && last_https_end_ms > 0) {
                     unsigned long now = millis();
                     unsigned long elapsed = now - last_https_end_ms;
-                    if (last_https_end_ms > 0 && elapsed < 2000) {
+                    if (elapsed < 2000) {
                         unsigned long wait_ms = 2000 - elapsed;
-                        Serial.printf("[ART] HTTPS cooldown: waiting %lums (elapsed: %lums)\n", wait_ms, elapsed);
+                        Serial.printf("[ART] HTTPS residue cooldown: waiting %lums\n", wait_ms);
                         vTaskDelay(pdMS_TO_TICKS(wait_ms));
                     }
                 }
@@ -578,10 +624,10 @@ void albumArtTask(void* param) {
                             vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
                         }
                     }
-                    if (!isLocalNetwork && use_https) {
+                    if (!isLocalNetwork && last_https_end_ms > 0) {
                         unsigned long now = millis();
                         unsigned long elapsed = now - last_https_end_ms;
-                        if (last_https_end_ms > 0 && elapsed < 2000) {
+                        if (elapsed < 2000) {
                             vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
                         }
                     }
@@ -903,9 +949,9 @@ void albumArtTask(void* param) {
                                     if (jpgBuf[i] == 0xFF && jpgBuf[i+1] == 0xFE) {
                                         // Found COM marker - get length
                                         if (i + 3 < read) {
-                                            uint16_t len = (jpgBuf[i+2] << 8) | jpgBuf[i+3];
+                                            uint16_t marker_len = (jpgBuf[i+2] << 8) | jpgBuf[i+3];
                                             // Remove marker + length + data
-                                            size_t marker_total = 2 + len;
+                                            size_t marker_total = 2 + marker_len;
                                             if (i + marker_total <= read) {
                                                 memmove(&jpgBuf[i], &jpgBuf[i + marker_total], read - i - marker_total);
                                                 cleaned_size -= marker_total;
@@ -926,9 +972,9 @@ void albumArtTask(void* param) {
 
                                 // Step 1: Try HW decoder header parse
                                 jpeg_decode_picture_info_t pic_info;
-                                esp_err_t ret = jpeg_decoder_get_info(jpgBuf, cleaned_size, &pic_info);
+                                esp_err_t hw_ret = jpeg_decoder_get_info(jpgBuf, cleaned_size, &pic_info);
 
-                                if (ret == ESP_OK && pic_info.width > 0 && pic_info.height > 0 &&
+                                if (hw_ret == ESP_OK && pic_info.width > 0 && pic_info.height > 0 &&
                                     pic_info.width <= 2048 && pic_info.height <= 2048) {
                                     int w = pic_info.width;
                                     int h = pic_info.height;
@@ -960,10 +1006,10 @@ void albumArtTask(void* param) {
                                             };
 
                                             uint32_t out_size = 0;
-                                            ret = jpeg_decoder_process(hw_jpeg_decoder, &decode_cfg, jpgBuf, cleaned_size, hw_out_buf, rx_buffer_size, &out_size);
+                                            hw_ret = jpeg_decoder_process(hw_jpeg_decoder, &decode_cfg, jpgBuf, cleaned_size, hw_out_buf, rx_buffer_size, &out_size);
 
                                             // For grayscale: convert GRAY8 to RGB565
-                                            if (ret == ESP_OK && is_grayscale) {
+                                            if (hw_ret == ESP_OK && is_grayscale) {
                                                 Serial.println("[ART] Converting grayscale to RGB565");
                                                 uint16_t* rgb_buf = (uint16_t*)heap_caps_malloc(out_w * out_h * 2, MALLOC_CAP_SPIRAM);
                                                 if (rgb_buf) {
@@ -978,11 +1024,11 @@ void albumArtTask(void* param) {
                                                     Serial.println("[ART] Grayscale conversion alloc failed");
                                                     heap_caps_free(hw_out_buf);
                                                     hw_out_buf = nullptr;
-                                                    ret = ESP_FAIL;
+                                                    hw_ret = ESP_FAIL;
                                                 }
                                             }
 
-                                            if (ret == ESP_OK && hw_out_buf) {
+                                            if (hw_ret == ESP_OK && hw_out_buf) {
                                                 Serial.printf("[ART] HW decoded: %d bytes\n", out_size);
                                                 hw_decode_success = true;
                                                 decoded_pixels = (uint16_t*)hw_out_buf;
@@ -990,7 +1036,7 @@ void albumArtTask(void* param) {
                                                 final_h = h;
                                                 final_stride = out_w;  // HW buffer has padded stride
                                             } else {
-                                                Serial.printf("[ART] HW decode failed: %d, trying SW fallback\n", ret);
+                                                Serial.printf("[ART] HW decode failed: %d, trying SW fallback\n", hw_ret);
                                                 if (hw_out_buf) heap_caps_free(hw_out_buf);
                                                 use_sw_fallback = true;
                                             }
@@ -1003,7 +1049,7 @@ void albumArtTask(void* param) {
                                         Serial.printf("[ART] JPEG %dx%d not HW-compatible (non-div-8), using SW fallback\n", w, h);
                                         use_sw_fallback = true;
                                     }
-                                } else if (ret == ESP_OK) {
+                                } else if (hw_ret == ESP_OK) {
                                     // HW parser returned OK but 0x0 dimensions (progressive JPEG)
                                     Serial.printf("[ART] HW reports 0x0 (likely progressive), using SW fallback\n");
                                     use_sw_fallback = true;

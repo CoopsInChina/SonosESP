@@ -92,8 +92,13 @@
 #define SONOS_POLL_TASK_STACK   6000    // Polling task stack size (was 3000; actual free was ~684 bytes!)
 #define SONOS_NET_TASK_PRIORITY 2       // Network task priority
 #define SONOS_POLL_TASK_PRIORITY 3      // Polling task priority
-#define LYRICS_TASK_STACK       4096    // Lyrics task stack size
+#define LYRICS_TASK_STACK       8192    // Lyrics task stack size (4096 overflowed on HTTPS fetch — WiFiClientSecure + URL[512] needs ~6KB)
 #define LYRICS_TASK_PRIORITY    1       // Lyrics task priority
+// Arduino loopTask stack is hard-coded to 8KB in pre-compiled framework (sdkconfig.h) — cannot
+// be overridden with -D flags. mainAppTask runs the actual UI loop with a proper 32KB stack.
+// loopTask becomes idle (vTaskDelay only). Watchdog transfers to mainAppTask.
+#define MAIN_APP_TASK_STACK     32768   // mainAppTask stack — replaces 8KB loopTask for LVGL loop
+#define MAIN_APP_TASK_PRIORITY  1       // Same priority as loopTask; Sonos (2/3) preempts as before
 
 // Timeouts
 #define SONOS_SOAP_TIMEOUT_MS   2000    // SOAP request timeout

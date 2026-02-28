@@ -790,10 +790,7 @@ void exitClockScreen() {
     lyrics_shutdown_requested = false;  // Was set on clock entry; must clear on exit
     last_art_url = "";  // Force re-fetch since track may have changed
     if (!albumArtTaskHandle) {
-        xTaskCreatePinnedToCore(
-            albumArtTask, "Art",
-            ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY,
-            &albumArtTaskHandle, 0);
+        createArtTask();  // PSRAM stack — frees 20KB internal SRAM for SDIO/WiFi DMA
     }
 
     // Transition back to main screen
