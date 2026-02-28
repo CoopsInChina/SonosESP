@@ -16,7 +16,6 @@ LV_IMG_DECLARE(Sonos_idnu60bqes_1);
 
 static bool sonos_started = false;  // true once Sonos tasks are running
 static TaskHandle_t mainAppTaskHandle = nullptr;
-static StaticTask_t mainAppTaskTCB;            // TCB in internal SRAM (accessed on every context switch)
 static void mainAppTask(void* param);  // forward declaration — defined after loop()
 
 void setup() {
@@ -257,21 +256,13 @@ void setup() {
     lv_obj_del(boot_scr);     // Free boot screen objects (~3KB LVGL memory)
     Serial.println("Ready!");
 
-    // Launch mainAppTask. Stack is PSRAM-allocated so it does NOT consume DMA-capable
-    // internal SRAM — critical because WiFi/SDIO DMA receive buffers draw from the same
-    // internal SRAM pool. On b17a3b9 the loopTask's 8KB stack was overflowing (976 bytes
-    // free) causing Store access fault crashes. xTaskCreateStaticPinnedToCore lets us place
-    // the 32KB stack in PSRAM while keeping the TCB (tiny, ~88 bytes) in internal SRAM.
-    StackType_t* mainStack = (StackType_t*)heap_caps_malloc(MAIN_APP_TASK_STACK, MALLOC_CAP_SPIRAM);
-    if (mainStack) {
-        mainAppTaskHandle = xTaskCreateStaticPinnedToCore(
-            mainAppTask, "Main", MAIN_APP_TASK_STACK / sizeof(StackType_t),
-            NULL, MAIN_APP_TASK_PRIORITY, mainStack, &mainAppTaskTCB, 1);
-    } else {
-        Serial.println("[MAIN] PSRAM stack alloc failed — falling back to internal SRAM");
-        xTaskCreatePinnedToCore(mainAppTask, "Main", MAIN_APP_TASK_STACK, NULL,
-                                MAIN_APP_TASK_PRIORITY, &mainAppTaskHandle, 1);
-    }
+    // Launch mainAppTask in internal SRAM (NOT PSRAM).
+    // NVS writes (OTA settings, brightness, etc.) call spi_flash_disable_interrupts_caches_and_other_cpu()
+    // which asserts esp_task_stack_is_sane_cache_disabled() if the calling task's stack is in
+    // cache-mapped PSRAM. Art task (PSRAM, 20KB) already freed the critical DMA SRAM headroom,
+    // so 16KB here no longer triggers SDIO DMA boot crashes. HWM shows < 5KB actually used.
+    xTaskCreatePinnedToCore(mainAppTask, "Main", MAIN_APP_TASK_STACK, NULL,
+                            MAIN_APP_TASK_PRIORITY, &mainAppTaskHandle, 1);
 
     // Check if device rebooted to free DMA for OTA - auto-trigger the update
     if (wifiPrefs.getBool(NVS_KEY_OTA_PENDING, false)) {
@@ -340,7 +331,7 @@ void logHeapStatus() {
     }
 }
 
-// Main application task — runs all LVGL and UI logic with a proper 32KB stack.
+// Main application task — runs all LVGL and UI logic with a 16KB internal SRAM stack.
 // The Arduino loopTask (fixed 8KB) becomes idle below; it was regularly hitting
 // only ~976 bytes free, causing Store access fault crashes via LVGL buffer corruption.
 static void mainAppTask(void* param) {
