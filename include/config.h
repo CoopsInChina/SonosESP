@@ -99,8 +99,9 @@
 // loopTask becomes idle (vTaskDelay only). Watchdog transfers to mainAppTask.
 // MUST be internal SRAM: NVS writes call spi_flash_disable_interrupts_caches_and_other_cpu()
 // which asserts (esp_task_stack_is_sane_cache_disabled) if the calling task's stack is in PSRAM.
-// 16KB is ample — HWM shows < 5KB used. Art task in PSRAM already frees 20KB DMA SRAM headroom.
-#define MAIN_APP_TASK_STACK     16384   // mainAppTask stack — internal SRAM (flash/NVS safe)
+// 8KB is safe — HWM shows < 5KB used. Art task in PSRAM already frees 20KB DMA SRAM headroom.
+// Smaller than 16KB saves 8KB of DMA, giving OTA TLS handshake more room (~106KB peak).
+#define MAIN_APP_TASK_STACK     8192    // mainAppTask stack — internal SRAM (flash/NVS safe)
 #define MAIN_APP_TASK_PRIORITY  1       // Same priority as loopTask; Sonos (2/3) preempts as before
 
 // Timeouts
@@ -136,15 +137,12 @@
                                               // Normal full handshake leaves ~17-21KB (safe).
                                               // heap_caps_get_largest_free_block(MALLOC_CAP_DMA)
                                               // always returns 0 on ESP32-P4, so total only.
-#define OTA_TARGET_FREE_DMA     (112 * 1024) // Min free DMA before attempting the OTA TLS handshake.
-                                              // Lowered 120→112KB: the post-TLS check (OTA_MIN_DMA_AFTER_TLS)
-                                              // is the real SDIO safety gate. At 112KB pre-TLS:
-                                              //   attempt 1: 112-106=6KB post-TLS → fails 8KB check → retry
-                                              //   TLS cleanup returns ~106KB → DMA recovers to ~117KB
-                                              //   attempt 2: 117-106=11KB → passes → downloads (no reboot!)
-                                              // Typical running-app DMA: 110-112KB. Was always rebooting;
-                                              // now handles borderline cases with one extra TLS retry (~5s).
-                                              // Genuinely low cases (<110KB) still reboot via plateau detection.
+#define OTA_TARGET_FREE_DMA     (88 * 1024)  // Min free DMA before attempting the OTA TLS handshake.
+                                              // Lowered 112→88KB: mainAppTask moved to internal SRAM (not PSRAM)
+                                              // reduces available DMA from ~113KB to ~105KB on new platform
+                                              // (55.03.37 / ESP-IDF v5.5.2). 88KB lets OTA proceed to TLS.
+                                              // The post-TLS check (OTA_MIN_DMA_AFTER_TLS=8KB) is the real
+                                              // SDIO safety gate. Watch "[OTA] Post-TLS DMA" log to tune.
 #define OTA_HTTPS_COOLDOWN_MS   2000    // Wait for previous HTTPS cleanup
 #define OTA_CHECK_DEBOUNCE_MS   5000    // Min delay between update checks
 #define OTA_CHECK_TIMEOUT_MS    15000   // HTTP timeout for version check

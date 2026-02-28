@@ -217,6 +217,33 @@ void setup() {
     createOTAScreen();
     updateBootProgress(80);
 
+    // =========================================================================
+    // BOOT OTA FAST PATH — before any background tasks start
+    // =========================================================================
+    // If ev_install_update() saved a URL to NVS and restarted, run the OTA
+    // download RIGHT HERE, before art/Sonos/lyrics tasks are created.
+    //
+    // Why this matters (DMA budget):
+    //   With tasks running: ~105KB DMA free → TLS uses ~71KB → ~34KB post-TLS
+    //     → SDIO RX pool + AES alignment + Update.begin() all fight over 34KB → crash
+    //   At this boot point: ~125KB DMA free → TLS uses ~71KB → ~54KB post-TLS
+    //     → plenty of headroom for SDIO (~16KB) + AES + Update.begin() (~6KB)
+    //
+    // PSRAM is irrelevant: flash writes and TLS buffers use DMA SRAM only.
+    // wifiPrefs is already open (read-write) from setup() — no new handle needed.
+    if (WiFi.status() == WL_CONNECTED && wifiPrefs.getBool(NVS_KEY_OTA_PENDING, false)) {
+        wifiPrefs.putBool(NVS_KEY_OTA_PENDING, false);  // clear immediately — prevent reboot loops
+        Serial.printf("[OTA] Boot OTA: %d bytes DMA free (pre-task)\n",
+                      heap_caps_get_free_size(MALLOC_CAP_DMA));
+        esp_task_wdt_add(NULL);  // subscribe loopTask — performOTAUpdate() calls esp_task_wdt_reset()
+                                 // which spams "task not found" errors if the calling task isn't subscribed
+        triggerPendingOTA();  // loads saved URL → performOTAUpdate() → ESP.restart() on success
+        // If we reach here, all download retries failed (otaRecovery() was called).
+        // Restart to return to normal operation; NVS_KEY_OTA_PENDING is already false.
+        vTaskDelay(pdMS_TO_TICKS(5000));  // let user read the error message
+        ESP.restart();
+    }
+
     createSourcesScreen();
     updateBootProgress(83);
 
@@ -264,12 +291,6 @@ void setup() {
     xTaskCreatePinnedToCore(mainAppTask, "Main", MAIN_APP_TASK_STACK, NULL,
                             MAIN_APP_TASK_PRIORITY, &mainAppTaskHandle, 1);
 
-    // Check if device rebooted to free DMA for OTA - auto-trigger the update
-    if (wifiPrefs.getBool(NVS_KEY_OTA_PENDING, false)) {
-        wifiPrefs.putBool(NVS_KEY_OTA_PENDING, false);
-        ota_auto_pending = true;
-        Serial.println("[OTA] Pending OTA detected - will auto-trigger from main loop");
-    }
 }
 
 // WiFi auto-reconnection check (runs every WIFI_CHECK_INTERVAL_MS when disconnected)
@@ -356,11 +377,6 @@ static void mainAppTask(void* param) {
             checkClockTrigger();
             checkWiFiReconnect();
             logHeapStatus();  // Periodic memory monitoring
-
-            if (ota_auto_pending) {
-                ota_auto_pending = false;
-                triggerPendingOTA();
-            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(3));

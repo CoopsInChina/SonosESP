@@ -928,9 +928,10 @@ static void performOTAUpdate() {
     // ================================================================
     // PHASE 5+6: CONNECT AND DOWNLOAD (retry on connection failure)
     // ================================================================
-    // TLS handshake temporarily allocates ~106KB DMA (certificate chain +
-    // handshake buffers). These are freed once the response body starts
-    // flowing, so DMA recovers to ~117KB by the time chunks are read.
+    // TLS handshake allocates ~71KB DMA (mbedTLS context + certificate chain +
+    // crypto operation buffers). These remain allocated for the entire download
+    // — TLS must stay active to decrypt the incoming firmware stream.
+    // Called from setup() boot OTA path: ~125KB pre-TLS → ~54KB post-TLS (safe).
     // The retry loop retries on connection-level failures (stream drops,
     // 0 bytes received). Stall and timeout are fatal — do not retry.
     if (lbl_ota_status) {
@@ -990,6 +991,18 @@ static void performOTAUpdate() {
         Serial.printf("[OTA] Free DMA: %d bytes | Free heap: %d bytes\n",
             heap_caps_get_free_size(MALLOC_CAP_DMA), ESP.getFreeHeap());
         Serial.println("[OTA] ========================================");
+
+        // Update UI BEFORE GET() — lv_refr_now() after GET() causes a ~50ms delay during
+        // which lwIP buffers 40–50 KB of firmware into DMA-backed TCP receive buffers,
+        // consuming DMA needed for AES encryption and the SDIO RX pool (→ AES failure /
+        // sdio_push_data_to_queue assert crash). Rendering before TLS connect is safe:
+        // no firmware is flowing yet so no unexpected lwIP DMA consumption occurs.
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Downloading firmware...");
+            lv_obj_set_style_text_color(lbl_ota_status, COL_ACCENT, 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
 
         httpPtr->begin(*clientPtr, download_url);
         httpPtr->setTimeout(60000);
@@ -1057,13 +1070,6 @@ static void performOTAUpdate() {
         // This avoids allocating the DMA-backed flash write buffer (~11KB) before we
         // know data actually flows; an early connection drop would otherwise leak that
         // allocation across retry attempts, starving DMA for the next TLS handshake.
-        if (lbl_ota_status) {
-            lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Downloading firmware...");
-            lv_obj_set_style_text_color(lbl_ota_status, COL_ACCENT, 0);
-        }
-        lv_tick_inc(10);
-        lv_refr_now(NULL);
-
         WiFiClient* stream = httpPtr->getStreamPtr();
         int lastPercent = -1;
         uint32_t lastUIUpdate = millis();
@@ -1292,7 +1298,39 @@ void ev_check_update(lv_event_t* e) {
 }
 
 void ev_install_update(lv_event_t* e) {
-    performOTAUpdate();
+    if (download_url.isEmpty()) {
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " No firmware URL — check for updates first");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+        }
+        return;
+    }
+
+    // Save URL to NVS and restart immediately.
+    // The firmware download runs at the START of the next boot, before any background
+    // tasks (art, Sonos, lyrics) are created. This gives TLS the full ~125KB DMA
+    // headroom it needs. The ~71KB consumed by the TLS handshake leaves ~54KB free —
+    // enough for the SDIO RX pool, AES alignment buffers, and Update.begin() buffer.
+    //
+    // Attempting a live download (tasks running) leaves only ~34KB DMA after TLS,
+    // which starves the SDIO RX pool → sdio_push_data_to_queue assert crash.
+    Preferences prefs;
+    prefs.begin(NVS_NAMESPACE, false);
+    prefs.putBool(NVS_KEY_OTA_PENDING, true);
+    prefs.putString(NVS_KEY_OTA_URL, download_url.c_str());
+    prefs.end();
+
+    Serial.println("[OTA] URL saved to NVS — restarting for boot OTA");
+    if (lbl_ota_status) {
+        lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Restarting to install update...");
+        lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFFFFF), 0);
+    }
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
+    vTaskDelay(pdMS_TO_TICKS(1500));  // let user see the message
+    display_set_brightness(0);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ESP.restart();
 }
 
 // Called from loop() when ota_auto_pending is set (device rebooted for OTA due to low DMA).
