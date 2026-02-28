@@ -1,6 +1,11 @@
 /**
  * UI Album Art Handling
- * Album art loading with ESP32-P4 hardware JPEG decoder + JPEGDEC SW fallback + PNGdec + bilinear scaling
+ * Album art loading with:
+ *   - ESP32-P4 hardware JPEG decoder (baseline JPEG, div-8 dimensions)
+ *   - JPEGDEC SW fallback (baseline JPEG, non-div-8 or HW failure)
+ *   - stb_image (progressive JPEG / SOF2 — full all-scan decode)
+ *   - PNGdec (PNG)
+ *   - Bilinear scaling to 420x420 display size
  */
 
 #include "ui_common.h"
@@ -16,6 +21,10 @@
 // ESP32-P4 Hardware JPEG Decoder
 #include "driver/jpeg_decode.h"
 static jpeg_decoder_handle_t hw_jpeg_decoder = nullptr;
+
+// stb_image full progressive JPEG decoder (defined in stb_jpeg.cpp)
+extern bool decodeJPEGProgressiveStb(const uint8_t* buf, size_t len,
+                                     uint16_t** out, int* out_w, int* out_h);
 
 // Software JPEG decoder callback globals (set before decode, cleared after)
 static uint16_t* sw_jpeg_output = nullptr;
@@ -228,7 +237,8 @@ static int jpegDrawCallback(JPEGDRAW* pDraw) {
     return 1;  // Continue decoding
 }
 
-// Software JPEG decode fallback (handles progressive, non-div-8, etc.)
+// Software JPEG decode fallback for non-progressive JPEG (non-div-8 dimensions, HW failures).
+// Progressive JPEG is handled separately by decodeJPEGProgressiveStb() (stb_image).
 // Returns true on success. Caller must heap_caps_free(*out_buffer) when done.
 static bool decodeJPEGSoftware(uint8_t* buf, size_t len, uint16_t** out_buffer, int* out_w, int* out_h) {
     // Allocate JPEGDEC in PSRAM (~18KB struct - too large for stack, wastes DRAM if static)
@@ -404,6 +414,8 @@ static String prepareAlbumArtURL(const String& rawUrl) {
             }
             fetchUrl = fetchUrl.substring(0, uStart) + uEncoded + fetchUrl.substring(uEnd);
         }
+        // Request largest available art from the Sonos proxy (embedded or folder art)
+        fetchUrl += "&maxWidth=600&maxHeight=600";
     }
 
     return fetchUrl;
@@ -788,8 +800,8 @@ void albumArtTask(void* param) {
                             bool isJPEG = (read >= 3 && jpgBuf[0] == 0xFF && jpgBuf[1] == 0xD8 && jpgBuf[2] == 0xFF);
                             bool isPNG = (read >= 4 && jpgBuf[0] == 0x89 && jpgBuf[1] == 0x50 && jpgBuf[2] == 0x4E && jpgBuf[3] == 0x47);
 
-                            // Only decode PNG for radio station logos (not regular album art)
-                            if (isPNG && isStationLogo) {
+                            // Decode PNG for both station logos and regular album art (e.g. Plex serves PNG)
+                            if (isPNG) {
                                 Serial.printf("[ART] Opening PNG with %d bytes\n", read);
                                 int pngResult = png.openRAM(jpgBuf, read, pngDraw);
                                 if (pngResult == 0) {  // PNG_SUCCESS = 0 (different from JPEG!)
@@ -929,15 +941,6 @@ void albumArtTask(void* param) {
                                 } else {
                                     Serial.printf("[ART] PNG openRAM failed - error code: %d\n", pngResult);
                                 }
-                            } else if (isPNG && !isStationLogo) {
-                                // PNG detected but not a station logo - skip (only JPEG for normal album art)
-                                Serial.println("[ART] PNG detected but not station logo - skipping");
-                                // Mark as done to prevent infinite retry loop
-                                if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
-                                    last_art_url = url;
-                                    art_show_placeholder = true;
-                                    xSemaphoreGive(art_mutex);
-                                }
                             } else if (isJPEG && hw_jpeg_decoder) {
                                 // ESP32-P4 Hardware JPEG Decoder - fast and stable!
                                 Serial.printf("[ART] HW JPEG decode: %d bytes\n", read);
@@ -965,15 +968,36 @@ void albumArtTask(void* param) {
 
                                 // Determine decode strategy: HW fast path vs SW fallback
                                 bool use_sw_fallback = false;
+                                bool is_progressive_jpeg = false;
                                 bool hw_decode_success = false;
                                 uint16_t* decoded_pixels = nullptr;  // Final RGB565 pixels for scaling
                                 int final_w = 0, final_h = 0;
                                 int final_stride = 0;  // Row stride in pixels (may differ from width for HW decode)
 
-                                // Step 1: Try HW decoder header parse
-                                jpeg_decode_picture_info_t pic_info;
-                                esp_err_t hw_ret = jpeg_decoder_get_info(jpgBuf, cleaned_size, &pic_info);
+                                // Pre-check: detect progressive JPEG (SOF2 = 0xFF 0xC2).
+                                // The ESP32-P4 HW decoder supports baseline JPEG (SOF0) only.
+                                // Progressive JPEGs cause jpeg_decoder_get_info to return ESP_OK
+                                // with 0x0 dimensions (it doesn't error — it just can't parse SOF2).
+                                // Detecting early avoids the wasted HW attempt and confusing log.
+                                // JPEGDEC also forces JPEG_SCALE_EIGHTH for progressive mode, so we
+                                // must track this separately to pass the correct output dims to bilinear scaling.
+                                for (size_t pi = 0; pi + 1 < cleaned_size && pi < 4096; pi++) {
+                                    if (jpgBuf[pi] == 0xFF && jpgBuf[pi + 1] == 0xC2) {
+                                        Serial.println("[ART] Progressive JPEG (SOF2) — using SW at 1/8 scale");
+                                        use_sw_fallback = true;
+                                        is_progressive_jpeg = true;
+                                        break;
+                                    }
+                                }
 
+                                // Step 1: Try HW decoder header parse (baseline JPEG only)
+                                jpeg_decode_picture_info_t pic_info;
+                                esp_err_t hw_ret = ESP_FAIL;
+                                if (!use_sw_fallback) {
+                                    hw_ret = jpeg_decoder_get_info(jpgBuf, cleaned_size, &pic_info);
+                                }
+
+                                if (!use_sw_fallback) {
                                 if (hw_ret == ESP_OK && pic_info.width > 0 && pic_info.height > 0 &&
                                     pic_info.width <= 2048 && pic_info.height <= 2048) {
                                     int w = pic_info.width;
@@ -1055,20 +1079,34 @@ void albumArtTask(void* param) {
                                     use_sw_fallback = true;
                                 } else {
                                     // HW header parse completely failed
-                                    Serial.printf("[ART] HW header parse failed: %d, trying SW fallback\n", ret);
+                                    Serial.printf("[ART] HW header parse failed: %d, trying SW fallback\n", hw_ret);
                                     use_sw_fallback = true;
                                 }
+                                } // end if (!use_sw_fallback) — HW decode block
 
                                 // Step 2: SW fallback if HW couldn't handle it
                                 if (use_sw_fallback && !hw_decode_success) {
                                     uint16_t* sw_buf = nullptr;
                                     int sw_w = 0, sw_h = 0;
-                                    if (decodeJPEGSoftware(jpgBuf, cleaned_size, &sw_buf, &sw_w, &sw_h)) {
-                                        decoded_pixels = sw_buf;
-                                        final_w = sw_w;
-                                        final_h = sw_h;
-                                        final_stride = sw_w;  // SW decode has no padding
-                                        hw_decode_success = true;  // Reuse success path
+                                    if (is_progressive_jpeg) {
+                                        // Progressive JPEG: skip JPEGDEC (DC-only 1/8 scale output).
+                                        // stb_image decodes all scan segments → full-quality output.
+                                        if (decodeJPEGProgressiveStb(jpgBuf, cleaned_size, &sw_buf, &sw_w, &sw_h)) {
+                                            decoded_pixels = sw_buf;
+                                            final_w = sw_w;
+                                            final_h = sw_h;
+                                            final_stride = sw_w;
+                                            hw_decode_success = true;
+                                        }
+                                    } else {
+                                        // Non-progressive: JPEGDEC handles non-div-8 dimensions, etc.
+                                        if (decodeJPEGSoftware(jpgBuf, cleaned_size, &sw_buf, &sw_w, &sw_h)) {
+                                            decoded_pixels = sw_buf;
+                                            final_w = sw_w;
+                                            final_h = sw_h;
+                                            final_stride = sw_w;
+                                            hw_decode_success = true;
+                                        }
                                     }
                                 }
 
