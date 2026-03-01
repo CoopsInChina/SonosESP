@@ -431,7 +431,7 @@ bool SonosController::tryLoadCachedDevice() {
     snprintf(url, sizeof(url), "http://%s:1400/xml/device_description.xml", cachedIP.c_str());
 
     http.begin(url);
-    http.setTimeout(2000);  // 2s timeout - fast check
+    http.setTimeout(5000);  // 5s timeout - speaker may take a few seconds to respond after WiFi join
 
     Serial.printf("[SONOS] Verifying cached device is reachable at %s...\n", cachedIP.c_str());
     int code = http.GET();

@@ -120,7 +120,9 @@ void ev_devices(lv_event_t* e) {
 }
 
 void ev_queue(lv_event_t* e) {
-    sonos.updateQueue();
+    // Use cached queue data — background poll updates dev->queue[] every 30s.
+    // Calling updateQueue() here fires a large SOAP response immediately before
+    // the user selects a track (art download) → SDIO RX pool exhausted → crash.
     refreshQueueList();
     lv_screen_load(scr_queue);
 }

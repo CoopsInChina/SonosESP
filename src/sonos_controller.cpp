@@ -1173,7 +1173,12 @@ bool SonosController::updateQueue() {
         Serial.printf("[SONOS] Queue response empty\n");
         return false;
     }
-    
+
+    // Large XML response (~50 items, ~20KB) stresses SDIO RX pool. Record completion
+    // time so the art task can wait before starting a large download after this.
+    // sendSOAP() does NOT check this — SOAP play/pause commands are unaffected.
+    last_queue_fetch_time = millis();
+
     SonosDevice* dev = getCurrentDevice();
     if (!dev) return false;
     

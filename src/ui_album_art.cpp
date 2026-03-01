@@ -592,15 +592,25 @@ void albumArtTask(void* param) {
                     }
                 }
 
-                // HTTPS residue cooldown (2000ms) - C6 needs time to free TLS buffers after any HTTPS session.
-                // Applied to ALL subsequent internet downloads (HTTP or HTTPS), not just the next HTTPS one.
-                // Bug when skipped: lyrics does HTTPS → art immediately starts HTTP → transport_drv_sta_tx crash.
-                if (!isLocalNetwork && last_https_end_ms > 0) {
+                // HTTPS residue cooldown - C6 needs 2000ms to free TLS buffers after any HTTPS session.
+                // Applied to ALL subsequent downloads (local AND internet) — local getaa crashes too.
+                if (last_https_end_ms > 0) {
                     unsigned long now = millis();
                     unsigned long elapsed = now - last_https_end_ms;
                     if (elapsed < 2000) {
                         unsigned long wait_ms = 2000 - elapsed;
                         Serial.printf("[ART] HTTPS residue cooldown: waiting %lums\n", wait_ms);
+                        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+                    }
+                }
+
+                // Queue poll cooldown - 50-item XML response (~20KB) stresses SDIO RX pool.
+                // sendSOAP() does NOT check this — only art download is gated here.
+                if (last_queue_fetch_time > 0) {
+                    unsigned long elapsed = millis() - last_queue_fetch_time;
+                    if (elapsed < 2000) {
+                        unsigned long wait_ms = 2000 - elapsed;
+                        Serial.printf("[ART] Queue poll cooldown: waiting %lums\n", wait_ms);
                         vTaskDelay(pdMS_TO_TICKS(wait_ms));
                     }
                 }
@@ -636,9 +646,15 @@ void albumArtTask(void* param) {
                             vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
                         }
                     }
-                    if (!isLocalNetwork && last_https_end_ms > 0) {
+                    if (last_https_end_ms > 0) {
                         unsigned long now = millis();
                         unsigned long elapsed = now - last_https_end_ms;
+                        if (elapsed < 2000) {
+                            vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
+                        }
+                    }
+                    if (last_queue_fetch_time > 0) {
+                        unsigned long elapsed = millis() - last_queue_fetch_time;
                         if (elapsed < 2000) {
                             vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
                         }
@@ -979,11 +995,11 @@ void albumArtTask(void* param) {
                                 // Progressive JPEGs cause jpeg_decoder_get_info to return ESP_OK
                                 // with 0x0 dimensions (it doesn't error — it just can't parse SOF2).
                                 // Detecting early avoids the wasted HW attempt and confusing log.
-                                // JPEGDEC also forces JPEG_SCALE_EIGHTH for progressive mode, so we
-                                // must track this separately to pass the correct output dims to bilinear scaling.
-                                for (size_t pi = 0; pi + 1 < cleaned_size && pi < 4096; pi++) {
+                                // Scan the full buffer — large EXIF/ICC headers can push SOF2
+                                // well beyond 4096 bytes (old limit that caused missed detection).
+                                for (size_t pi = 0; pi + 1 < cleaned_size; pi++) {
                                     if (jpgBuf[pi] == 0xFF && jpgBuf[pi + 1] == 0xC2) {
-                                        Serial.println("[ART] Progressive JPEG (SOF2) — using SW at 1/8 scale");
+                                        Serial.println("[ART] Progressive JPEG (SOF2) — using stb_image");
                                         use_sw_fallback = true;
                                         is_progressive_jpeg = true;
                                         break;
@@ -1074,9 +1090,12 @@ void albumArtTask(void* param) {
                                         use_sw_fallback = true;
                                     }
                                 } else if (hw_ret == ESP_OK) {
-                                    // HW parser returned OK but 0x0 dimensions (progressive JPEG)
-                                    Serial.printf("[ART] HW reports 0x0 (likely progressive), using SW fallback\n");
+                                    // HW parser returned OK but 0x0 dimensions — progressive JPEG.
+                                    // Must also set is_progressive_jpeg so Step 2 routes to stb_image,
+                                    // not JPEGDEC (which gives DC-only 1/8-scale output for SOF2).
+                                    Serial.printf("[ART] HW reports 0x0 (progressive), using stb_image\n");
                                     use_sw_fallback = true;
+                                    is_progressive_jpeg = true;
                                 } else {
                                     // HW header parse completely failed
                                     Serial.printf("[ART] HW header parse failed: %d, trying SW fallback\n", hw_ret);

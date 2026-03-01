@@ -99,7 +99,7 @@ extern volatile bool color_ready;
 extern int art_offset_x, art_offset_y;
 extern bool is_sonos_radio_art;
 extern bool pending_is_station_logo;  // True when requesting radio station logo (PNG allowed)
-extern volatile unsigned long last_queue_fetch_time;  // Track queue fetches for WiFi coordination
+extern volatile unsigned long last_queue_fetch_time;  // Last updateQueue() completion (large HTTP — art waits 2000ms, sendSOAP unaffected)
 extern SemaphoreHandle_t network_mutex;  // Serializes all WiFi/HTTPS operations (SOAP, album art, OTA)
 extern volatile unsigned long last_network_end_ms;  // Last network operation end time (for SDIO cooldown)
 extern volatile unsigned long last_https_end_ms;   // Last HTTPS operation end time (TLS needs longer cooldown)
