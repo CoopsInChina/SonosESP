@@ -103,6 +103,8 @@ extern volatile unsigned long last_queue_fetch_time;  // Last updateQueue() comp
 extern SemaphoreHandle_t network_mutex;  // Serializes all WiFi/HTTPS operations (SOAP, album art, OTA)
 extern volatile unsigned long last_network_end_ms;  // Last network operation end time (for SDIO cooldown)
 extern volatile unsigned long last_https_end_ms;   // Last HTTPS operation end time (TLS needs longer cooldown)
+extern volatile unsigned long last_art_download_end_ms;  // Last art download completion (art + lyrics use 3000ms cooldown)
+extern volatile bool art_download_in_progress;  // True while art task is actively receiving download data
 
 // UI state
 extern String ui_title, ui_artist, ui_repeat;
@@ -221,6 +223,9 @@ extern StaticTask_t albumArtTaskTCB;
 extern StackType_t* art_task_stack;
 extern volatile bool art_shutdown_requested;
 extern volatile bool art_abort_download;
+extern volatile bool art_suppress_source_change;  // Suppress intermediate art triggers during queue-select Seek→Play
+extern volatile bool cmd_queue_in_progress;        // CMD_PLAY_QUEUE_ITEM active — suppress all polling from drain through settle
+extern unsigned long last_cmd_queue_play_ms;       // Timestamp when CMD_PLAY_QUEUE_ITEM last cleared flags
 void albumArtTask(void *param);
 void createArtTask();   // PSRAM-stack wrapper — use instead of xTaskCreatePinnedToCore directly
 

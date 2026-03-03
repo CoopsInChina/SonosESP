@@ -107,6 +107,10 @@ void ev_mute(lv_event_t* e) {
 }
 
 void ev_queue_item(lv_event_t* e) {
+    static uint32_t last_click_ms = 0;
+    uint32_t now = millis();
+    if (now - last_click_ms < 1500) return;  // debounce: ignore rapid repeat taps
+    last_click_ms = now;
     int trackNum = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
     sonos.playQueueItem(trackNum);
     lv_screen_load(scr_main);
@@ -1646,15 +1650,19 @@ void updateUI() {
             } else {
                 Serial.printf("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
             }
-            // CRITICAL: Abort any in-progress album art download immediately
-            // Applies to ALL track changes (not just source changes) so the art task
-            // doesn't wait for a 10-second HTTP timeout before processing the new track
-            art_abort_download = true;
-            // CRITICAL: Must hold art_mutex when writing last_art_url - the art task reads
-            // it under mutex, and String assignment is not atomic (race condition → corruption)
-            if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
-                last_art_url = "";  // Force art refresh on any URI change
-                xSemaphoreGive(art_mutex);
+            if (!art_suppress_source_change) {
+                // CRITICAL: Abort any in-progress album art download immediately
+                // Applies to ALL track changes (not just source changes) so the art task
+                // doesn't wait for a 10-second HTTP timeout before processing the new track
+                art_abort_download = true;
+                // CRITICAL: Must hold art_mutex when writing last_art_url - the art task reads
+                // it under mutex, and String assignment is not atomic (race condition → corruption)
+                if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
+                    last_art_url = "";  // Force art refresh on any URI change
+                    xSemaphoreGive(art_mutex);
+                }
+            } else {
+                Serial.printf("[ART] Suppressed (queue-select in progress)\n");
             }
         }
     }
@@ -1689,7 +1697,7 @@ void updateUI() {
         artChanged = true;
     }
 
-    if (!hasArt && uri_changed) {
+    if (!hasArt && uri_changed && !art_suppress_source_change) {
         // Track changed but has NO art URL — clear old art and show placeholder immediately
         // (Without this, the old track's art stays on screen forever)
         Serial.println("[ART] No art URL for this track - showing placeholder");
@@ -1701,7 +1709,7 @@ void updateUI() {
             art_ready = false;     // Discard any just-completed download (prevents art flash)
             xSemaphoreGive(art_mutex);
         }
-    } else if (hasArt && artChanged) {
+    } else if (hasArt && artChanged && !art_suppress_source_change) {
         String artURL = "";
         bool usingStationLogo = false;  // Track if we're using station logo (PNG allowed)
 

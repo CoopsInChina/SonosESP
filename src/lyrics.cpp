@@ -181,6 +181,35 @@ static void lyricsTaskFunc(void* param) {
                 Serial.printf("[LYRICS] HTTPS cooldown: waiting %lums\n", wait_ms);
                 vTaskDelay(pdMS_TO_TICKS(wait_ms));
             }
+            // Art download cooldown — 182-256KB HTTP art download followed immediately by
+            // lyrics HTTPS causes sdio_push_data_to_queue :928 crash (C6 RX pool exhausted).
+            if (last_art_download_end_ms > 0) {
+                unsigned long a_elapsed = millis() - last_art_download_end_ms;
+                if (a_elapsed < 3000) {
+                    Serial.printf("[LYRICS] Art download cooldown: waiting %lums\n", 3000 - a_elapsed);
+                    vTaskDelay(pdMS_TO_TICKS(3000 - a_elapsed));
+                }
+            }
+            // Queue poll cooldown — 50-item XML response stresses SDIO TX/RX pool.
+            // transport_drv_sta_tx copy_buff crash when HTTPS fires too soon after a queue poll.
+            if (last_queue_fetch_time > 0) {
+                unsigned long q_elapsed = millis() - last_queue_fetch_time;
+                if (q_elapsed < 3000) {
+                    Serial.printf("[LYRICS] Queue poll cooldown: waiting %lums\n", 3000 - q_elapsed);
+                    vTaskDelay(pdMS_TO_TICKS(3000 - q_elapsed));
+                }
+            }
+            // Art-in-progress gate: art sets this flag BEFORE its cooldown waits, so it is
+            // true during art's entire setup + download phase.  Lyrics firing HTTPS while
+            // art_download_in_progress is true stresses C6 SDIO — the HTTPS residue cooldown
+            // that follows is insufficient to recover, causing sdio_push_data_to_queue :928.
+            // Wait here (outside the mutex) until art is fully done before attempting HTTPS.
+            while (art_download_in_progress && !lyrics_abort_requested && !lyrics_shutdown_requested) {
+                vTaskDelay(pdMS_TO_TICKS(200));
+            }
+            if (art_download_in_progress) {
+                Serial.println("[LYRICS] Skipping fetch — art still in progress at gate");
+            }
         }
 
         // Abort/shutdown after cooldown
@@ -212,6 +241,11 @@ static void lyricsTaskFunc(void* param) {
             elapsed = now - last_https_end_ms;
             if (last_https_end_ms > 0 && elapsed < 2000)
                 vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
+            if (last_queue_fetch_time > 0) {
+                unsigned long q_elapsed = millis() - last_queue_fetch_time;
+                if (q_elapsed < 3000)
+                    vTaskDelay(pdMS_TO_TICKS(3000 - q_elapsed));
+            }
         }
 
         // HTTPS fetch — scoped so WiFiClientSecure destructor frees TLS memory immediately
@@ -389,8 +423,25 @@ void requestLyrics(const String& artist, const String& title, int durationSec) {
     lyrics_fetching = true;
     updateLyricsStatus();  // Show "fetching" status
 
-    // Spawn one-shot background task (reduced stack: lyrics task is lightweight)
-    xTaskCreatePinnedToCore(lyricsTaskFunc, "lyrics", LYRICS_TASK_STACK, NULL, LYRICS_TASK_PRIORITY, &lyricsTaskHandle, 0);
+    // Spawn one-shot background task with PSRAM stack.
+    // Frees 8KB of DMA SRAM (same pool SDIO uses for RX buffers) — more headroom = fewer
+    // sdio_push_data_to_queue crashes. Safe: lyrics task never calls NVS/flash write
+    // functions, so spi_flash_disable_interrupts_caches_and_other_cpu() is never triggered
+    // against a PSRAM stack. TCB stays in internal SRAM (lyricsTaskTCB).
+    // Stack allocated once (lyrics_task_stack), reused across track changes.
+    if (!lyrics_task_stack) {
+        lyrics_task_stack = (StackType_t*)heap_caps_malloc(LYRICS_TASK_STACK, MALLOC_CAP_SPIRAM);
+    }
+    if (lyrics_task_stack) {
+        lyricsTaskHandle = xTaskCreateStaticPinnedToCore(
+            lyricsTaskFunc, "lyrics",
+            LYRICS_TASK_STACK / sizeof(StackType_t),
+            NULL, LYRICS_TASK_PRIORITY, lyrics_task_stack, &lyricsTaskTCB, 0);
+    } else {
+        Serial.println("[LYRICS] PSRAM stack alloc failed — using internal SRAM");
+        xTaskCreatePinnedToCore(lyricsTaskFunc, "lyrics", LYRICS_TASK_STACK, NULL,
+                                LYRICS_TASK_PRIORITY, &lyricsTaskHandle, 0);
+    }
 }
 
 void clearLyrics() {
