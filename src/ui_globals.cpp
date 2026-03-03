@@ -115,10 +115,17 @@ volatile bool art_ready = false;
 volatile bool art_show_placeholder = false;  // Signal UI to show placeholder (art permanently failed)
 SemaphoreHandle_t art_mutex = nullptr;
 TaskHandle_t albumArtTaskHandle = nullptr;
+StaticTask_t albumArtTaskTCB;               // TCB in internal SRAM (tiny, ~88 bytes)
+StackType_t* art_task_stack = nullptr;      // Stack in PSRAM — allocated once in createArtTask()
 TaskHandle_t lyricsTaskHandle = nullptr;
+StaticTask_t lyricsTaskTCB;                 // TCB in internal SRAM
+StackType_t* lyrics_task_stack = nullptr;   // Stack in PSRAM — allocated once in initLyrics()
 volatile bool lyrics_shutdown_requested = false;  // Signal lyrics task to stop for OTA
 volatile bool art_shutdown_requested = false;  // Signal album art to stop gracefully
 volatile bool art_abort_download = false;      // Signal to abort current download (source changed)
+volatile bool art_suppress_source_change = false;  // Suppress intermediate track-change art triggers during queue-select Seek→Play
+volatile bool cmd_queue_in_progress = false;       // CMD_PLAY_QUEUE_ITEM active — suppress all polling from drain through settle
+unsigned long last_cmd_queue_play_ms = 0;          // Timestamp when CMD_PLAY_QUEUE_ITEM last cleared flags (for art post-play drain)
 volatile bool sonos_tasks_shutdown_requested = false;  // Signal Sonos tasks to stop for OTA
 uint32_t dominant_color = 0x1a1a1a;
 volatile bool color_ready = false;
@@ -126,10 +133,12 @@ int art_offset_x = 0;
 int art_offset_y = 0;
 bool is_sonos_radio_art = false;
 bool pending_is_station_logo = false;
-volatile unsigned long last_queue_fetch_time = 0;
+volatile unsigned long last_queue_fetch_time = 0;  // Last updateQueue() completion time (large HTTP — art waits 3000ms)
 SemaphoreHandle_t network_mutex = NULL;  // Created in main.cpp
 volatile unsigned long last_network_end_ms = 0;  // Last network operation end time (for SDIO cooldown)
 volatile unsigned long last_https_end_ms = 0;   // Last HTTPS operation end time (TLS needs longer cooldown)
+volatile unsigned long last_art_download_end_ms = 0;  // Last art download completion (art + lyrics use 3000ms cooldown)
+volatile bool art_download_in_progress = false;  // True while art task is actively receiving download data
 
 // ============================================================================
 // UI State
@@ -175,6 +184,18 @@ bool clock_picsum_enabled = (bool)CLOCK_DEFAULT_PICSUM;
 int  clock_refresh_min    = CLOCK_DEFAULT_REFRESH;
 int  clock_bg_kw_idx      = CLOCK_DEFAULT_KW_IDX;
 bool clock_12h            = (bool)CLOCK_DEFAULT_12H;
+bool clock_weather_enabled  = (bool)CLOCK_DEFAULT_WEATHER_EN;
+int  clock_weather_city_idx = CLOCK_DEFAULT_WEATHER_CITY;
+bool clock_wx_fahrenheit    = (bool)CLOCK_DEFAULT_WEATHER_FAHR;
+int           clock_wx_temp     = 0;
+int           clock_wx_humidity = 0;
+int           clock_wx_wind     = 0;
+int           clock_wx_wmo      = 0;
+ClockWxHour   clock_wx_hourly[6] = {};
+char          clock_wx_city_name[64] = "";
+bool          clock_wx_valid    = false;
+volatile bool clock_weather_updated       = false;
+volatile bool clock_weather_needs_refetch = false;
 
 ClockState clock_state             = CLOCK_IDLE;
 uint32_t   clock_entering_start_ms = 0;
@@ -182,6 +203,8 @@ uint32_t   clock_exiting_start_ms  = 0;
 uint32_t   last_clock_exit_ms      = 0;
 
 TaskHandle_t         clockBgTaskHandle          = nullptr;
+StaticTask_t         clkbgTaskTCB;                         // TCB in internal SRAM (tiny, ~88 bytes)
+StackType_t*         clkbg_task_stack           = nullptr; // Stack in PSRAM — allocated once, reused across sessions
 volatile bool        clock_bg_shutdown_requested = false;
 volatile bool        clock_bg_ready             = false;
 uint16_t*            clock_bg_buffer            = nullptr;

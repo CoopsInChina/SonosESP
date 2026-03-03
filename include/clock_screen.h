@@ -154,6 +154,86 @@ static const ClockBgKeyword CLOCK_BG_KEYWORDS[] = {
 };
 static const int CLOCK_BG_KW_COUNT = (int)(sizeof(CLOCK_BG_KEYWORDS) / sizeof(CLOCK_BG_KEYWORDS[0]));
 
+// ── Weather widget city list ─────────────────────────────────────────────────
+// lat/lon = coordinates for Open-Meteo API. lat=0/lon=0 = auto-detect via ip-api.com.
+// Labels use "Region/City" prefix so the dropdown is easy to navigate.
+// Sorted alphabetically by city within each region.
+struct ClockCity { const char* label; float lat; float lon; };
+static const ClockCity CLOCK_CITIES[] = {
+    {"Auto-detect",              0.00f,   0.00f},
+    // Americas — alphabetical by city
+    {"Americas/Bogota",          4.71f,  -74.07f},
+    {"Americas/Buenos Aires",  -34.61f,  -58.38f},
+    {"Americas/Chicago",        41.85f,  -87.65f},
+    {"Americas/Lima",          -12.05f,  -77.04f},
+    {"Americas/Los Angeles",    34.05f, -118.24f},
+    {"Americas/Mexico City",    19.43f,  -99.13f},
+    {"Americas/Miami",          25.77f,  -80.19f},
+    {"Americas/Montreal",       45.50f,  -73.57f},
+    {"Americas/New York",       40.71f,  -74.01f},
+    {"Americas/Santiago",      -33.45f,  -70.67f},
+    {"Americas/Sao Paulo",     -23.55f,  -46.63f},
+    {"Americas/Toronto",        43.65f,  -79.38f},
+    {"Americas/Vancouver",      49.25f, -123.12f},
+    // Europe — alphabetical by city
+    {"Europe/Amsterdam",        52.37f,    4.90f},
+    {"Europe/Athens",           37.98f,   23.73f},
+    {"Europe/Berlin",           52.52f,   13.40f},
+    {"Europe/Brussels",         50.85f,    4.35f},
+    {"Europe/Bucharest",        44.43f,   26.10f},
+    {"Europe/Budapest",         47.50f,   19.04f},
+    {"Europe/Copenhagen",       55.68f,   12.57f},
+    {"Europe/Dublin",           53.33f,   -6.25f},
+    {"Europe/Helsinki",         60.17f,   24.94f},
+    {"Europe/Istanbul",         41.01f,   28.95f},
+    {"Europe/Kyiv",             50.45f,   30.52f},
+    {"Europe/Lisbon",           38.72f,   -9.14f},
+    {"Europe/London",           51.51f,   -0.13f},
+    {"Europe/Madrid",           40.42f,   -3.70f},
+    {"Europe/Moscow",           55.75f,   37.62f},
+    {"Europe/Oslo",             59.91f,   10.75f},
+    {"Europe/Paris",            48.86f,    2.35f},
+    {"Europe/Prague",           50.09f,   14.42f},
+    {"Europe/Rome",             41.89f,   12.49f},
+    {"Europe/Stockholm",        59.33f,   18.07f},
+    {"Europe/Vienna",           48.21f,   16.37f},
+    {"Europe/Warsaw",           52.23f,   21.01f},
+    {"Europe/Zurich",           47.38f,    8.54f},
+    // Africa — alphabetical by city
+    {"Africa/Cairo",            30.06f,   31.25f},
+    {"Africa/Casablanca",       33.59f,   -7.62f},
+    {"Africa/Johannesburg",    -26.20f,   28.04f},
+    {"Africa/Lagos",             6.45f,    3.40f},
+    {"Africa/Nairobi",          -1.29f,   36.82f},
+    // Middle East — alphabetical by city
+    {"Middle East/Abu Dhabi",   24.47f,   54.37f},
+    {"Middle East/Doha",        25.29f,   51.53f},
+    {"Middle East/Dubai",       25.20f,   55.27f},
+    {"Middle East/Riyadh",      24.69f,   46.72f},
+    {"Middle East/Tel Aviv",    32.07f,   34.79f},
+    // Asia — alphabetical by city
+    {"Asia/Bangkok",            13.75f,  100.52f},
+    {"Asia/Beijing",            39.91f,  116.39f},
+    {"Asia/Delhi",              28.66f,   77.23f},
+    {"Asia/Dhaka",              23.72f,   90.41f},
+    {"Asia/Hong Kong",          22.33f,  114.19f},
+    {"Asia/Jakarta",            -6.21f,  106.85f},
+    {"Asia/Karachi",            24.86f,   67.01f},
+    {"Asia/Kuala Lumpur",        3.14f,  101.69f},
+    {"Asia/Manila",             14.60f,  121.00f},
+    {"Asia/Mumbai",             19.08f,   72.88f},
+    {"Asia/Seoul",              37.57f,  127.00f},
+    {"Asia/Shanghai",           31.22f,  121.46f},
+    {"Asia/Singapore",           1.35f,  103.82f},
+    {"Asia/Taipei",             25.05f,  121.52f},
+    {"Asia/Tokyo",              35.69f,  139.69f},
+    // Pacific — alphabetical by city
+    {"Pacific/Auckland",       -36.87f,  174.77f},
+    {"Pacific/Melbourne",      -37.82f,  144.97f},
+    {"Pacific/Sydney",         -33.87f,  151.21f},
+};
+static const int CLOCK_CITY_COUNT = (int)(sizeof(CLOCK_CITIES) / sizeof(CLOCK_CITIES[0]));
+
 // ============================================================================
 // Clock State Machine
 // ============================================================================
@@ -174,6 +254,21 @@ extern bool clock_picsum_enabled; // true = download random photo background
 extern int  clock_refresh_min;    // Minutes between background photo refreshes
 extern int  clock_bg_kw_idx;      // Index into CLOCK_BG_KEYWORDS[]
 extern bool clock_12h;            // true = 12h AM/PM format, false = 24h
+extern bool clock_weather_enabled;   // true = show weather widget
+extern int  clock_weather_city_idx;  // Index into CLOCK_CITIES[]
+extern bool clock_wx_fahrenheit;     // true = display temps in °F
+
+// Weather data — written by bg task, read by UI tick (flag guards LVGL calls)
+struct ClockWxHour { int wmo; int temp; int hour; };  // hour 0-23
+extern int            clock_wx_temp;          // Current temperature °C
+extern int            clock_wx_humidity;      // Current humidity %
+extern int            clock_wx_wind;          // Current wind speed km/h
+extern int            clock_wx_wmo;           // Current WMO weather code
+extern ClockWxHour    clock_wx_hourly[6];     // Next 6 hours forecast
+extern char          clock_wx_city_name[64]; // Display city name (from ip-api or ClockCity label)
+extern bool          clock_wx_valid;               // true = data received at least once
+extern volatile bool clock_weather_updated;        // Set by bg task, cleared by tick callback
+extern volatile bool clock_weather_needs_refetch;  // Set by settings; bg task re-fetches immediately
 
 // ============================================================================
 // Clock Runtime State
@@ -187,6 +282,8 @@ extern uint32_t   last_clock_exit_ms;        // Last time clock was dismissed
 // Clock Background Task
 // ============================================================================
 extern TaskHandle_t clockBgTaskHandle;
+extern StaticTask_t clkbgTaskTCB;
+extern StackType_t* clkbg_task_stack;
 extern volatile bool clock_bg_shutdown_requested;
 extern volatile bool clock_bg_ready;     // New image decoded and ready to display
 extern uint16_t*     clock_bg_buffer;    // PSRAM pixel buffer (800×480 RGB565)

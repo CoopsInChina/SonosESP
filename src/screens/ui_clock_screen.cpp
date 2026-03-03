@@ -16,8 +16,11 @@
 #include "clock_screen.h"
 
 LV_FONT_DECLARE(lv_font_montserrat_140);
+LV_FONT_DECLARE(lv_font_weathericons_80);
+LV_FONT_DECLARE(lv_font_weathericons_32);
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
 
 // Undefine shared macros before JPEGDEC
 #undef INTELSHORT
@@ -61,12 +64,144 @@ static int IRAM_ATTR clockJpegCallback(JPEGDRAW* pDraw) {
 }
 
 // ============================================================================
-// Clock tick — updates time and date labels (lv_timer, main thread only)
+// Auto-detected location cache — fetched once per clock session via ip-api.com.
+// Reset when clock exits so next session re-detects (avoids stale IP location).
+// ============================================================================
+static float clock_auto_lat = 0.0f;
+static float clock_auto_lon = 0.0f;
+static bool  clock_auto_loc_valid = false;  // true once ip-api.com responded OK
+
+// ============================================================================
+// Weather overlay widgets (file-scoped — created once in createClockScreen)
+// Layout:
+//   Top-left card (10,10 → ~370×135): city + big temp + condition + H/W
+//   Top-right icon (screen x=600, y=12): 64px condition icon + "Today" label
+//   Bottom strip (0,380 → 800×100): 6-hour hourly forecast columns
+// ============================================================================
+static lv_obj_t* clock_wx_tl_panel   = nullptr;  // Top-left container (transparent)
+static lv_obj_t* clock_wx_city_lbl   = nullptr;  // City name — montserrat_20
+static lv_obj_t* clock_wx_temp_lbl   = nullptr;  // "−5°C" — montserrat_48
+static lv_obj_t* clock_wx_cond_lbl   = nullptr;  // "Partly Cloudy" — montserrat_18
+static lv_obj_t* clock_wx_detail_lbl = nullptr;  // "H: 45%   W: 12 km/h" — montserrat_14
+static lv_obj_t* clock_wx_icon       = nullptr;  // Condition icon -- lv_font_weathericons_80
+static lv_obj_t* clock_wx_bottom     = nullptr;  // Bottom 6-hour strip (800x105, y=375)
+static lv_obj_t* clock_wx_fc_day[6]  = {};       // "3pm" / "15h" etc -- montserrat_14
+static lv_obj_t* clock_wx_fc_icon[6] = {};       // Condition icon -- lv_font_weathericons_32
+static lv_obj_t* clock_wx_fc_temp[6] = {};       // "−5°" / "3°" — montserrat_16
+
+// ============================================================================
+// WMO weather code → human-readable condition string
+// ============================================================================
+static const char* wmoCondition(int code) {
+    if (code == 0)  return "Clear";
+    if (code <= 2)  return "Mainly Clear";
+    if (code == 3)  return "Overcast";
+    if (code <= 48) return "Fog";
+    if (code <= 55) return "Drizzle";
+    if (code <= 67) return "Rain";
+    if (code <= 77) return "Snow";
+    if (code <= 82) return "Showers";
+    if (code <= 86) return "Snow Showers";
+    if (code >= 95) return "Thunderstorm";
+    return "Unknown";
+}
+
+// ============================================================================
+// Weather condition icon glyph — Weather Icons font by Erik Flowers (SIL OFL 1.1)
+// Glyphs encoded as UTF-8 from the font's private-use Unicode range (U+F000–U+F0FF).
+// Font: lv_font_weathericons_64, generated via lv_font_conv at 64px bpp=2.
+// ============================================================================
+// UTF-8 encoding of Wi-* glyphs:
+#define WI_DAY_SUNNY         "\xEF\x80\x8D"   // U+F00D  wi-day-sunny
+#define WI_DAY_CLOUDY_HIGH   "\xEF\x81\xBD"   // U+F07D  wi-day-cloudy-high (mainly clear)
+#define WI_DAY_CLOUDY        "\xEF\x80\x82"   // U+F002  wi-day-cloudy (partly cloudy)
+#define WI_CLOUDY            "\xEF\x80\x93"   // U+F013  wi-cloudy (overcast)
+#define WI_FOG               "\xEF\x80\x94"   // U+F014  wi-fog
+#define WI_SPRINKLE          "\xEF\x80\x9C"   // U+F01C  wi-sprinkle (drizzle)
+#define WI_RAIN              "\xEF\x80\x99"   // U+F019  wi-rain
+#define WI_SHOWERS           "\xEF\x80\x9A"   // U+F01A  wi-showers (heavy rain)
+#define WI_SLEET             "\xEF\x82\xB5"   // U+F0B5  wi-sleet
+#define WI_SNOW              "\xEF\x80\x9B"   // U+F01B  wi-snow
+#define WI_SNOW_WIND         "\xEF\x81\xA4"   // U+F064  wi-snow-wind (heavy snow/blizzard)
+#define WI_THUNDERSTORM      "\xEF\x80\x9E"   // U+F01E  wi-thunderstorm
+#define WI_NIGHT_CLEAR       "\xEF\x80\xAE"   // U+F02E  wi-night-clear
+#define WI_NIGHT_CLOUDY_HIGH "\xEF\x81\xBE"   // U+F07E  wi-night-alt-cloudy-high
+#define WI_NIGHT_PARTLY      "\xEF\x82\x81"   // U+F081  wi-night-alt-partly-cloudy
+
+static const char* wmoGlyph(int code) {
+    if (code == 0)  return WI_DAY_SUNNY;
+    if (code == 1)  return WI_DAY_CLOUDY_HIGH;
+    if (code == 2)  return WI_DAY_CLOUDY;
+    if (code == 3)  return WI_CLOUDY;
+    if (code <= 48) return WI_FOG;
+    if (code <= 55) return WI_SPRINKLE;
+    if (code == 56 || code == 57 || code == 66 || code == 67) return WI_SLEET;
+    if (code == 61 || code == 63) return WI_RAIN;
+    if (code == 65)               return WI_SHOWERS;
+    if (code >= 71 && code <= 77) return WI_SNOW;
+    if (code == 80 || code == 81) return WI_RAIN;
+    if (code == 82)               return WI_SHOWERS;
+    if (code == 85)               return WI_SNOW;
+    if (code == 86)               return WI_SNOW_WIND;
+    if (code >= 95)               return WI_THUNDERSTORM;
+    return WI_CLOUDY;
+}
+
+// ============================================================================
+// Apply weather data to all overlay widgets (main-thread only — LVGL calls safe)
+// ============================================================================
+static const char* tempUnit() { return clock_wx_fahrenheit ? "\xC2\xB0""F" : "\xC2\xB0""C"; }
+
+static const char* hourLabel(int hour) {
+    static char buf[6];
+    if (clock_12h) {
+        int h = hour % 12;
+        if (h == 0) h = 12;
+        snprintf(buf, sizeof(buf), "%d%s", h, hour < 12 ? "am" : "pm");
+    } else {
+        snprintf(buf, sizeof(buf), "%dh", hour);
+    }
+    return buf;
+}
+
+static void applyWeatherToWidgets() {
+    if (!clock_wx_tl_panel) return;
+    if (clock_weather_enabled && clock_wx_valid) {
+        char buf[64];
+        lv_label_set_text(clock_wx_city_lbl, clock_wx_city_name[0] ? clock_wx_city_name : "---");
+        snprintf(buf, sizeof(buf), "%d%s", clock_wx_temp, tempUnit());
+        lv_label_set_text(clock_wx_temp_lbl, buf);
+        lv_label_set_text(clock_wx_cond_lbl, wmoCondition(clock_wx_wmo));
+        snprintf(buf, sizeof(buf), "H: %d%%   W: %d km/h", clock_wx_humidity, clock_wx_wind);
+        lv_label_set_text(clock_wx_detail_lbl, buf);
+        if (clock_wx_icon) lv_label_set_text(clock_wx_icon, wmoGlyph(clock_wx_wmo));
+        for (int i = 0; i < 6; i++) {
+            lv_label_set_text(clock_wx_fc_day[i],  hourLabel(clock_wx_hourly[i].hour));
+            lv_label_set_text(clock_wx_fc_icon[i], wmoGlyph(clock_wx_hourly[i].wmo));
+            snprintf(buf, sizeof(buf), "%d°", clock_wx_hourly[i].temp);
+            lv_label_set_text(clock_wx_fc_temp[i], buf);
+        }
+        lv_obj_clear_flag(clock_wx_tl_panel, LV_OBJ_FLAG_HIDDEN);
+        if (clock_wx_bottom) lv_obj_clear_flag(clock_wx_bottom, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(clock_wx_tl_panel, LV_OBJ_FLAG_HIDDEN);
+        if (clock_wx_bottom) lv_obj_add_flag(clock_wx_bottom, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+// ============================================================================
+// Clock tick — updates time, date, and weather labels (lv_timer, main thread only)
 // ============================================================================
 static lv_timer_t* clock_tick_timer = nullptr;
 
 static void clock_tick_cb(lv_timer_t* /*timer*/) {
     if (!clock_time_lbl || !clock_date_lbl) return;
+
+    // Update weather overlay if the bg task posted new data
+    if (clock_weather_updated && clock_wx_tl_panel) {
+        clock_weather_updated = false;
+        applyWeatherToWidgets();
+    }
 
     struct tm timeinfo;
     if (!getLocalTime(&timeinfo, 100)) {
@@ -93,22 +228,208 @@ static void clock_tick_cb(lv_timer_t* /*timer*/) {
 }
 
 // ============================================================================
+// Weather fetch — Open-Meteo API (no key, JSON, temp/humidity/wind/hourly).
+// Step 1 (auto-detect only): GET http://ip-api.com/json → lat/lon via plain HTTP.
+// Step 2: HTTPS to api.open-meteo.com → current + next 5 hours.
+// Called from clockBgTask (FreeRTOS context); writes to clock_wx_* globals.
+// ============================================================================
+static void fetchClockWeather() {
+    if (!clock_weather_enabled) return;
+
+    // Step 1 — resolve coordinates ─────────────────────────────────────────
+    float lat = 0.0f, lon = 0.0f;
+
+    if (clock_weather_city_idx == 0) {
+        // Auto-detect: use cached result from earlier this session if available
+        if (clock_auto_loc_valid) {
+            lat = clock_auto_lat;
+            lon = clock_auto_lon;
+        } else {
+            // First fetch this session — call ip-api.com (plain HTTP, no TLS)
+            while (!clock_bg_shutdown_requested) {
+                if (millis() - last_network_end_ms >= 200) break;
+                vTaskDelay(pdMS_TO_TICKS(50));
+            }
+            if (clock_bg_shutdown_requested) return;
+
+            if (xSemaphoreTake(network_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+                Serial.println("[CLKWX] No mutex for IP-locate");
+                return;
+            }
+            if (clock_bg_shutdown_requested) { xSemaphoreGive(network_mutex); return; }
+
+            WiFiClient ip_client;
+            HTTPClient ip_http;
+            ip_http.setTimeout(8000);
+            bool ip_ok = false;
+            if (ip_http.begin(ip_client, "http://ip-api.com/json?fields=lat,lon,city")) {
+                int code = ip_http.GET();
+                if (code == HTTP_CODE_OK) {
+                    DynamicJsonDocument ip_doc(512);
+                    WiFiClient* s = ip_http.getStreamPtr();
+                    if (s && deserializeJson(ip_doc, *s) == DeserializationError::Ok) {
+                        lat = ip_doc["lat"].as<float>();
+                        lon = ip_doc["lon"].as<float>();
+                        if (lat != 0.0f || lon != 0.0f) {
+                            ip_ok = true;
+                            clock_auto_lat = lat;
+                            clock_auto_lon = lon;
+                            clock_auto_loc_valid = true;
+                            // Store city name for display
+                            const char* cn = ip_doc["city"].as<const char*>();
+                            if (cn && cn[0]) {
+                                strlcpy(clock_wx_city_name, cn, sizeof(clock_wx_city_name));
+                            }
+                        }
+                    }
+                } else {
+                    Serial.printf("[CLKWX] IP-locate HTTP %d\n", code);
+                }
+                ip_http.end();
+                ip_client.stop();
+            }
+            last_network_end_ms = millis();
+            xSemaphoreGive(network_mutex);
+
+            if (!ip_ok) { Serial.println("[CLKWX] IP location failed"); return; }
+            Serial.printf("[CLKWX] IP location: %.2f, %.2f\n", lat, lon);
+        }
+    } else {
+        lat = CLOCK_CITIES[clock_weather_city_idx].lat;
+        lon = CLOCK_CITIES[clock_weather_city_idx].lon;
+        // Use preset city label as display name
+        strlcpy(clock_wx_city_name, CLOCK_CITIES[clock_weather_city_idx].label,
+                sizeof(clock_wx_city_name));
+    }
+
+    // Step 2 — fetch Open-Meteo current conditions + next 6 future hours ──────
+    // Request 7 hours: first entry is the current (already-started) hour, which
+    // we skip when tm_min > 0, giving 6 strictly-future hours to display.
+    // temperature_unit is passed directly so the API returns values in the right
+    // unit — no client-side conversion needed.
+    char url[300];
+    snprintf(url, sizeof(url),
+        "https://api.open-meteo.com/v1/forecast"
+        "?latitude=%.2f&longitude=%.2f"
+        "&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m"
+        "&hourly=weather_code,temperature_2m&forecast_hours=7&timezone=auto"
+        "&temperature_unit=%s",
+        lat, lon, clock_wx_fahrenheit ? "fahrenheit" : "celsius");
+
+    for (int attempt = 1; attempt <= 2 && !clock_bg_shutdown_requested; attempt++) {
+        // HTTPS cooldown
+        while (!clock_bg_shutdown_requested) {
+            if (millis() - last_https_end_ms >= 2000) break;
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        if (clock_bg_shutdown_requested) return;
+
+        if (xSemaphoreTake(network_mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+            Serial.println("[CLKWX] No mutex for Open-Meteo");
+            return;
+        }
+        if (clock_bg_shutdown_requested) { xSemaphoreGive(network_mutex); return; }
+
+        WiFiClientSecure wx_client;
+        wx_client.setInsecure();
+        HTTPClient wx_http;
+        wx_http.setTimeout(15000);
+
+        bool success = false;
+        if (wx_http.begin(wx_client, url)) {
+            int code = wx_http.GET();
+            if (code == HTTP_CODE_OK) {
+                // Response for 7 hourly entries is ~580 bytes; 2048 is generous.
+                String body = wx_http.getString();
+                DynamicJsonDocument doc(2048);
+                auto err = deserializeJson(doc, body);
+                body = String();  // Free immediately after parse
+                if (err == DeserializationError::Ok) {
+                    int cur_temp = (int)roundf(doc["current"]["temperature_2m"].as<float>());
+                    int humidity = doc["current"]["relative_humidity_2m"].as<int>();
+                    int wmo      = doc["current"]["weather_code"].as<int>();
+                    int wind     = (int)roundf(doc["current"]["wind_speed_10m"].as<float>());
+
+                    // Hourly forecast — next 6 FUTURE hours.
+                    // Time format: "2025-02-24T15:00" — hour at chars [11..12].
+                    // We fetched 7 entries; skip index 0 if we're already past the
+                    // current hour's start (tm_min > 0), so display starts from the
+                    // next full hour rather than the already-running hour.
+                    JsonArray h_time = doc["hourly"]["time"].as<JsonArray>();
+                    JsonArray h_wmo  = doc["hourly"]["weather_code"].as<JsonArray>();
+                    JsonArray h_temp = doc["hourly"]["temperature_2m"].as<JsonArray>();
+                    int arr_sz = (int)h_time.size();  // should be 7
+
+                    struct tm ti = {};
+                    getLocalTime(&ti, 100);
+                    int skip = (ti.tm_min > 0) ? 1 : 0;
+
+                    ClockWxHour hourly[6];
+                    for (int i = 0; i < 6; i++) {
+                        int src = i + skip;
+                        const char* ts = (src < arr_sz) ? h_time[src].as<const char*>() : nullptr;
+                        hourly[i].hour = ts ? atoi(ts + 11) : 0;
+                        hourly[i].wmo  = (src < arr_sz) ? h_wmo[src].as<int>()                 : wmo;
+                        hourly[i].temp = (src < arr_sz) ? (int)roundf(h_temp[src].as<float>()) : cur_temp;
+                    }
+
+                    // NWP model (hourly) is more responsive to active precipitation than
+                    // AWS observation (current.weather_code). Use hourly[skip] — the same
+                    // entry as the first strip column — so icon/text match the strip.
+                    if (arr_sz > skip) wmo = h_wmo[skip].as<int>();
+
+                    clock_wx_temp     = cur_temp;
+                    clock_wx_humidity = humidity;
+                    clock_wx_wind     = wind;
+                    clock_wx_wmo      = wmo;
+                    memcpy(clock_wx_hourly, hourly, sizeof(hourly));
+                    clock_wx_valid        = true;
+                    clock_weather_updated = true;
+
+                    Serial.printf("[CLKWX] %d°C wmo=%d hum=%d%% wind=%dkm/h hours=%d city=%s\n",
+                                  cur_temp, wmo, humidity, wind, arr_sz, clock_wx_city_name);
+                    success = true;
+                } else {
+                    Serial.printf("[CLKWX] JSON error: %s (attempt %d/2)\n", err.c_str(), attempt);
+                }
+            } else {
+                Serial.printf("[CLKWX] HTTP %d (attempt %d/2)\n", code, attempt);
+            }
+            wx_http.end();
+            wx_client.stop();
+        }
+        last_https_end_ms   = millis();
+        last_network_end_ms = millis();
+        xSemaphoreGive(network_mutex);
+
+        if (success) return;
+        vTaskDelay(pdMS_TO_TICKS(3000));  // pause before retry (also satisfies HTTPS cooldown)
+    }
+}
+
+// ============================================================================
 // Background picture download + JPEG decode task (FreeRTOS, core 0)
 // ============================================================================
 void clockBgTask(void* /*param*/) {
     // Give the clock screen a moment to fully render before first download
     vTaskDelay(pdMS_TO_TICKS(1500));
+    clock_weather_needs_refetch = true;  // ensure weather fetches on first cycle
 
     while (!clock_bg_shutdown_requested) {
         // --- Download loremflickr.com JPEG (plain HTTP, no TLS, up to 3 attempts) ---
+        // Skipped entirely when clock_picsum_enabled is false (weather-only mode).
         // Two-step: GET loremflickr.com → parse Location redirect → fetch actual photo.
         // loremflickr serves from its own cache (/cache/resized/...) via HTTP.
         // "Random" (no keyword) hits Flickr API directly = 500 since Flickr blocked them.
         // Fix: for Random mode pick a random keyword from the list so cache is always hit.
         // picsum.photos NOT used: serves progressive JPEG, JPEGDEC only decodes baseline.
-        uint8_t* dl_buf = (uint8_t*)heap_caps_malloc(
-            CLOCK_BG_MAX_DL_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        uint8_t* dl_buf = nullptr;
         int dl_total = 0;
+
+        if (clock_picsum_enabled) {
+        dl_buf = (uint8_t*)heap_caps_malloc(
+            CLOCK_BG_MAX_DL_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
 
         if (dl_buf) {
             const char* kw = CLOCK_BG_KEYWORDS[clock_bg_kw_idx].kw;
@@ -254,12 +575,32 @@ void clockBgTask(void* /*param*/) {
             dl_buf = nullptr;
         }
 
-        // --- Wait refresh interval, checking shutdown flag every 500ms ---
+        // Fetch weather on first cycle (last_wx_fetch_ms=0 forces immediate fetch).
+        // Weather refresh is decoupled from photo refresh: it uses its own
+        // CLOCK_WX_REFRESH_MIN interval so it never fetches more often than needed
+        // regardless of the photo refresh rate (which can be as low as 1 min).
+        const uint32_t WX_REFRESH_MS = (uint32_t)CLOCK_WX_REFRESH_MIN * 60000UL;
+        static uint32_t last_wx_fetch_ms = 0;
+
+        if (clock_weather_needs_refetch || millis() - last_wx_fetch_ms >= WX_REFRESH_MS) {
+            clock_weather_needs_refetch = false;
+            last_wx_fetch_ms = millis();
+            fetchClockWeather();
+        }
+
+        // --- Wait photo refresh interval, checking shutdown every 500ms ---
+        // Weather is also checked each tick: fetches when its own interval expires
+        // or when unit toggle sets clock_weather_needs_refetch.
         uint32_t wait_ms = (uint32_t)clock_refresh_min * 60000UL;
         uint32_t waited  = 0;
         while (waited < wait_ms && !clock_bg_shutdown_requested) {
             vTaskDelay(pdMS_TO_TICKS(500));
             waited += 500;
+            if (clock_weather_needs_refetch || millis() - last_wx_fetch_ms >= WX_REFRESH_MS) {
+                clock_weather_needs_refetch = false;
+                last_wx_fetch_ms = millis();
+                fetchClockWeather();
+            }
         }
     }
 
@@ -311,12 +652,99 @@ void createClockScreen() {
     lv_obj_set_style_text_color(clock_date_lbl, lv_color_hex(0xAAAAAA), 0);
     lv_obj_align(clock_date_lbl, LV_ALIGN_CENTER, 0, 90);
 
-    // Tap-to-dismiss hint at bottom
-    lv_obj_t* hint = lv_label_create(scr_clock);
-    lv_label_set_text(hint, "Tap to return");
-    lv_obj_set_style_text_font(hint, &lv_font_montserrat_14, 0);
-    lv_obj_set_style_text_color(hint, lv_color_hex(0x555555), 0);
-    lv_obj_align(hint, LV_ALIGN_BOTTOM_MID, 0, -16);
+    // ── Weather overlay — hidden until first fetch ───────────────────────────
+    
+    
+    
+
+    // ── Top-left area (transparent — no card, no shadow) ──────────────────────
+    clock_wx_tl_panel = lv_obj_create(scr_clock);
+    lv_obj_set_pos(clock_wx_tl_panel, 10, 10);
+    lv_obj_set_size(clock_wx_tl_panel, 390, 160);
+    lv_obj_set_style_bg_opa(clock_wx_tl_panel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(clock_wx_tl_panel, 0, 0);
+    lv_obj_set_style_pad_all(clock_wx_tl_panel, 0, 0);
+    lv_obj_clear_flag(clock_wx_tl_panel, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(clock_wx_tl_panel, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(clock_wx_tl_panel, LV_OBJ_FLAG_HIDDEN);
+
+    clock_wx_city_lbl = lv_label_create(clock_wx_tl_panel);
+    lv_label_set_text(clock_wx_city_lbl, "---");
+    lv_obj_set_style_text_font(clock_wx_city_lbl, &lv_font_montserrat_20, 0);
+    lv_obj_set_style_text_color(clock_wx_city_lbl, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_pos(clock_wx_city_lbl, 10, 5);
+
+    clock_wx_temp_lbl = lv_label_create(clock_wx_tl_panel);
+    lv_label_set_text(clock_wx_temp_lbl, "--°C");
+    lv_obj_set_style_text_font(clock_wx_temp_lbl, &lv_font_montserrat_48, 0);
+    lv_obj_set_style_text_color(clock_wx_temp_lbl, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_pos(clock_wx_temp_lbl, 10, 32);
+
+    clock_wx_cond_lbl = lv_label_create(clock_wx_tl_panel);
+    lv_label_set_text(clock_wx_cond_lbl, "");
+    lv_obj_set_style_text_font(clock_wx_cond_lbl, &lv_font_montserrat_18, 0);
+    lv_obj_set_style_text_color(clock_wx_cond_lbl, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_pos(clock_wx_cond_lbl, 10, 95);
+
+    clock_wx_detail_lbl = lv_label_create(clock_wx_tl_panel);
+    lv_label_set_text(clock_wx_detail_lbl, "");
+    lv_obj_set_style_text_font(clock_wx_detail_lbl, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(clock_wx_detail_lbl, lv_color_hex(0x888888), 0);
+    lv_obj_set_pos(clock_wx_detail_lbl, 10, 118);
+
+    // Today icon — 80px, close to the right of the temp number
+    clock_wx_icon = lv_label_create(clock_wx_tl_panel);
+    lv_label_set_text(clock_wx_icon, WI_DAY_SUNNY);
+    lv_obj_set_style_text_font(clock_wx_icon, &lv_font_weathericons_80, 0);
+    lv_obj_set_style_text_color(clock_wx_icon, lv_color_hex(0xAAAAAA), 0);
+    lv_obj_set_pos(clock_wx_icon, 155, 10);
+    lv_obj_clear_flag(clock_wx_icon, LV_OBJ_FLAG_CLICKABLE);
+
+    // ── Bottom strip: 6-hour hourly forecast (no background, no separator) ─────
+    clock_wx_bottom = lv_obj_create(scr_clock);
+    lv_obj_set_pos(clock_wx_bottom, 0, 375);
+    lv_obj_set_size(clock_wx_bottom, 800, 105);
+    lv_obj_set_style_bg_opa(clock_wx_bottom, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(clock_wx_bottom, 0, 0);
+    lv_obj_set_style_pad_all(clock_wx_bottom, 0, 0);
+    lv_obj_clear_flag(clock_wx_bottom, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_clear_flag(clock_wx_bottom, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_add_flag(clock_wx_bottom, LV_OBJ_FLAG_HIDDEN);
+
+    // 6 equal columns (133px each, last extends to 800)
+    for (int i = 0; i < 6; i++) {
+        int col_x = i * 133;
+        int col_w = (i < 5) ? 133 : (800 - 5 * 133);  // last column gets remainder
+
+        // Day name (Mon / Tue …)
+        clock_wx_fc_day[i] = lv_label_create(clock_wx_bottom);
+        lv_obj_set_width(clock_wx_fc_day[i], col_w);
+        lv_obj_set_pos(clock_wx_fc_day[i], col_x, 7);
+        lv_obj_set_style_text_align(clock_wx_fc_day[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(clock_wx_fc_day[i], &lv_font_montserrat_14, 0);
+        lv_obj_set_style_text_color(clock_wx_fc_day[i], lv_color_hex(0x999999), 0);
+        lv_label_set_text(clock_wx_fc_day[i], "---");
+
+        // Condition icon (32px Weather Icons glyph)
+        clock_wx_fc_icon[i] = lv_label_create(clock_wx_bottom);
+        lv_obj_set_width(clock_wx_fc_icon[i], col_w);
+        lv_obj_set_pos(clock_wx_fc_icon[i], col_x, 24);
+        lv_obj_set_style_text_align(clock_wx_fc_icon[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(clock_wx_fc_icon[i], &lv_font_weathericons_32, 0);
+        lv_obj_set_style_text_color(clock_wx_fc_icon[i], lv_color_hex(0xAAAAAA), 0);
+        lv_label_set_text(clock_wx_fc_icon[i], WI_DAY_SUNNY);
+
+        // Temperature
+        clock_wx_fc_temp[i] = lv_label_create(clock_wx_bottom);
+        lv_obj_set_width(clock_wx_fc_temp[i], col_w);
+        lv_obj_set_pos(clock_wx_fc_temp[i], col_x, 70);
+        lv_obj_set_style_text_align(clock_wx_fc_temp[i], LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(clock_wx_fc_temp[i], &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(clock_wx_fc_temp[i], lv_color_hex(0xAAAAAA), 0);
+        lv_label_set_text(clock_wx_fc_temp[i], "--°");
+    }
+
+    // (Tap-to-dismiss: whole screen is clickable, so no separate hint needed)
 
     // Touch anywhere on the screen to dismiss
     lv_obj_add_flag(scr_clock, LV_OBJ_FLAG_CLICKABLE);
@@ -343,6 +771,13 @@ void exitClockScreen() {
         clock_tick_timer = nullptr;
     }
 
+    // Hide weather overlay immediately
+    if (clock_wx_tl_panel) lv_obj_add_flag(clock_wx_tl_panel, LV_OBJ_FLAG_HIDDEN);
+    if (clock_wx_bottom)   lv_obj_add_flag(clock_wx_bottom,   LV_OBJ_FLAG_HIDDEN);
+    clock_weather_updated = false;
+    // Reset auto-detect cache so next session re-checks (device may have moved)
+    clock_auto_loc_valid = false;
+
     // Tell background task to stop
     clock_bg_shutdown_requested = true;
 
@@ -355,10 +790,7 @@ void exitClockScreen() {
     lyrics_shutdown_requested = false;  // Was set on clock entry; must clear on exit
     last_art_url = "";  // Force re-fetch since track may have changed
     if (!albumArtTaskHandle) {
-        xTaskCreatePinnedToCore(
-            albumArtTask, "Art",
-            ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY,
-            &albumArtTaskHandle, 0);
+        createArtTask();  // PSRAM stack — frees 20KB internal SRAM for SDIO/WiFi DMA
     }
 
     // Transition back to main screen
@@ -412,6 +844,10 @@ void checkClockTrigger() {
             setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
             tzset();
 
+            // Pre-populate weather overlay with last known data (bg task refreshes shortly)
+            clock_weather_updated = false;
+            applyWeatherToWidgets();
+
             // Allocate and zero pixel buffer for background (800×480 RGB565 = 768 KB in PSRAM)
             if (clock_picsum_enabled && !clock_bg_buffer) {
                 size_t buf_sz = (size_t)CLOCK_BG_WIDTH * CLOCK_BG_HEIGHT * 2;
@@ -424,15 +860,31 @@ void checkClockTrigger() {
                 }
             }
 
-            // Start background photo download task
-            if (clock_picsum_enabled && clock_bg_buffer) {
+            // Start background task for photo download and/or weather fetch.
+            // Run if either feature is enabled (task skips photo section when picsum is off).
+            if (clock_picsum_enabled || clock_weather_enabled) {
                 clock_bg_shutdown_requested = false;
                 clock_bg_ready              = false;
-                memset(&clock_bg_dsc, 0, sizeof(clock_bg_dsc));
-                xTaskCreatePinnedToCore(
-                    clockBgTask, "ClkBg",
-                    CLOCK_BG_TASK_STACK, NULL, 1,
-                    &clockBgTaskHandle, 0);
+                if (clock_picsum_enabled) memset(&clock_bg_dsc, 0, sizeof(clock_bg_dsc));
+                // Allocate stack in PSRAM to free 8KB of DMA SRAM for SDIO RX buffers.
+                // Same pattern as art task (20KB) and lyrics task (8KB).
+                // Safe: clockBgTask never calls NVS/flash write functions.
+                if (!clkbg_task_stack) {
+                    clkbg_task_stack = (StackType_t*)heap_caps_malloc(
+                        CLOCK_BG_TASK_STACK, MALLOC_CAP_SPIRAM);
+                }
+                if (clkbg_task_stack) {
+                    clockBgTaskHandle = xTaskCreateStaticPinnedToCore(
+                        clockBgTask, "ClkBg",
+                        CLOCK_BG_TASK_STACK / sizeof(StackType_t),
+                        NULL, 1, clkbg_task_stack, &clkbgTaskTCB, 0);
+                } else {
+                    // PSRAM alloc failed — fall back to internal SRAM
+                    xTaskCreatePinnedToCore(
+                        clockBgTask, "ClkBg",
+                        CLOCK_BG_TASK_STACK, NULL, 1,
+                        &clockBgTaskHandle, 0);
+                }
             }
 
             // Start 1-second clock tick
@@ -495,8 +947,9 @@ void checkClockTrigger() {
             // Wait for the background task to finish writing its buffer
             bool bg_done  = (clockBgTaskHandle == nullptr);
             bool timed_out = (millis() - clock_exiting_start_ms > 2000);
+            bool bg_was_running = (clock_picsum_enabled || clock_weather_enabled);
 
-            if (!bg_done && !timed_out && clock_picsum_enabled) return;
+            if (!bg_done && !timed_out && bg_was_running) return;
 
             // Hide the background image BEFORE freeing the buffer to prevent
             // LVGL from rendering a dangling pointer during the transition.

@@ -1,6 +1,11 @@
 /**
  * UI Album Art Handling
- * Album art loading with ESP32-P4 hardware JPEG decoder + JPEGDEC SW fallback + PNGdec + bilinear scaling
+ * Album art loading with:
+ *   - ESP32-P4 hardware JPEG decoder (baseline JPEG, div-8 dimensions)
+ *   - JPEGDEC SW fallback (baseline JPEG, non-div-8 or HW failure)
+ *   - stb_image (progressive JPEG / SOF2 — full all-scan decode)
+ *   - PNGdec (PNG)
+ *   - Bilinear scaling to 420x420 display size
  */
 
 #include "ui_common.h"
@@ -16,6 +21,10 @@
 // ESP32-P4 Hardware JPEG Decoder
 #include "driver/jpeg_decode.h"
 static jpeg_decoder_handle_t hw_jpeg_decoder = nullptr;
+
+// stb_image full progressive JPEG decoder (defined in stb_jpeg.cpp)
+extern bool decodeJPEGProgressiveStb(const uint8_t* buf, size_t len,
+                                     uint16_t** out, int* out_w, int* out_h);
 
 // Software JPEG decoder callback globals (set before decode, cleared after)
 static uint16_t* sw_jpeg_output = nullptr;
@@ -37,6 +46,16 @@ static PNG png;
 // Smooth background color transition state
 static uint32_t current_bg_color = 0x1a1a1a;
 static uint32_t target_bg_color = 0x1a1a1a;
+
+// 2-slot LRU album art cache in PSRAM — instant display on prev/next, no re-download
+struct ArtCacheEntry {
+    char url[512];
+    uint16_t* pixels;        // ART_SIZE*ART_SIZE*2 bytes (~352KB each)
+    uint32_t dominant_color;
+    bool valid;
+};
+static ArtCacheEntry art_cache[2] = {};
+static int art_cache_lru = 0;  // Index of most recently used slot
 
 // Interpolate a single 8-bit channel
 static inline uint8_t lerp8(uint8_t a, uint8_t b, int t) {
@@ -218,7 +237,8 @@ static int jpegDrawCallback(JPEGDRAW* pDraw) {
     return 1;  // Continue decoding
 }
 
-// Software JPEG decode fallback (handles progressive, non-div-8, etc.)
+// Software JPEG decode fallback for non-progressive JPEG (non-div-8 dimensions, HW failures).
+// Progressive JPEG is handled separately by decodeJPEGProgressiveStb() (stb_image).
 // Returns true on success. Caller must heap_caps_free(*out_buffer) when done.
 static bool decodeJPEGSoftware(uint8_t* buf, size_t len, uint16_t** out_buffer, int* out_w, int* out_h) {
     // Allocate JPEGDEC in PSRAM (~18KB struct - too large for stack, wastes DRAM if static)
@@ -284,7 +304,9 @@ static int pngDraw(PNGDRAW* pDraw) {
     if (!jpeg_decode_buffer) return 0;
 
     // Get RGB565 pixels from PNG decoder
-    uint16_t lineBuffer[512];  // Max width we support
+    // Static: png is a single global instance, pngDraw is only ever called from the
+    // art task — no reentrancy. Avoids 1KB stack allocation per row during PNG decode.
+    static uint16_t lineBuffer[512];
     int w = pDraw->iWidth;
     if (w > 512) w = 512;
 
@@ -327,6 +349,25 @@ static String prepareAlbumArtURL(const String& rawUrl) {
         fetchUrl = fetchUrl.substring(markStart, markEnd);
         is_sonos_radio_art = true;
         Serial.printf("[ART] Extracted: %s\n", fetchUrl.c_str());
+    }
+
+    // Plex Media Server photo transcoder: bump small thumbnail requests to 600px.
+    // Plex Sonos integration can request tiny thumbnails (e.g. width=64&height=64) resulting
+    // in a heavily-upscaled pixelated image that appears "tiny" quality on screen.
+    // Pattern: http://x.x.x.x:32400/photo/:/transcode?width=N&height=N&...
+    if (fetchUrl.indexOf(":32400/photo/:/transcode") != -1) {
+        const char* params[2] = {"width=", "height="};
+        for (int pi = 0; pi < 2; pi++) {
+            int idx = fetchUrl.indexOf(params[pi]);
+            if (idx != -1) {
+                int numStart = idx + strlen(params[pi]);
+                int numEnd = numStart;
+                while (numEnd < (int)fetchUrl.length() && isDigit(fetchUrl[numEnd])) numEnd++;
+                if (numEnd > numStart && fetchUrl.substring(numStart, numEnd).toInt() < 400) {
+                    fetchUrl = fetchUrl.substring(0, numStart) + "600" + fetchUrl.substring(numEnd);
+                }
+            }
+        }
     }
 
     // Reduce image size for known providers to stay under size limit
@@ -373,6 +414,8 @@ static String prepareAlbumArtURL(const String& rawUrl) {
             }
             fetchUrl = fetchUrl.substring(0, uStart) + uEncoded + fetchUrl.substring(uEnd);
         }
+        // Request largest available art from the Sonos proxy (embedded or folder art)
+        fetchUrl += "&maxWidth=600&maxHeight=600";
     }
 
     return fetchUrl;
@@ -388,10 +431,40 @@ static bool isPrivateIP(const char* url) {
             strncmp(host, "172.", 4) == 0);
 }
 
+// Create (or recreate) the album art task with a PSRAM-allocated stack.
+// PSRAM stack frees ~20KB of DMA-capable internal SRAM for WiFi/SDIO buffers.
+// The stack pointer is allocated once and reused across task recreations (OTA restart, clock screen).
+void createArtTask() {
+    if (!art_task_stack) {
+        art_task_stack = (StackType_t*)heap_caps_malloc(ART_TASK_STACK_SIZE, MALLOC_CAP_SPIRAM);
+    }
+    if (art_task_stack) {
+        albumArtTaskHandle = xTaskCreateStaticPinnedToCore(
+            albumArtTask, "Art", ART_TASK_STACK_SIZE / sizeof(StackType_t),
+            NULL, ART_TASK_PRIORITY, art_task_stack, &albumArtTaskTCB, 0);
+    } else {
+        Serial.println("[ART] PSRAM stack alloc failed — using internal SRAM");
+        xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL,
+                                ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
+    }
+}
+
 void albumArtTask(void* param) {
-    art_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
-    art_temp_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
+    // Guard against PSRAM leak on OTA recovery: task may be killed/recreated while globals
+    // already hold valid pointers. Only allocate if not yet allocated.
+    if (!art_buffer)
+        art_buffer     = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
+    if (!art_temp_buffer)
+        art_temp_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
     if (!art_buffer || !art_temp_buffer) { vTaskDelete(NULL); return; }
+
+    if (!art_cache[0].pixels)
+        art_cache[0].pixels = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
+    if (!art_cache[1].pixels)
+        art_cache[1].pixels = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
+    if (!art_cache[0].pixels || !art_cache[1].pixels) {
+        Serial.println("[ART] LRU cache allocation failed — cache disabled");
+    }
 
     // Initialize ESP32-P4 Hardware JPEG Decoder
     jpeg_decode_engine_cfg_t hw_jpeg_cfg = {
@@ -446,12 +519,42 @@ void albumArtTask(void* param) {
                         consecutive_failures = 0;
                         last_failed_url[0] = '\0';
                     }
+                } else {
+                    // fetchUrl already matches last_art_url — art is already displayed.
+                    // Sync pending_art_url to the processed URL so the outer guard
+                    // (pending_art_url != last_art_url) catches it on the next poll.
+                    // Without this, Sonos Radio URLs (raw != extracted) spam the log
+                    // every 100ms because pending_art_url never equals last_art_url.
+                    pending_art_url = last_art_url;
                 }
             }
             xSemaphoreGive(art_mutex);
         }
         if (url[0] != '\0') {
             Serial.printf("[ART] URL: %s\n", url);
+
+            // LRU cache check — serve instantly without network if we already have this art
+            {
+                bool cache_hit = false;
+                for (int i = 0; i < 2; i++) {
+                    if (art_cache[i].valid && art_cache[i].pixels &&
+                        strncmp(art_cache[i].url, url, sizeof(art_cache[i].url)) == 0) {
+                        Serial.printf("[ART] Cache hit slot %d — skipping download\n", i);
+                        if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                            memcpy(art_buffer, art_cache[i].pixels, ART_SIZE * ART_SIZE * 2);
+                            last_art_url = url;
+                            dominant_color = art_cache[i].dominant_color;
+                            art_ready = true;
+                            color_ready = true;
+                            art_cache_lru = i;
+                            xSemaphoreGive(art_mutex);
+                        }
+                        cache_hit = true;
+                        break;
+                    }
+                }
+                if (cache_hit) continue;
+            }
 
             // Simple WiFi check - don't try to download if not connected
             if (WiFi.status() != WL_CONNECTED) {
@@ -489,13 +592,25 @@ void albumArtTask(void* param) {
                     }
                 }
 
-                // HTTPS-specific cooldown (2000ms) only for internet URLs - local has no TLS
-                if (!isLocalNetwork && use_https) {
+                // HTTPS residue cooldown - C6 needs 2000ms to free TLS buffers after any HTTPS session.
+                // Applied to ALL subsequent downloads (local AND internet) — local getaa crashes too.
+                if (last_https_end_ms > 0) {
                     unsigned long now = millis();
                     unsigned long elapsed = now - last_https_end_ms;
-                    if (last_https_end_ms > 0 && elapsed < 2000) {
+                    if (elapsed < 2000) {
                         unsigned long wait_ms = 2000 - elapsed;
-                        Serial.printf("[ART] HTTPS cooldown: waiting %lums (elapsed: %lums)\n", wait_ms, elapsed);
+                        Serial.printf("[ART] HTTPS residue cooldown: waiting %lums\n", wait_ms);
+                        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+                    }
+                }
+
+                // Queue poll cooldown - 50-item XML response (~20KB) stresses SDIO RX pool.
+                // sendSOAP() does NOT check this — only art download is gated here.
+                if (last_queue_fetch_time > 0) {
+                    unsigned long elapsed = millis() - last_queue_fetch_time;
+                    if (elapsed < 2000) {
+                        unsigned long wait_ms = 2000 - elapsed;
+                        Serial.printf("[ART] Queue poll cooldown: waiting %lums\n", wait_ms);
                         vTaskDelay(pdMS_TO_TICKS(wait_ms));
                     }
                 }
@@ -531,10 +646,16 @@ void albumArtTask(void* param) {
                             vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
                         }
                     }
-                    if (!isLocalNetwork && use_https) {
+                    if (last_https_end_ms > 0) {
                         unsigned long now = millis();
                         unsigned long elapsed = now - last_https_end_ms;
-                        if (last_https_end_ms > 0 && elapsed < 2000) {
+                        if (elapsed < 2000) {
+                            vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
+                        }
+                    }
+                    if (last_queue_fetch_time > 0) {
+                        unsigned long elapsed = millis() - last_queue_fetch_time;
+                        if (elapsed < 2000) {
                             vTaskDelay(pdMS_TO_TICKS(2000 - elapsed));
                         }
                     }
@@ -695,8 +816,8 @@ void albumArtTask(void* param) {
                             bool isJPEG = (read >= 3 && jpgBuf[0] == 0xFF && jpgBuf[1] == 0xD8 && jpgBuf[2] == 0xFF);
                             bool isPNG = (read >= 4 && jpgBuf[0] == 0x89 && jpgBuf[1] == 0x50 && jpgBuf[2] == 0x4E && jpgBuf[3] == 0x47);
 
-                            // Only decode PNG for radio station logos (not regular album art)
-                            if (isPNG && isStationLogo) {
+                            // Decode PNG for both station logos and regular album art (e.g. Plex serves PNG)
+                            if (isPNG) {
                                 Serial.printf("[ART] Opening PNG with %d bytes\n", read);
                                 int pngResult = png.openRAM(jpgBuf, read, pngDraw);
                                 if (pngResult == 0) {  // PNG_SUCCESS = 0 (different from JPEG!)
@@ -816,6 +937,16 @@ void albumArtTask(void* param) {
                                                 color_ready = true;
                                                 xSemaphoreGive(art_mutex);
                                             }
+                                            // Store to LRU cache (art_cache is art-task-private, no mutex needed)
+                                            if (art_cache[0].pixels && art_cache[1].pixels) {
+                                                int slot = 1 - art_cache_lru;
+                                                memcpy(art_cache[slot].pixels, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                                strncpy(art_cache[slot].url, url, sizeof(art_cache[slot].url) - 1);
+                                                art_cache[slot].url[sizeof(art_cache[slot].url) - 1] = '\0';
+                                                art_cache[slot].dominant_color = new_color;
+                                                art_cache[slot].valid = true;
+                                                art_cache_lru = slot;
+                                            }
                                             // Reset failure counter on success
                                             consecutive_failures = 0;
                                             last_failed_url[0] = '\0';
@@ -825,15 +956,6 @@ void albumArtTask(void* param) {
                                     }
                                 } else {
                                     Serial.printf("[ART] PNG openRAM failed - error code: %d\n", pngResult);
-                                }
-                            } else if (isPNG && !isStationLogo) {
-                                // PNG detected but not a station logo - skip (only JPEG for normal album art)
-                                Serial.println("[ART] PNG detected but not station logo - skipping");
-                                // Mark as done to prevent infinite retry loop
-                                if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
-                                    last_art_url = url;
-                                    art_show_placeholder = true;
-                                    xSemaphoreGive(art_mutex);
                                 }
                             } else if (isJPEG && hw_jpeg_decoder) {
                                 // ESP32-P4 Hardware JPEG Decoder - fast and stable!
@@ -846,9 +968,9 @@ void albumArtTask(void* param) {
                                     if (jpgBuf[i] == 0xFF && jpgBuf[i+1] == 0xFE) {
                                         // Found COM marker - get length
                                         if (i + 3 < read) {
-                                            uint16_t len = (jpgBuf[i+2] << 8) | jpgBuf[i+3];
+                                            uint16_t marker_len = (jpgBuf[i+2] << 8) | jpgBuf[i+3];
                                             // Remove marker + length + data
-                                            size_t marker_total = 2 + len;
+                                            size_t marker_total = 2 + marker_len;
                                             if (i + marker_total <= read) {
                                                 memmove(&jpgBuf[i], &jpgBuf[i + marker_total], read - i - marker_total);
                                                 cleaned_size -= marker_total;
@@ -862,16 +984,37 @@ void albumArtTask(void* param) {
 
                                 // Determine decode strategy: HW fast path vs SW fallback
                                 bool use_sw_fallback = false;
+                                bool is_progressive_jpeg = false;
                                 bool hw_decode_success = false;
                                 uint16_t* decoded_pixels = nullptr;  // Final RGB565 pixels for scaling
                                 int final_w = 0, final_h = 0;
                                 int final_stride = 0;  // Row stride in pixels (may differ from width for HW decode)
 
-                                // Step 1: Try HW decoder header parse
-                                jpeg_decode_picture_info_t pic_info;
-                                esp_err_t ret = jpeg_decoder_get_info(jpgBuf, cleaned_size, &pic_info);
+                                // Pre-check: detect progressive JPEG (SOF2 = 0xFF 0xC2).
+                                // The ESP32-P4 HW decoder supports baseline JPEG (SOF0) only.
+                                // Progressive JPEGs cause jpeg_decoder_get_info to return ESP_OK
+                                // with 0x0 dimensions (it doesn't error — it just can't parse SOF2).
+                                // Detecting early avoids the wasted HW attempt and confusing log.
+                                // Scan the full buffer — large EXIF/ICC headers can push SOF2
+                                // well beyond 4096 bytes (old limit that caused missed detection).
+                                for (size_t pi = 0; pi + 1 < cleaned_size; pi++) {
+                                    if (jpgBuf[pi] == 0xFF && jpgBuf[pi + 1] == 0xC2) {
+                                        Serial.println("[ART] Progressive JPEG (SOF2) — using stb_image");
+                                        use_sw_fallback = true;
+                                        is_progressive_jpeg = true;
+                                        break;
+                                    }
+                                }
 
-                                if (ret == ESP_OK && pic_info.width > 0 && pic_info.height > 0 &&
+                                // Step 1: Try HW decoder header parse (baseline JPEG only)
+                                jpeg_decode_picture_info_t pic_info;
+                                esp_err_t hw_ret = ESP_FAIL;
+                                if (!use_sw_fallback) {
+                                    hw_ret = jpeg_decoder_get_info(jpgBuf, cleaned_size, &pic_info);
+                                }
+
+                                if (!use_sw_fallback) {
+                                if (hw_ret == ESP_OK && pic_info.width > 0 && pic_info.height > 0 &&
                                     pic_info.width <= 2048 && pic_info.height <= 2048) {
                                     int w = pic_info.width;
                                     int h = pic_info.height;
@@ -903,10 +1046,10 @@ void albumArtTask(void* param) {
                                             };
 
                                             uint32_t out_size = 0;
-                                            ret = jpeg_decoder_process(hw_jpeg_decoder, &decode_cfg, jpgBuf, cleaned_size, hw_out_buf, rx_buffer_size, &out_size);
+                                            hw_ret = jpeg_decoder_process(hw_jpeg_decoder, &decode_cfg, jpgBuf, cleaned_size, hw_out_buf, rx_buffer_size, &out_size);
 
                                             // For grayscale: convert GRAY8 to RGB565
-                                            if (ret == ESP_OK && is_grayscale) {
+                                            if (hw_ret == ESP_OK && is_grayscale) {
                                                 Serial.println("[ART] Converting grayscale to RGB565");
                                                 uint16_t* rgb_buf = (uint16_t*)heap_caps_malloc(out_w * out_h * 2, MALLOC_CAP_SPIRAM);
                                                 if (rgb_buf) {
@@ -921,11 +1064,11 @@ void albumArtTask(void* param) {
                                                     Serial.println("[ART] Grayscale conversion alloc failed");
                                                     heap_caps_free(hw_out_buf);
                                                     hw_out_buf = nullptr;
-                                                    ret = ESP_FAIL;
+                                                    hw_ret = ESP_FAIL;
                                                 }
                                             }
 
-                                            if (ret == ESP_OK && hw_out_buf) {
+                                            if (hw_ret == ESP_OK && hw_out_buf) {
                                                 Serial.printf("[ART] HW decoded: %d bytes\n", out_size);
                                                 hw_decode_success = true;
                                                 decoded_pixels = (uint16_t*)hw_out_buf;
@@ -933,7 +1076,7 @@ void albumArtTask(void* param) {
                                                 final_h = h;
                                                 final_stride = out_w;  // HW buffer has padded stride
                                             } else {
-                                                Serial.printf("[ART] HW decode failed: %d, trying SW fallback\n", ret);
+                                                Serial.printf("[ART] HW decode failed: %d, trying SW fallback\n", hw_ret);
                                                 if (hw_out_buf) heap_caps_free(hw_out_buf);
                                                 use_sw_fallback = true;
                                             }
@@ -946,26 +1089,43 @@ void albumArtTask(void* param) {
                                         Serial.printf("[ART] JPEG %dx%d not HW-compatible (non-div-8), using SW fallback\n", w, h);
                                         use_sw_fallback = true;
                                     }
-                                } else if (ret == ESP_OK) {
-                                    // HW parser returned OK but 0x0 dimensions (progressive JPEG)
-                                    Serial.printf("[ART] HW reports 0x0 (likely progressive), using SW fallback\n");
+                                } else if (hw_ret == ESP_OK) {
+                                    // HW parser returned OK but 0x0 dimensions — progressive JPEG.
+                                    // Must also set is_progressive_jpeg so Step 2 routes to stb_image,
+                                    // not JPEGDEC (which gives DC-only 1/8-scale output for SOF2).
+                                    Serial.printf("[ART] HW reports 0x0 (progressive), using stb_image\n");
                                     use_sw_fallback = true;
+                                    is_progressive_jpeg = true;
                                 } else {
                                     // HW header parse completely failed
-                                    Serial.printf("[ART] HW header parse failed: %d, trying SW fallback\n", ret);
+                                    Serial.printf("[ART] HW header parse failed: %d, trying SW fallback\n", hw_ret);
                                     use_sw_fallback = true;
                                 }
+                                } // end if (!use_sw_fallback) — HW decode block
 
                                 // Step 2: SW fallback if HW couldn't handle it
                                 if (use_sw_fallback && !hw_decode_success) {
                                     uint16_t* sw_buf = nullptr;
                                     int sw_w = 0, sw_h = 0;
-                                    if (decodeJPEGSoftware(jpgBuf, cleaned_size, &sw_buf, &sw_w, &sw_h)) {
-                                        decoded_pixels = sw_buf;
-                                        final_w = sw_w;
-                                        final_h = sw_h;
-                                        final_stride = sw_w;  // SW decode has no padding
-                                        hw_decode_success = true;  // Reuse success path
+                                    if (is_progressive_jpeg) {
+                                        // Progressive JPEG: skip JPEGDEC (DC-only 1/8 scale output).
+                                        // stb_image decodes all scan segments → full-quality output.
+                                        if (decodeJPEGProgressiveStb(jpgBuf, cleaned_size, &sw_buf, &sw_w, &sw_h)) {
+                                            decoded_pixels = sw_buf;
+                                            final_w = sw_w;
+                                            final_h = sw_h;
+                                            final_stride = sw_w;
+                                            hw_decode_success = true;
+                                        }
+                                    } else {
+                                        // Non-progressive: JPEGDEC handles non-div-8 dimensions, etc.
+                                        if (decodeJPEGSoftware(jpgBuf, cleaned_size, &sw_buf, &sw_w, &sw_h)) {
+                                            decoded_pixels = sw_buf;
+                                            final_w = sw_w;
+                                            final_h = sw_h;
+                                            final_stride = sw_w;
+                                            hw_decode_success = true;
+                                        }
                                     }
                                 }
 
@@ -1003,6 +1163,16 @@ void albumArtTask(void* param) {
                                         art_ready = true;
                                         color_ready = true;
                                         xSemaphoreGive(art_mutex);
+                                    }
+                                    // Store to LRU cache (art_cache is art-task-private, no mutex needed)
+                                    if (art_cache[0].pixels && art_cache[1].pixels) {
+                                        int slot = 1 - art_cache_lru;
+                                        memcpy(art_cache[slot].pixels, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                        strncpy(art_cache[slot].url, url, sizeof(art_cache[slot].url) - 1);
+                                        art_cache[slot].url[sizeof(art_cache[slot].url) - 1] = '\0';
+                                        art_cache[slot].dominant_color = new_color;
+                                        art_cache[slot].valid = true;
+                                        art_cache_lru = slot;
                                     }
                                     consecutive_failures = 0;
                                     last_failed_url[0] = '\0';
@@ -1059,6 +1229,16 @@ void albumArtTask(void* param) {
                                         art_ready = true;
                                         color_ready = true;
                                         xSemaphoreGive(art_mutex);
+                                    }
+                                    // Store to LRU cache (art_cache is art-task-private, no mutex needed)
+                                    if (art_cache[0].pixels && art_cache[1].pixels) {
+                                        int slot = 1 - art_cache_lru;
+                                        memcpy(art_cache[slot].pixels, art_temp_buffer, ART_SIZE * ART_SIZE * 2);
+                                        strncpy(art_cache[slot].url, url, sizeof(art_cache[slot].url) - 1);
+                                        art_cache[slot].url[sizeof(art_cache[slot].url) - 1] = '\0';
+                                        art_cache[slot].dominant_color = new_color;
+                                        art_cache[slot].valid = true;
+                                        art_cache_lru = slot;
                                     }
                                 } else {
                                     // SW also failed - mark as done

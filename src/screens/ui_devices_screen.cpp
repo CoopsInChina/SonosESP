@@ -271,4 +271,17 @@ void createDevicesScreen() {
     lv_obj_set_style_arc_rounded(spinner_scan, true, LV_PART_INDICATOR);
     lv_obj_move_foreground(spinner_scan);  // Ensure it's on top
     lv_obj_add_flag(spinner_scan, LV_OBJ_FLAG_HIDDEN);  // Hidden by default
+
+    // Refresh list every time the screen is opened so cached/already-discovered
+    // speakers show immediately without requiring a manual Scan tap (issue #19).
+    lv_obj_add_event_cb(scr_devices, [](lv_event_t* e) {
+        if (lv_event_get_code(e) != LV_EVENT_SCREEN_LOADED) return;
+        int cnt = sonos.getDeviceCount();
+        if (cnt > 0) {
+            refreshDeviceList();
+            lv_label_set_text_fmt(lbl_status, "%d speaker%s found", cnt, cnt == 1 ? "" : "s");
+        } else {
+            lv_label_set_text(lbl_status, "Tap Scan to find speakers");
+        }
+    }, LV_EVENT_ALL, NULL);
 }

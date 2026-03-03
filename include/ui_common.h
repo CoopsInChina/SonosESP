@@ -19,7 +19,7 @@
 #define DEFAULT_WIFI_PASSWORD ""
 
 // Firmware version
-#define FIRMWARE_VERSION "1.3.0"
+#define FIRMWARE_VERSION "1.4.0"
 #define GITHUB_REPO "OpenSurface/SonosESP"
 #define GITHUB_API_URL "https://api.github.com/repos/" GITHUB_REPO "/releases/latest"
 
@@ -27,19 +27,10 @@
 #define ART_SIZE 420
 #define MAX_ART_SIZE 280000          // 280KB max - allows Spotify 640x640 images
 #define ART_CHUNK_SIZE 4096          // 4KB chunks for HTTP downloads
-#define ART_READ_TIMEOUT_MS 5000     // 5 second timeout for image downloads
-#define ART_COMPACT_THRESHOLD 200000 // Compact buffer if image >200KB
 
 // Network configuration
 #define NETWORK_MUTEX_TIMEOUT_MS 5000    // Timeout for acquiring network mutex (SOAP)
 #define NETWORK_MUTEX_TIMEOUT_ART_MS 10000 // Longer timeout for album art downloads
-#define WIFI_RECONNECT_INTERVAL_MS 2000  // Try reconnect every 2 seconds
-
-// Task configuration
-#define TASK_PRIORITY_ALBUM_ART 1    // Low priority - background task
-#define TASK_PRIORITY_NETWORK 2      // Medium priority
-#define TASK_PRIORITY_POLLING 3      // High priority - UI responsiveness
-#define TASK_STACK_ALBUM_ART 8192    // 8KB stack for album art task
 
 // Sonos logo declaration
 LV_IMG_DECLARE(Sonos_idnu60bqes_1);
@@ -108,10 +99,12 @@ extern volatile bool color_ready;
 extern int art_offset_x, art_offset_y;
 extern bool is_sonos_radio_art;
 extern bool pending_is_station_logo;  // True when requesting radio station logo (PNG allowed)
-extern volatile unsigned long last_queue_fetch_time;  // Track queue fetches for WiFi coordination
+extern volatile unsigned long last_queue_fetch_time;  // Last updateQueue() completion (large HTTP — art waits 2000ms, sendSOAP unaffected)
 extern SemaphoreHandle_t network_mutex;  // Serializes all WiFi/HTTPS operations (SOAP, album art, OTA)
 extern volatile unsigned long last_network_end_ms;  // Last network operation end time (for SDIO cooldown)
 extern volatile unsigned long last_https_end_ms;   // Last HTTPS operation end time (TLS needs longer cooldown)
+extern volatile unsigned long last_art_download_end_ms;  // Last art download completion (art + lyrics use 3000ms cooldown)
+extern volatile bool art_download_in_progress;  // True while art task is actively receiving download data
 
 // UI state
 extern String ui_title, ui_artist, ui_repeat;
@@ -224,14 +217,22 @@ inline String decodeHTMLEntities(const String& str) {
     return result;
 }
 
-// Album art task
+// Album art task — stack lives in PSRAM to free internal SRAM for SDIO/WiFi DMA buffers
 extern TaskHandle_t albumArtTaskHandle;
+extern StaticTask_t albumArtTaskTCB;
+extern StackType_t* art_task_stack;
 extern volatile bool art_shutdown_requested;
 extern volatile bool art_abort_download;
+extern volatile bool art_suppress_source_change;  // Suppress intermediate art triggers during queue-select Seek→Play
+extern volatile bool cmd_queue_in_progress;        // CMD_PLAY_QUEUE_ITEM active — suppress all polling from drain through settle
+extern unsigned long last_cmd_queue_play_ms;       // Timestamp when CMD_PLAY_QUEUE_ITEM last cleared flags
 void albumArtTask(void *param);
+void createArtTask();   // PSRAM-stack wrapper — use instead of xTaskCreatePinnedToCore directly
 
-// Lyrics task
+// Lyrics task — stack lives in PSRAM for same reason
 extern TaskHandle_t lyricsTaskHandle;
+extern StaticTask_t lyricsTaskTCB;
+extern StackType_t* lyrics_task_stack;
 extern volatile bool lyrics_shutdown_requested;
 
 // Sonos task shutdown (for OTA)

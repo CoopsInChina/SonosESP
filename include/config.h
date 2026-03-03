@@ -46,6 +46,7 @@
 #define WIFI_CONNECT_TIMEOUT_MS 500     // Per-attempt timeout
 #define WIFI_CONNECT_RETRIES    40      // Max connection attempts (40 x 500ms = 20s)
 #define WIFI_MAX_NETWORKS       20      // Max networks to scan/store
+#define WIFI_CHECK_INTERVAL_MS  10000   // Main loop: WiFi health check interval
 
 // =============================================================================
 // DISPLAY SETTINGS
@@ -65,9 +66,9 @@
 // =============================================================================
 // ALBUM ART
 // =============================================================================
-#define ART_DISPLAY_SIZE        420     // Album art display size (pixels)
 #define ART_MAX_DOWNLOAD_SIZE   (280 * 1024)  // Max JPEG download buffer (280KB)
-#define ART_TASK_STACK_SIZE     7000    // Album art task stack (increased for HW JPEG + HTTPS/TLS)
+#define ART_TASK_STACK_SIZE     20000   // Album art task stack — PNG decode stacks TLS + software
+                                        // decoder on same task; 12KB hit stack=0 on HTTPS PNG (BBC R4)
 #define ART_TASK_PRIORITY       0       // Album art task priority
 #define ART_DOWNLOAD_TIMEOUT_MS 8000    // Download timeout
 #define ART_CHECK_INTERVAL_MS   100     // How often to check for new art requests
@@ -83,11 +84,25 @@
 #define SONOS_CMD_QUEUE_SIZE    10      // Command queue depth
 #define SONOS_UI_QUEUE_SIZE     20      // UI update queue depth
 
-// Task configuration (profiled: Net uses ~16KB, Poll uses ~7.5KB of allocated)
-#define SONOS_NET_TASK_STACK    3500    // Network task stack size (was 6144, ~10KB saved)
-#define SONOS_POLL_TASK_STACK   3000    // Polling task stack size (was 4096, ~4KB saved)
+// Task configuration (stack sizes in BYTES — ESP-IDF xTaskCreate takes bytes, not words)
+// High water marks (before fix) showed Poll=684 bytes free / 3000 total = DANGER.
+// sendSOAP chain can push 600-800 more bytes → overflow on deeper paths (queue, media info).
+// Net=1504 bytes free / 3500 total — also tight. Both doubled for safety.
+#define SONOS_NET_TASK_STACK    6000    // Network task stack size (was 3500; actual free was ~1.5KB)
+#define SONOS_POLL_TASK_STACK   6000    // Polling task stack size (was 3000; actual free was ~684 bytes!)
 #define SONOS_NET_TASK_PRIORITY 2       // Network task priority
 #define SONOS_POLL_TASK_PRIORITY 3      // Polling task priority
+#define LYRICS_TASK_STACK       8192    // Lyrics task stack size (4096 overflowed on HTTPS fetch — WiFiClientSecure + URL[512] needs ~6KB)
+#define LYRICS_TASK_PRIORITY    1       // Lyrics task priority
+// Arduino loopTask stack is hard-coded to 8KB in pre-compiled framework (sdkconfig.h) — cannot
+// be overridden with -D flags. mainAppTask runs the actual UI loop with a proper stack.
+// loopTask becomes idle (vTaskDelay only). Watchdog transfers to mainAppTask.
+// MUST be internal SRAM: NVS writes call spi_flash_disable_interrupts_caches_and_other_cpu()
+// which asserts (esp_task_stack_is_sane_cache_disabled) if the calling task's stack is in PSRAM.
+// 8KB is safe — HWM shows < 5KB used. Art task in PSRAM already frees 20KB DMA SRAM headroom.
+// Smaller than 16KB saves 8KB of DMA, giving OTA TLS handshake more room (~106KB peak).
+#define MAIN_APP_TASK_STACK     8192    // mainAppTask stack — internal SRAM (flash/NVS safe)
+#define MAIN_APP_TASK_PRIORITY  1       // Same priority as loopTask; Sonos (2/3) preempts as before
 
 // Timeouts
 #define SONOS_SOAP_TIMEOUT_MS   2000    // SOAP request timeout
@@ -103,8 +118,10 @@
 // =============================================================================
 // OTA UPDATES
 // =============================================================================
-#define OTA_BUFFER_SIZE         1024    // Download buffer size
-#define OTA_READ_SIZE           1024    // Max bytes per read (1KB - safe with adaptive throttling)
+#define OTA_BUFFER_SIZE         2048    // Download buffer (static in main loop — not FreeRTOS stack)
+#define OTA_READ_SIZE           2048    // Max bytes per read. 2KB: same adaptive delay, 2× throughput.
+                                        // Critical zone (DMA<4KB): 2KB+80ms = 25KB/s vs old 12.5KB/s
+                                        // → ~40s download instead of ~68s for 2MB firmware
 #define OTA_MAX_FIRMWARE_SIZE   (10 * 1024 * 1024)  // 10MB max firmware
 #define OTA_DOWNLOAD_TIMEOUT_MS 300000  // 5 minutes max for entire download
 #define OTA_STALL_TIMEOUT_MS    30000   // 30 seconds max with no data received
@@ -113,18 +130,26 @@
 #define OTA_DMA_CRITICAL        4096    // DMA critical threshold (80ms delay)
 #define OTA_DMA_LOW             8192    // DMA low threshold (30ms delay)
 #define OTA_BASE_DELAY_MS       15      // Base per-chunk delay (~65KB/s, ~25s for 1.5MB)
-#define OTA_TLS_MAX_RETRIES     3             // Auto-retry TLS connection on low post-TLS DMA
-#define OTA_TLS_RETRY_DELAY_MS  5000          // Wait between TLS retry attempts (ms per attempt)
-#define OTA_MIN_DMA_AFTER_TLS   (15 * 1024)  // Minimum free DMA needed after TLS handshake
-                                              // TLS uses ~115KB; if <15KB left, SDIO RX pool
-                                              // exhausts mid-download → sdio_push_data_to_queue crash
-                                              // Fresh boot has ~45KB+ after TLS; long-running has ~8KB
-#define OTA_TARGET_FREE_DMA     (130 * 1024)  // Need 130KB free before OTA TLS (115KB TLS + 15KB SDIO min)
-                                              // Fresh boot: ~160KB → OTA works; running state: ~122KB → abort
+#define OTA_TLS_MAX_RETRIES     3             // Retry full connect+download on connection failure
+#define OTA_TLS_RETRY_DELAY_MS  5000          // Wait between retry attempts (ms per attempt)
+#define OTA_MIN_DMA_AFTER_TLS   (8 * 1024)   // Min total free DMA after TLS GET completes.
+                                              // < 8KB → SDIO RX pool starved → assert crash.
+                                              // Normal full handshake leaves ~17-21KB (safe).
+                                              // heap_caps_get_largest_free_block(MALLOC_CAP_DMA)
+                                              // always returns 0 on ESP32-P4, so total only.
+#define OTA_TARGET_FREE_DMA     (88 * 1024)  // Min free DMA before attempting the OTA TLS handshake.
+                                              // Lowered 112→88KB: mainAppTask moved to internal SRAM (not PSRAM)
+                                              // reduces available DMA from ~113KB to ~105KB on new platform
+                                              // (55.03.37 / ESP-IDF v5.5.2). 88KB lets OTA proceed to TLS.
+                                              // The post-TLS check (OTA_MIN_DMA_AFTER_TLS=8KB) is the real
+                                              // SDIO safety gate. Watch "[OTA] Post-TLS DMA" log to tune.
 #define OTA_HTTPS_COOLDOWN_MS   2000    // Wait for previous HTTPS cleanup
 #define OTA_CHECK_DEBOUNCE_MS   5000    // Min delay between update checks
 #define OTA_CHECK_TIMEOUT_MS    15000   // HTTP timeout for version check
 #define OTA_CHECK_CLEANUP_MS    500     // Delay after version check TLS cleanup
+#define OTA_DMA_POLL_MS         15000   // Max wait for TIME_WAIT sockets to expire
+                                        // lwIP TIME_WAIT = 2×MSL ≈ 12s; 15s gives 3s margin
+#define OTA_DMA_PLATEAU_COUNT   3       // Consecutive seconds with no DMA growth → reboot early
 
 // =============================================================================
 // MBEDTLS / SSL
@@ -173,6 +198,10 @@
 #define CLOCK_DEFAULT_REFRESH    10   // Refresh background every 10 minutes
 #define CLOCK_DEFAULT_KW_IDX     0    // Index 0 = Random (no keyword)
 #define CLOCK_DEFAULT_12H        0    // 0 = 24h, 1 = 12h
+#define CLOCK_DEFAULT_WEATHER_EN   1  // Weather widget enabled by default
+#define CLOCK_DEFAULT_WEATHER_CITY 0  // 0 = Auto-detect from IP
+#define CLOCK_WX_REFRESH_MIN      15  // Re-fetch weather every 15 min (independent of photo rate)
+#define CLOCK_DEFAULT_WEATHER_FAHR 0  // 0 = Celsius, 1 = Fahrenheit
 
 #define CLOCK_BG_MAX_DL_SIZE  (512 * 1024)  // Max background JPEG download buffer (512KB; Flickr baseline ~100-250KB)
 #define CLOCK_BG_WIDTH        800           // Clock background pixel width
@@ -188,6 +217,9 @@
 #define NVS_KEY_CLOCK_REFRESH   "clk_refresh"
 #define NVS_KEY_CLOCK_KW        "clk_kw"
 #define NVS_KEY_CLOCK_12H       "clk_12h"
+#define NVS_KEY_CLOCK_WEATHER_EN   "clk_wx_en"
+#define NVS_KEY_CLOCK_WEATHER_CITY "clk_wx_city"
+#define NVS_KEY_CLOCK_WEATHER_FAHR "clk_wx_fahr"
 
 // =============================================================================
 // QUEUE / PLAYLIST

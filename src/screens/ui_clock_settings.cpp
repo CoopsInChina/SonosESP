@@ -267,4 +267,68 @@ void createClockSettingsScreen() {
                       CLOCK_ZONES[clock_tz_idx].name,
                       CLOCK_ZONES[clock_tz_idx].posix);
     }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // ── Weather widget ───────────────────────────────────────────────────────
+    addSectionLabel(content, "Weather widget:");
+    addDescLabel(content, "Show temperature, humidity, wind, and 6-hour forecast (Open-Meteo, no API key needed)");
+
+    lv_obj_t* sw_weather = addSwitch(content, clock_weather_enabled);
+    lv_obj_add_event_cb(sw_weather, [](lv_event_t* e) {
+        lv_obj_t* sw = (lv_obj_t*)lv_event_get_target(e);
+        clock_weather_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+        wifiPrefs.putBool(NVS_KEY_CLOCK_WEATHER_EN, clock_weather_enabled);
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // ── Weather city ─────────────────────────────────────────────────────────
+    addSectionLabel(content, "Weather location:");
+    addDescLabel(content, "Auto-detect uses your public IP to find your location");
+
+    // Build newline-separated city list for the dropdown
+    // ~65 cities × ~25 chars avg (incl. "Region/City" prefix) = ~1625 bytes; 2048 is generous
+    static char city_opts[2048];
+    city_opts[0] = '\0';
+    for (int i = 0; i < CLOCK_CITY_COUNT; i++) {
+        strncat(city_opts, CLOCK_CITIES[i].label, sizeof(city_opts) - strlen(city_opts) - 2);
+        if (i < CLOCK_CITY_COUNT - 1)
+            strncat(city_opts, "\n", sizeof(city_opts) - strlen(city_opts) - 1);
+    }
+
+    lv_obj_t* dd_city = lv_dropdown_create(content);
+    lv_dropdown_set_options(dd_city, city_opts);
+    lv_dropdown_set_selected(dd_city, (uint16_t)clock_weather_city_idx);
+    lv_obj_set_width(dd_city, lv_pct(100));
+    lv_obj_set_style_bg_color(dd_city, COL_CARD, 0);
+    lv_obj_set_style_text_color(dd_city, COL_TEXT, 0);
+    lv_obj_set_style_text_font(dd_city, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_border_color(dd_city, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_pad_top(dd_city, 6, 0);
+    lv_obj_set_style_pad_bottom(dd_city, 12, 0);
+    lv_dropdown_set_dir(dd_city, LV_DIR_TOP);
+    {
+        lv_obj_t* list = lv_dropdown_get_list(dd_city);
+        if (list) {
+            lv_obj_set_height(list, 260);
+            lv_obj_set_style_bg_color(list, lv_color_hex(0x222222), 0);
+            lv_obj_set_style_text_color(list, COL_TEXT, 0);
+            lv_obj_set_style_text_font(list, &lv_font_montserrat_14, 0);
+        }
+    }
+    lv_obj_add_event_cb(dd_city, [](lv_event_t* e) {
+        lv_obj_t* dd = (lv_obj_t*)lv_event_get_target(e);
+        clock_weather_city_idx = (int)lv_dropdown_get_selected(dd);
+        wifiPrefs.putInt(NVS_KEY_CLOCK_WEATHER_CITY, clock_weather_city_idx);
+        clock_wx_valid = false;  // Trigger fresh fetch for new city
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // ── Temperature unit ─────────────────────────────────────────────────────
+    addSectionLabel(content, "Temperature unit:");
+    addDescLabel(content, "Fahrenheit (°F)    default is Celsius");
+
+    lv_obj_t* sw_fahr = addSwitch(content, clock_wx_fahrenheit);
+    lv_obj_add_event_cb(sw_fahr, [](lv_event_t* e) {
+        lv_obj_t* sw = (lv_obj_t*)lv_event_get_target(e);
+        clock_wx_fahrenheit = lv_obj_has_state(sw, LV_STATE_CHECKED);
+        wifiPrefs.putBool(NVS_KEY_CLOCK_WEATHER_FAHR, clock_wx_fahrenheit);
+        clock_weather_needs_refetch = true;  // Re-fetch with correct temperature_unit
+    }, LV_EVENT_VALUE_CHANGED, NULL);
 }

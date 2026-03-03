@@ -6,6 +6,7 @@
 #include "ui_common.h"
 #include "config.h"
 #include "lyrics.h"
+#include "clock_screen.h"
 #include <esp_task_wdt.h>
 
 // ============================================================================
@@ -106,6 +107,10 @@ void ev_mute(lv_event_t* e) {
 }
 
 void ev_queue_item(lv_event_t* e) {
+    static uint32_t last_click_ms = 0;
+    uint32_t now = millis();
+    if (now - last_click_ms < 1500) return;  // debounce: ignore rapid repeat taps
+    last_click_ms = now;
     int trackNum = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
     sonos.playQueueItem(trackNum);
     lv_screen_load(scr_main);
@@ -119,7 +124,9 @@ void ev_devices(lv_event_t* e) {
 }
 
 void ev_queue(lv_event_t* e) {
-    sonos.updateQueue();
+    // Use cached queue data — background poll updates dev->queue[] every 30s.
+    // Calling updateQueue() here fires a large SOAP response immediately before
+    // the user selects a track (art download) → SDIO RX pool exhausted → crash.
     refreshQueueList();
     lv_screen_load(scr_queue);
 }
@@ -429,10 +436,6 @@ static void checkForUpdates() {
         return;
     }
 
-    http.begin(client, apiUrl);
-    http.addHeader("Accept", "application/vnd.github.v3+json");
-    http.setTimeout(OTA_CHECK_TIMEOUT_MS);
-
     // CRITICAL: Wait for general SDIO cooldown (200ms since last network op)
     now = millis();
     unsigned long elapsed = now - last_network_end_ms;
@@ -441,26 +444,42 @@ static void checkForUpdates() {
     }
 
     // CRITICAL: Wait for HTTPS-specific cooldown (2000ms since last HTTPS)
-    // Increased from 500ms → 1000ms → 1500ms → 2000ms to prevent SDIO buffer exhaustion
     now = millis();
     elapsed = now - last_https_end_ms;
     if (last_https_end_ms > 0 && elapsed < OTA_HTTPS_COOLDOWN_MS) {
         vTaskDelay(pdMS_TO_TICKS(OTA_HTTPS_COOLDOWN_MS - elapsed));
     }
 
-    int httpCode = http.GET();
-
-    // Read response WHILE holding mutex to prevent TLS traffic overlap
+    int httpCode = -1;
     String payload = "";
-    if (httpCode == 200) {
-        payload = http.getString();
-    }
 
-    // CRITICAL: End HTTP and close TLS BEFORE releasing mutex
-    http.end();
-    client.stop();
-    // Wait for TLS cleanup to complete before releasing mutex
-    vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_CLEANUP_MS));
+    // Retry once on connection failure — TLS to api.github.com needs ~114KB DMA;
+    // a brief wait lets previous sessions fully release their DMA buffers.
+    for (int attempt = 1; attempt <= 2 && httpCode < 0; attempt++) {
+        if (attempt > 1) {
+            Serial.printf("[OTA] Retry (attempt %d) — free DMA: %d bytes\n",
+                          attempt, heap_caps_get_free_size(MALLOC_CAP_DMA));
+            vTaskDelay(pdMS_TO_TICKS(3000));
+        } else {
+            Serial.printf("[OTA] Free DMA before check: %d bytes\n",
+                          heap_caps_get_free_size(MALLOC_CAP_DMA));
+        }
+
+        http.begin(client, apiUrl);
+        http.addHeader("Accept", "application/vnd.github.v3+json");
+        http.addHeader("User-Agent", "SonosESP/" FIRMWARE_VERSION);
+        http.setTimeout(OTA_CHECK_TIMEOUT_MS);
+
+        httpCode = http.GET();
+
+        if (httpCode == 200) {
+            payload = http.getString();
+        }
+
+        http.end();
+        client.stop();
+        vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_CLEANUP_MS));
+    }
 
     // Update timestamps before releasing mutex
     last_network_end_ms = millis();
@@ -661,18 +680,20 @@ static void otaRecovery() {
     // Resume Sonos background tasks
     sonos.resumeTasks();
 
-    // ALWAYS clear all shutdown/abort flags before restarting tasks.
-    // These must be cleared unconditionally - NOT inside the albumArtTaskHandle
-    // check below - because tasks can't start cleanly if flags are still set.
-    art_shutdown_requested    = false;
-    art_abort_download        = false;
-    lyrics_shutdown_requested = false;
-    lyrics_abort_requested    = false;
+    // ALWAYS clear ALL shutdown/abort flags before restarting tasks.
+    // These must be cleared unconditionally — tasks can't start cleanly if any
+    // flag is still set. Add any new task's flags here when adding new features.
+    art_shutdown_requested         = false;
+    art_abort_download             = false;
+    lyrics_shutdown_requested      = false;
+    lyrics_abort_requested         = false;
+    clock_bg_shutdown_requested    = false;
+    sonos_tasks_shutdown_requested = false;  // resumeTasks() also resets this, belt-and-suspenders
 
     // Restart album art task if it isn't already running
     if (albumArtTaskHandle == NULL) {
         Serial.println("[OTA] Restarting album art task");
-        xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
+        createArtTask();  // PSRAM stack — frees 20KB internal SRAM for SDIO/WiFi DMA
     }
 
     Serial.println("[OTA] === Recovery complete ===");
@@ -733,111 +754,161 @@ static void performOTAUpdate() {
     lv_tick_inc(10);
     lv_refr_now(NULL);
 
-    // Signal ALL tasks to stop FIRST, then wait
-    art_abort_download = true;
-    art_shutdown_requested = true;
-    lyrics_shutdown_requested = true;
-    lyrics_abort_requested = true;
+    // Signal ALL tasks to stop SIMULTANEOUSLY — do this before any waiting
+    // so all tasks start their shutdown paths in parallel at t=0.
+    art_abort_download            = true;
+    art_shutdown_requested        = true;
+    lyrics_shutdown_requested     = true;
+    lyrics_abort_requested        = true;
+    clock_bg_shutdown_requested   = true;
+    sonos_tasks_shutdown_requested = true;  // Sonos exits within its 2s SOAP timeout
 
-    // Stop album art task and WAIT for it to finish
-    if (albumArtTaskHandle) {
-        Serial.println("[OTA] Waiting for album art task to exit...");
-        int wait_count = 0;
-        while (albumArtTaskHandle != NULL && wait_count < 100) {  // 10s max
+    // ─── PARALLEL TASK SHUTDOWN ──────────────────────────────────────────────
+    // All tasks received their shutdown signals simultaneously above.
+    // We wait for ALL of them in ONE combined loop — the total wait is bounded
+    // by the SLOWEST task, not the sum of all tasks.
+    //
+    // Worst-case exit times after signal:
+    //   Art:     < 1 s   — checks art_abort_download every 5–15 ms
+    //   Lyrics: ≤ 10 s   — HTTPClient.GET() blocks until response or timeout
+    //   ClockBg: < 0.5 s — 500 ms polling loop; shutdown flag checked every tick
+    // → 12 s covers all tasks running simultaneously (not sequentially).
+    //
+    // CRITICAL: Force-deleting a task that holds an active TLS session leaks
+    // its mbedTLS DMA (~40 KB per session). WiFi.disconnect() clears TCP
+    // TIME_WAIT sockets but CANNOT reclaim mbedTLS DMA — those buffers are only
+    // freed by secure_client.stop(). Always prefer clean exit over force-kill.
+    // If a future task is added that does HTTPS, add its handle to this loop.
+    {
+        const uint32_t SHUTDOWN_BUDGET_MS = 12000;
+        uint32_t shutdown_start = millis();
+        Serial.println("[OTA] Waiting for all tasks to exit (parallel)...");
+
+        while (millis() - shutdown_start < SHUTDOWN_BUDGET_MS) {
+            if (albumArtTaskHandle == nullptr &&
+                lyricsTaskHandle   == nullptr &&
+                clockBgTaskHandle  == nullptr) break;
             vTaskDelay(pdMS_TO_TICKS(100));
-            esp_task_wdt_reset();  // 100ms * 100 = 10s total; feed WDT each iteration
-            wait_count++;
+            esp_task_wdt_reset();
         }
 
-        if (albumArtTaskHandle == NULL) {
-            Serial.println("[OTA] Album art task exited cleanly");
-            vTaskDelay(pdMS_TO_TICKS(500));  // Let DMA cleanup complete
-        } else {
-            Serial.println("[OTA] WARNING: Force-killing album art task (may leak DMA)");
+        // Force-delete any stragglers that did not exit in time.
+        // A force-killed task that owned a TLS session leaks DMA; the DMA
+        // polling step below will detect this and wait for it to recover.
+        bool force_killed = false;
+        if (albumArtTaskHandle) {
+            Serial.println("[OTA] WARNING: Force-killing art task (possible DMA leak)");
             vTaskDelete(albumArtTaskHandle);
-            albumArtTaskHandle = NULL;
-            vTaskDelay(pdMS_TO_TICKS(1000));  // Extra time for orphaned DMA cleanup
+            albumArtTaskHandle = nullptr;
+            force_killed = true;
         }
-        Serial.printf("[OTA] After art cleanup - Free DMA: %d bytes\n",
-            heap_caps_get_free_size(MALLOC_CAP_DMA));
-    }
-
-    // Stop lyrics task (now uses its own lyrics_shutdown_requested flag)
-    if (lyricsTaskHandle != NULL) {
-        Serial.println("[OTA] Waiting for lyrics task to exit...");
-        int wait_count = 0;
-        while (lyricsTaskHandle != NULL && wait_count < 50) {  // 5s max
-            vTaskDelay(pdMS_TO_TICKS(100));
-            esp_task_wdt_reset();  // 100ms * 50 = 5s total; feed WDT each iteration
-            wait_count++;
-        }
-
-        if (lyricsTaskHandle == NULL) {
-            Serial.println("[OTA] Lyrics task exited cleanly");
-            vTaskDelay(pdMS_TO_TICKS(500));  // Let DMA cleanup complete
-        } else {
-            Serial.println("[OTA] WARNING: Force-killing lyrics task (may leak DMA)");
+        if (lyricsTaskHandle) {
+            Serial.println("[OTA] WARNING: Force-killing lyrics task (possible DMA leak)");
             vTaskDelete(lyricsTaskHandle);
-            lyricsTaskHandle = NULL;
-            vTaskDelay(pdMS_TO_TICKS(1000));
+            lyricsTaskHandle = nullptr;
+            force_killed = true;
         }
-        Serial.printf("[OTA] After lyrics cleanup - Free DMA: %d bytes\n",
-            heap_caps_get_free_size(MALLOC_CAP_DMA));
+        if (clockBgTaskHandle) {
+            Serial.println("[OTA] WARNING: Force-killing clock bg task (possible DMA leak)");
+            vTaskDelete(clockBgTaskHandle);
+            clockBgTaskHandle = nullptr;
+            force_killed = true;
+        }
+        if (force_killed) {
+            // Let FreeRTOS idle task reclaim TCB memory and allow any pending
+            // SDIO DMA descriptor to flush before we proceed.
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_task_wdt_reset();
+        }
+        Serial.printf("[OTA] Task shutdown in %lums — DMA: %d bytes\n",
+                      (unsigned long)(millis() - shutdown_start),
+                      heap_caps_get_free_size(MALLOC_CAP_DMA));
     }
 
-    // ================================================================
-    // NETWORK MUTEX SYNC: Guarantee all HTTP/HTTPS DMA is freed
-    // ================================================================
-    // CRITICAL: Do this BEFORE suspending Sonos. Sonos SOAP requests also hold
-    // network_mutex. If Sonos is suspended mid-SOAP while holding the mutex, the
-    // sync below would deadlock (3s timeout, then proceed with half-open TCP).
-    // By syncing first, we wait for any in-progress SOAP to release the mutex,
-    // THEN suspend Sonos safely.
-    Serial.println("[OTA] Waiting for network DMA sync...");
-    if (xSemaphoreTake(network_mutex, pdMS_TO_TICKS(3000))) {
-        xSemaphoreGive(network_mutex);
-        Serial.println("[OTA] Network DMA sync complete");
-    } else {
-        Serial.println("[OTA] WARNING: Network mutex timeout - DMA may not be fully freed");
-    }
-
-    // Suspend Sonos tasks (AFTER mutex sync - guaranteed not holding network_mutex)
+    // Sonos tasks: signaled at t=0 alongside the others and have had the full
+    // 12 s to exit cleanly (Sonos SOAP timeout is 2 s, so this is usually instant).
     Serial.println("[OTA] Suspending Sonos tasks...");
     sonos.suspendTasks();
 
-    // Set OTA-in-progress flag
+    // ─── NETWORK MUTEX RECREATION ────────────────────────────────────────────
+    // A force-deleted task may have held network_mutex, leaving it permanently
+    // poisoned — no owner remains to give it back, so xSemaphoreTake() would
+    // block until its 3 s timeout then silently continue with broken state.
+    // Solution: delete and recreate the mutex unconditionally after all tasks
+    // are dead. This is always safe here because:
+    //   • every user task is now dead or suspended,
+    //   • ota_in_progress (set below) suppresses network ops in loop().
+    // Post-OTA recovery restarts tasks with the new, clean mutex handle.
+    if (network_mutex) {
+        vSemaphoreDelete(network_mutex);
+        network_mutex = xSemaphoreCreateMutex();
+        Serial.println("[OTA] Network mutex recreated (clean state)");
+    }
+
+    // Set OTA-in-progress flag (suppresses UI updates and non-OTA network ops)
     if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
         ota_in_progress = true;
         xSemaphoreGive(ota_progress_mutex);
     }
 
     // ================================================================
-    // PHASE 4: FLUSH WIFI AND VERIFY DMA CLEANUP
+    // PHASE 4: CLEAR NETWORK STATE AND VERIFY DMA
     // ================================================================
-    if (lbl_ota_status) {
-        lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Freeing memory for download...");
-    }
-    lv_tick_inc(10);
-    lv_refr_now(NULL);
-
-    // Force WiFi to flush pending operations (releases DMA buffers)
-    // 1500ms settle: TCP sockets need time to fully close after RST (lwIP TIME_WAIT drain)
-    Serial.println("[OTA] Flushing WiFi buffers...");
-    WiFi.setSleep(true);
-    vTaskDelay(pdMS_TO_TICKS(1500));
-    esp_task_wdt_reset();
-    WiFi.setSleep(false);
-
-    // Check DMA is sufficient for TLS handshake + SDIO minimum.
-    // DMA after task cleanup is stable — waiting never helps. Abort immediately if insufficient.
-    // Fresh boot has ~160KB free (OTA works). Running state has ~122KB (TLS needs 130KB → reboot first).
+    // DMA may be low because recent HTTPS sessions (OTA check, lyrics, weather)
+    // leave their TCP sockets in TIME_WAIT for ~12s (lwIP: 2×MSL = 2×6s).
+    // Each TIME_WAIT socket holds ~5-6KB DMA. With 3 sessions: ~15KB held.
+    // Wait up to OTA_DMA_POLL_MS (15s) for them to expire naturally — no WiFi
+    // disruption needed. WiFi.disconnect/reconnect is NEVER done here: it
+    // destabilises the ESP32-C6 SDIO transport driver and causes download crashes.
+    //
+    // Only reboot if DMA is STILL insufficient after 15s. That would indicate an
+    // mbedTLS DMA leak from a force-killed task — extremely rare with clean shutdown.
     uint32_t free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
-    Serial.printf("[OTA] Pre-TLS DMA check: %d bytes free (need %d)\n", free_dma, OTA_TARGET_FREE_DMA);
+    Serial.printf("[OTA] DMA after task cleanup: %d bytes (need %d)\n", free_dma, OTA_TARGET_FREE_DMA);
 
     if (free_dma < OTA_TARGET_FREE_DMA) {
-        Serial.printf("[OTA] Low DMA (%d bytes, need %d) - saving pending flag and rebooting\n",
+        // TIME_WAIT sockets are still alive — poll until they expire (up to 15s).
+        // Exit early if DMA plateaus for 3 consecutive seconds (no more recovery
+        // possible — mbedTLS state is permanent until full restart).
+        Serial.println("[OTA] Waiting for TIME_WAIT sockets to expire...");
+        uint32_t poll_start = millis();
+        size_t prev_dma = 0;
+        int plateau_count = 0;
+        while (millis() - poll_start < OTA_DMA_POLL_MS) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_task_wdt_reset();
+            free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
+            uint32_t elapsed = (millis() - poll_start) / 1000;
+            Serial.printf("[OTA] DMA: %d bytes (need %d) — %lus elapsed\n",
+                free_dma, OTA_TARGET_FREE_DMA, (unsigned long)elapsed);
+            if (lbl_ota_status) {
+                lv_label_set_text_fmt(lbl_ota_status,
+                    LV_SYMBOL_REFRESH " Freeing memory... (%d/%d KB)",
+                    (int)(free_dma / 1024), (int)(OTA_TARGET_FREE_DMA / 1024));
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xAAAAAA), 0);
+            }
+            lv_tick_inc(1000);
+            lv_refr_now(NULL);
+            if (free_dma >= OTA_TARGET_FREE_DMA) break;
+            // Plateau detection: if DMA hasn't changed in 3s, reboot now
+            if (free_dma == prev_dma) {
+                if (++plateau_count >= OTA_DMA_PLATEAU_COUNT) {
+                    Serial.printf("[OTA] DMA plateaued at %d bytes — restarting early\n", free_dma);
+                    break;
+                }
+            } else {
+                plateau_count = 0;
+            }
+            prev_dma = free_dma;
+        }
+    }
+
+    if (free_dma < OTA_TARGET_FREE_DMA) {
+        // Still insufficient after 15s — likely an mbedTLS DMA leak from a
+        // force-killed task. Only a full restart can reclaim it.
+        // Save URL to NVS; auto-trigger on next boot skips checkForUpdates() HTTPS.
+        Serial.printf("[OTA] DMA still insufficient (%d / %d) — restarting\n",
             free_dma, OTA_TARGET_FREE_DMA);
-        // Save flag + URL: auto-trigger on reboot skips checkForUpdates() (no HTTPS = more DMA for TLS)
         Preferences prefs;
         prefs.begin(NVS_NAMESPACE, false);
         prefs.putBool(NVS_KEY_OTA_PENDING, true);
@@ -850,22 +921,25 @@ static void performOTAUpdate() {
         lv_tick_inc(10);
         lv_refr_now(NULL);
         vTaskDelay(pdMS_TO_TICKS(2000));
-        display_set_brightness(0);  // Black screen before reboot (panel default is blue)
+        display_set_brightness(0);
         vTaskDelay(pdMS_TO_TICKS(100));
         ESP.restart();
         return;  // unreachable
     }
 
-    // Optimize WiFi for OTA download
+    // WiFi already connected; disable auto-reconnect and power-save for download
     WiFi.setAutoReconnect(false);
     WiFi.setSleep(false);
 
     // ================================================================
-    // PHASE 5: CONNECT AND DOWNLOAD (auto-retry on low post-TLS DMA)
+    // PHASE 5+6: CONNECT AND DOWNLOAD (retry on connection failure)
     // ================================================================
-    // TLS handshake DMA usage is variable. If <15KB remains after handshake,
-    // SDIO pool exhausts mid-download. Close connection, wait for DMA to free,
-    // retry (up to OTA_TLS_MAX_RETRIES). Only full-recover if all retries fail.
+    // TLS handshake allocates ~71KB DMA (mbedTLS context + certificate chain +
+    // crypto operation buffers). These remain allocated for the entire download
+    // — TLS must stay active to decrypt the incoming firmware stream.
+    // Called from setup() boot OTA path: ~125KB pre-TLS → ~54KB post-TLS (safe).
+    // The retry loop retries on connection-level failures (stream drops,
+    // 0 bytes received). Stall and timeout are fatal — do not retry.
     if (lbl_ota_status) {
         lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Connecting to server...");
     }
@@ -878,21 +952,23 @@ static void performOTAUpdate() {
 
     WiFiClientSecure* clientPtr = nullptr;
     HTTPClient* httpPtr = nullptr;
-    int httpCode = -1;
     int contentLength = 0;
+    size_t written = 0;
+    uint32_t download_start = 0;
+    static uint8_t buff[OTA_BUFFER_SIZE];
 
     for (int attempt = 1; attempt <= OTA_TLS_MAX_RETRIES; attempt++) {
+        written = 0;
+
         if (attempt > 1) {
             uint32_t wait_sec = (uint32_t)(attempt - 1) * (OTA_TLS_RETRY_DELAY_MS / 1000);
-            Serial.printf("[OTA] Post-TLS DMA insufficient - waiting %lus before retry %d/%d\n",
+            Serial.printf("[OTA] Connection failed - waiting %lus before retry %d/%d\n",
                 (unsigned long)wait_sec, attempt, OTA_TLS_MAX_RETRIES);
 
-            // Live countdown: updates UI each second and feeds the watchdog.
-            // A single vTaskDelay(10s) would freeze the display and risk WDT timeout.
             for (uint32_t s = wait_sec; s > 0; s--) {
                 if (lbl_ota_status) {
                     lv_label_set_text_fmt(lbl_ota_status,
-                        LV_SYMBOL_REFRESH " Low memory, retrying in %lus... (%d/%d)",
+                        LV_SYMBOL_REFRESH " Retrying in %lus... (%d/%d)",
                         (unsigned long)s, attempt, OTA_TLS_MAX_RETRIES);
                     lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFA500), 0);
                 }
@@ -911,22 +987,36 @@ static void performOTAUpdate() {
             lv_refr_now(NULL);
         }
 
+        // --- CONNECT ---
         clientPtr = new WiFiClientSecure();
         clientPtr->setInsecure();
         httpPtr = new HTTPClient();
 
         Serial.println("[OTA] ========================================");
-        Serial.printf("[OTA] STARTING OTA DOWNLOAD (attempt %d/%d)\n", attempt, OTA_TLS_MAX_RETRIES);
+        Serial.printf("[OTA] DOWNLOAD ATTEMPT %d/%d\n", attempt, OTA_TLS_MAX_RETRIES);
         Serial.printf("[OTA] Free DMA: %d bytes | Free heap: %d bytes\n",
             heap_caps_get_free_size(MALLOC_CAP_DMA), ESP.getFreeHeap());
         Serial.println("[OTA] ========================================");
+
+        // Update UI BEFORE GET() — lv_refr_now() after GET() causes a ~50ms delay during
+        // which lwIP buffers 40–50 KB of firmware into DMA-backed TCP receive buffers,
+        // consuming DMA needed for AES encryption and the SDIO RX pool (→ AES failure /
+        // sdio_push_data_to_queue assert crash). Rendering before TLS connect is safe:
+        // no firmware is flowing yet so no unexpected lwIP DMA consumption occurs.
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Downloading firmware...");
+            lv_obj_set_style_text_color(lbl_ota_status, COL_ACCENT, 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
 
         httpPtr->begin(*clientPtr, download_url);
         httpPtr->setTimeout(60000);
         httpPtr->setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
 
-        httpCode = httpPtr->GET();
-        Serial.printf("[OTA] HTTP %d - Free DMA: %d bytes\n", httpCode, heap_caps_get_free_size(MALLOC_CAP_DMA));
+        int httpCode = httpPtr->GET();
+        size_t post_tls_total = heap_caps_get_free_size(MALLOC_CAP_DMA);
+        Serial.printf("[OTA] HTTP %d - Post-TLS DMA: %d bytes\n", httpCode, post_tls_total);
 
         if (httpCode != 200) {
             if (lbl_ota_status) {
@@ -954,199 +1044,221 @@ static void performOTAUpdate() {
             return;
         }
 
-        Serial.printf("[OTA] Firmware size: %d bytes (%.1f KB)\n", contentLength, contentLength / 1024.0);
+        Serial.printf("[OTA] Firmware: %d bytes (%.1f KB)\n", contentLength, contentLength / 1024.0);
 
-        // Check DMA immediately after TLS (before stream data fills buffers)
-        size_t dma_after_tls = heap_caps_get_free_size(MALLOC_CAP_DMA);
-        Serial.printf("[OTA] Post-TLS DMA: %d bytes (need %d)\n", dma_after_tls, OTA_MIN_DMA_AFTER_TLS);
-
-        if (dma_after_tls < OTA_MIN_DMA_AFTER_TLS) {
-            // Close this connection - DMA will be freed, then retry
+        // Post-TLS DMA check: if total free DMA is below the threshold, SDIO RX buffers
+        // will be starved during download causing an assert crash. Retry the full TLS
+        // handshake — the previous session's DMA will be returned to the pool first.
+        // Note: heap_caps_get_largest_free_block(MALLOC_CAP_DMA) always returns 0 on
+        // ESP32-P4 (DMA heap is managed outside the standard allocator), so we check
+        // total free only. If TLS session resumption leaves a fragmented heap and causes
+        // an mbedTLS AES failure downstream, the natural retry (written=0 → continue)
+        // will start a fresh full handshake from clean ~126KB DMA state.
+        if (post_tls_total < OTA_MIN_DMA_AFTER_TLS) {
+            Serial.printf("[OTA] Post-TLS DMA too low (%d bytes, need %d) — retrying\n",
+                post_tls_total, OTA_MIN_DMA_AFTER_TLS);
+            if (lbl_ota_status) {
+                lv_label_set_text_fmt(lbl_ota_status,
+                    LV_SYMBOL_REFRESH " Low memory after TLS (%d KB) - retrying...",
+                    post_tls_total / 1024);
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFA500), 0);
+            }
+            lv_tick_inc(10);
+            lv_refr_now(NULL);
             httpPtr->end(); clientPtr->stop();
             delete httpPtr; delete clientPtr;
             httpPtr = nullptr; clientPtr = nullptr;
+            continue;  // Retry — do not call otaRecovery()
+        }
 
-            if (attempt == OTA_TLS_MAX_RETRIES) {
-                Serial.printf("[OTA] All %d attempts failed - DMA too low after TLS\n", OTA_TLS_MAX_RETRIES);
+        // --- DOWNLOAD ---
+        // Update.begin() is deferred (lazy) — called only on first received byte.
+        // This avoids allocating the DMA-backed flash write buffer (~11KB) before we
+        // know data actually flows; an early connection drop would otherwise leak that
+        // allocation across retry attempts, starving DMA for the next TLS handshake.
+        WiFiClient* stream = httpPtr->getStreamPtr();
+        int lastPercent = -1;
+        uint32_t lastUIUpdate = millis();
+        int chunk_count = 0;
+        download_start = millis();
+        uint32_t last_data_time = millis();
+        bool fatal_abort = false;
+        bool update_begun = false;
+
+        Serial.printf("[OTA] Downloading... DMA: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
+
+        while (httpPtr->connected() && (written < (size_t)contentLength)) {
+            if ((millis() - last_data_time) > OTA_STALL_TIMEOUT_MS) {
+                Serial.printf("[OTA] STALL: No data for %ds at %d%% - aborting\n",
+                    OTA_STALL_TIMEOUT_MS / 1000, (int)(written * 100 / contentLength));
                 if (lbl_ota_status) {
-                    lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Low memory - restart device and try again");
+                    lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download stalled - network timeout");
                     lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
                 }
                 lv_tick_inc(10);
                 lv_refr_now(NULL);
-                otaRecovery();
-                return;
+                fatal_abort = true;
+                break;
             }
-            continue;  // retry with delay at top of loop
-        }
 
-        break;  // DMA OK - proceed to download
-    }
-
-    if (!Update.begin(contentLength)) {
-        if (lbl_ota_status) {
-            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Not enough space for OTA");
-            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
-        }
-        httpPtr->end(); clientPtr->stop();
-        delete httpPtr; delete clientPtr;
-        otaRecovery();
-        return;
-    }
-
-    // ================================================================
-    // PHASE 6: DOWNLOAD WITH ADAPTIVE THROTTLING
-    // ================================================================
-    if (lbl_ota_status) {
-        lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Downloading firmware...");
-    }
-    lv_tick_inc(10);
-    lv_refr_now(NULL);
-
-    WiFiClient* stream = httpPtr->getStreamPtr();
-    size_t written = 0;
-    int lastPercent = -1;
-    uint32_t lastUIUpdate = millis();
-    static uint8_t buff[OTA_BUFFER_SIZE];
-
-    Serial.printf("[OTA] Starting download - Free DMA: %d bytes\n",
-        heap_caps_get_free_size(MALLOC_CAP_DMA));
-
-    int chunk_count = 0;
-    uint32_t download_start = millis();
-    uint32_t last_data_time = millis();  // Track last time we received data (stall detection)
-
-    while (httpPtr->connected() && (written < (size_t)contentLength)) {
-        // STALL DETECTION: Abort if no data received for OTA_STALL_TIMEOUT_MS
-        if ((millis() - last_data_time) > OTA_STALL_TIMEOUT_MS) {
-            Serial.printf("[OTA] STALL DETECTED: No data for %dms at %d%% - aborting\n",
-                OTA_STALL_TIMEOUT_MS, (int)(written * 100 / contentLength));
-            if (lbl_ota_status) {
-                lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download stalled - network timeout");
-                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+            if ((millis() - download_start) > OTA_DOWNLOAD_TIMEOUT_MS) {
+                Serial.printf("[OTA] TIMEOUT: >%ds at %d%% - aborting\n",
+                    OTA_DOWNLOAD_TIMEOUT_MS / 1000, (int)(written * 100 / contentLength));
+                if (lbl_ota_status) {
+                    lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download timeout - try again");
+                    lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+                }
+                lv_tick_inc(10);
+                lv_refr_now(NULL);
+                fatal_abort = true;
+                break;
             }
-            lv_tick_inc(10);
-            lv_refr_now(NULL);
-            Update.abort();
-            httpPtr->end(); clientPtr->stop();
-            delete httpPtr; delete clientPtr;
-            otaRecovery();
-            return;
-        }
 
-        // OVERALL TIMEOUT: Abort if total download time exceeds limit
-        if ((millis() - download_start) > OTA_DOWNLOAD_TIMEOUT_MS) {
-            Serial.printf("[OTA] TIMEOUT: Download took >%ds at %d%% - aborting\n",
-                OTA_DOWNLOAD_TIMEOUT_MS / 1000, (int)(written * 100 / contentLength));
-            if (lbl_ota_status) {
-                lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download timeout - try again");
-                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
-            }
-            lv_tick_inc(10);
-            lv_refr_now(NULL);
-            Update.abort();
-            httpPtr->end(); clientPtr->stop();
-            delete httpPtr; delete clientPtr;
-            otaRecovery();
-            return;
-        }
+            size_t available = stream->available();
+            if (available) {
+                last_data_time = millis();
 
-        size_t available = stream->available();
-        if (available) {
-            last_data_time = millis();  // Reset stall timer on data
+                // Lazy Update.begin() — only allocate the DMA-backed flash write buffer
+                // once actual data starts flowing. This prevents ~11KB DMA leaks when the
+                // connection drops before any bytes arrive (e.g. AES failure path).
+                if (!update_begun) {
+                    if (!Update.begin(contentLength)) {
+                        Serial.println("[OTA] Update.begin() failed — not enough flash space");
+                        if (lbl_ota_status) {
+                            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Not enough space for OTA");
+                            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+                        }
+                        lv_tick_inc(10);
+                        lv_refr_now(NULL);
+                        fatal_abort = true;
+                        break;
+                    }
+                    update_begun = true;
+                    Serial.printf("[OTA] Update.begin() OK — DMA: %d bytes\n",
+                        heap_caps_get_free_size(MALLOC_CAP_DMA));
+                }
 
-            // Limit read size to reduce SDIO burst pressure (config-driven)
-            size_t toRead = (available < OTA_READ_SIZE) ? available : OTA_READ_SIZE;
-            if (toRead > sizeof(buff)) toRead = sizeof(buff);
-            int bytesRead = stream->readBytes(buff, toRead);
-            written += Update.write(buff, bytesRead);
+                size_t toRead = (available < OTA_READ_SIZE) ? available : OTA_READ_SIZE;
+                if (toRead > sizeof(buff)) toRead = sizeof(buff);
+                int bytesRead = stream->readBytes(buff, toRead);
+                written += Update.write(buff, bytesRead);
 
-            // Adaptive throttling: fast base delay, slows only when DMA is under pressure
-            chunk_count++;
-            if (chunk_count % OTA_DMA_CHECK_INTERVAL == 0) {
-                size_t cur_free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
-                if (cur_free_dma < OTA_DMA_CRITICAL) {
-                    vTaskDelay(pdMS_TO_TICKS(80));   // DMA nearly exhausted - back off
-                } else if (cur_free_dma < OTA_DMA_LOW) {
-                    vTaskDelay(pdMS_TO_TICKS(30));   // DMA low - moderate throttle
+                chunk_count++;
+                if (chunk_count % OTA_DMA_CHECK_INTERVAL == 0) {
+                    size_t cur_free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
+                    if (cur_free_dma < OTA_DMA_CRITICAL) {
+                        vTaskDelay(pdMS_TO_TICKS(80));
+                    } else if (cur_free_dma < OTA_DMA_LOW) {
+                        vTaskDelay(pdMS_TO_TICKS(30));
+                    } else {
+                        vTaskDelay(pdMS_TO_TICKS(OTA_BASE_DELAY_MS));
+                    }
                 } else {
                     vTaskDelay(pdMS_TO_TICKS(OTA_BASE_DELAY_MS));
                 }
+
+                esp_task_wdt_reset();
+
+                int percent = (written * 100) / contentLength;
+                if (percent != lastPercent) {
+                    if (lbl_ota_progress) {
+                        lv_label_set_text_fmt(lbl_ota_progress, "%d%%", percent);
+                    }
+                    if (bar_ota_progress) {
+                        lv_bar_set_value(bar_ota_progress, percent, LV_ANIM_OFF);
+                    }
+                    lastPercent = percent;
+
+                    if (percent % OTA_PROGRESS_LOG_INTERVAL == 0) {
+                        uint32_t ui_now = millis();
+                        lv_tick_inc(ui_now - lastUIUpdate);
+                        lv_refr_now(NULL);
+                        lastUIUpdate = ui_now;
+                        Serial.printf("[OTA] %d%% (%d/%d bytes) - Free DMA: %d bytes\n",
+                            percent, written, contentLength, heap_caps_get_free_size(MALLOC_CAP_DMA));
+                    }
+                }
             } else {
-                vTaskDelay(pdMS_TO_TICKS(OTA_BASE_DELAY_MS));
+                esp_task_wdt_reset();
+                vTaskDelay(pdMS_TO_TICKS(1));
             }
-
-            // Feed watchdog EVERY chunk (download can take 60+ seconds)
-            esp_task_wdt_reset();
-
-            int percent = (written * 100) / contentLength;
-            if (percent != lastPercent) {
-                if (lbl_ota_progress) {
-                    lv_label_set_text_fmt(lbl_ota_progress, "%d%%", percent);
-                }
-                if (bar_ota_progress) {
-                    lv_bar_set_value(bar_ota_progress, percent, LV_ANIM_OFF);
-                }
-                lastPercent = percent;
-
-                // Refresh display and log every OTA_PROGRESS_LOG_INTERVAL%
-                if (percent % OTA_PROGRESS_LOG_INTERVAL == 0) {
-                    uint32_t ui_now = millis();
-                    lv_tick_inc(ui_now - lastUIUpdate);
-                    lv_refr_now(NULL);
-                    lastUIUpdate = ui_now;
-                    Serial.printf("[OTA] %d%% (%d/%d bytes) - Free DMA: %d bytes\n",
-                        percent, written, contentLength, heap_caps_get_free_size(MALLOC_CAP_DMA));
-                }
-            }
-        } else {
-            esp_task_wdt_reset();  // Feed watchdog when idle - stall timeout == watchdog timeout
-            vTaskDelay(pdMS_TO_TICKS(1));
         }
+
+        if (fatal_abort) {
+            // Stall, timeout, or Update.begin() failure — not retryable
+            if (update_begun) Update.abort();
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
+            otaRecovery();
+            return;
+        }
+
+        if (written == (size_t)contentLength) {
+            break;  // SUCCESS — exit retry loop
+        }
+
+        // Connection dropped before completion — retryable
+        Serial.printf("[OTA] Attempt %d/%d: %d/%d bytes — %s\n",
+            attempt, OTA_TLS_MAX_RETRIES, written, contentLength,
+            (attempt < OTA_TLS_MAX_RETRIES) ? "retrying" : "failed");
+        if (update_begun) Update.abort();
+        httpPtr->end(); clientPtr->stop();
+        delete httpPtr; delete clientPtr;
+        httpPtr = nullptr; clientPtr = nullptr;
+
+        if (attempt == OTA_TLS_MAX_RETRIES) {
+            if (lbl_ota_status) {
+                lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download failed - try again later");
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+            }
+            lv_tick_inc(10);
+            lv_refr_now(NULL);
+            otaRecovery();
+            return;
+        }
+    }
+
+    // Guard: all retry attempts exhausted via DMA check (continue on last attempt
+    // exits the loop normally without hitting the return above).
+    if (written != (size_t)contentLength) {
+        Serial.printf("[OTA] All %d attempts failed (written=%d, expected=%d) — recovering\n",
+            OTA_TLS_MAX_RETRIES, written, contentLength);
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download failed - try again later");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
+        otaRecovery();
+        return;
     }
 
     // ================================================================
     // PHASE 7: VERIFY AND INSTALL
     // ================================================================
-    if (written == (size_t)contentLength) {
-        // DOWNLOAD COMPLETE - Show 100%
-        if (bar_ota_progress) lv_bar_set_value(bar_ota_progress, 100, LV_ANIM_OFF);
-        if (lbl_ota_progress) lv_label_set_text(lbl_ota_progress, "100%");
-        if (lbl_ota_status) lv_label_set_text(lbl_ota_status, LV_SYMBOL_OK " Download complete!");
-        lv_tick_inc(10);
-        lv_refr_now(NULL);
+    // Reaches here only on full successful download (written == contentLength).
+    if (bar_ota_progress) lv_bar_set_value(bar_ota_progress, 100, LV_ANIM_OFF);
+    if (lbl_ota_progress) lv_label_set_text(lbl_ota_progress, "100%");
+    if (lbl_ota_status) lv_label_set_text(lbl_ota_status, LV_SYMBOL_OK " Download complete!");
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
 
-        Serial.printf("[OTA] Download complete: %d bytes in %lus\n", written, (millis() - download_start) / 1000);
-        vTaskDelay(pdMS_TO_TICKS(500));
+    Serial.printf("[OTA] Download complete: %d bytes in %lus\n", written, (millis() - download_start) / 1000);
+    vTaskDelay(pdMS_TO_TICKS(500));
 
-        // START INSTALL
-        if (bar_ota_progress) lv_bar_set_value(bar_ota_progress, 0, LV_ANIM_OFF);
-        if (lbl_ota_progress) lv_label_set_text(lbl_ota_progress, "");
-        if (lbl_ota_status) lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Installing & verifying...");
-        lv_tick_inc(10);
-        lv_refr_now(NULL);
+    // START INSTALL
+    if (bar_ota_progress) lv_bar_set_value(bar_ota_progress, 0, LV_ANIM_OFF);
+    if (lbl_ota_progress) lv_label_set_text(lbl_ota_progress, "");
+    if (lbl_ota_status) lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Installing & verifying...");
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
 
-        // Animate install progress
-        for (int i = 0; i <= 100; i += 10) {
-            if (bar_ota_progress) lv_bar_set_value(bar_ota_progress, i, LV_ANIM_OFF);
-            lv_tick_inc(50);
-            lv_refr_now(NULL);
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-    } else {
-        // Incomplete download
-        Serial.printf("[OTA] Incomplete download: %d/%d bytes\n", written, contentLength);
-        if (lbl_ota_status) {
-            lv_label_set_text_fmt(lbl_ota_status, LV_SYMBOL_WARNING " Incomplete download (%d%%)", (int)(written * 100 / contentLength));
-            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
-        }
-        lv_tick_inc(10);
+    // Animate install progress
+    for (int i = 0; i <= 100; i += 10) {
+        if (bar_ota_progress) lv_bar_set_value(bar_ota_progress, i, LV_ANIM_OFF);
+        lv_tick_inc(50);
         lv_refr_now(NULL);
-        Update.abort();
-        httpPtr->end(); clientPtr->stop();
-        delete httpPtr; delete clientPtr;
-        otaRecovery();
-        return;
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 
     if (Update.end()) {
@@ -1192,7 +1304,39 @@ void ev_check_update(lv_event_t* e) {
 }
 
 void ev_install_update(lv_event_t* e) {
-    performOTAUpdate();
+    if (download_url.isEmpty()) {
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " No firmware URL — check for updates first");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+        }
+        return;
+    }
+
+    // Save URL to NVS and restart immediately.
+    // The firmware download runs at the START of the next boot, before any background
+    // tasks (art, Sonos, lyrics) are created. This gives TLS the full ~125KB DMA
+    // headroom it needs. The ~71KB consumed by the TLS handshake leaves ~54KB free —
+    // enough for the SDIO RX pool, AES alignment buffers, and Update.begin() buffer.
+    //
+    // Attempting a live download (tasks running) leaves only ~34KB DMA after TLS,
+    // which starves the SDIO RX pool → sdio_push_data_to_queue assert crash.
+    Preferences prefs;
+    prefs.begin(NVS_NAMESPACE, false);
+    prefs.putBool(NVS_KEY_OTA_PENDING, true);
+    prefs.putString(NVS_KEY_OTA_URL, download_url.c_str());
+    prefs.end();
+
+    Serial.println("[OTA] URL saved to NVS — restarting for boot OTA");
+    if (lbl_ota_status) {
+        lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Restarting to install update...");
+        lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFFFFF), 0);
+    }
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
+    vTaskDelay(pdMS_TO_TICKS(1500));  // let user see the message
+    display_set_brightness(0);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ESP.restart();
 }
 
 // Called from loop() when ota_auto_pending is set (device rebooted for OTA due to low DMA).
@@ -1506,15 +1650,19 @@ void updateUI() {
             } else {
                 Serial.printf("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
             }
-            // CRITICAL: Abort any in-progress album art download immediately
-            // Applies to ALL track changes (not just source changes) so the art task
-            // doesn't wait for a 10-second HTTP timeout before processing the new track
-            art_abort_download = true;
-            // CRITICAL: Must hold art_mutex when writing last_art_url - the art task reads
-            // it under mutex, and String assignment is not atomic (race condition → corruption)
-            if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
-                last_art_url = "";  // Force art refresh on any URI change
-                xSemaphoreGive(art_mutex);
+            if (!art_suppress_source_change) {
+                // CRITICAL: Abort any in-progress album art download immediately
+                // Applies to ALL track changes (not just source changes) so the art task
+                // doesn't wait for a 10-second HTTP timeout before processing the new track
+                art_abort_download = true;
+                // CRITICAL: Must hold art_mutex when writing last_art_url - the art task reads
+                // it under mutex, and String assignment is not atomic (race condition → corruption)
+                if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
+                    last_art_url = "";  // Force art refresh on any URI change
+                    xSemaphoreGive(art_mutex);
+                }
+            } else {
+                Serial.printf("[ART] Suppressed (queue-select in progress)\n");
             }
         }
     }
@@ -1549,7 +1697,7 @@ void updateUI() {
         artChanged = true;
     }
 
-    if (!hasArt && uri_changed) {
+    if (!hasArt && uri_changed && !art_suppress_source_change) {
         // Track changed but has NO art URL — clear old art and show placeholder immediately
         // (Without this, the old track's art stays on screen forever)
         Serial.println("[ART] No art URL for this track - showing placeholder");
@@ -1561,7 +1709,7 @@ void updateUI() {
             art_ready = false;     // Discard any just-completed download (prevents art flash)
             xSemaphoreGive(art_mutex);
         }
-    } else if (hasArt && artChanged) {
+    } else if (hasArt && artChanged && !art_suppress_source_change) {
         String artURL = "";
         bool usingStationLogo = false;  // Track if we're using station logo (PNG allowed)
 
