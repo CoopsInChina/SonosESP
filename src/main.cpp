@@ -1,29 +1,65 @@
 /**
- * ESP32-S3 Sonos Controller
- * 800x480 RGB Display with Touch
+ * ESP32-P4 Sonos Controller
+ * 480x800 MIPI DSI Display with Touch
  * Modern UI matching reference design
  */
 
 #include "ui_common.h"
-
-
+#include "config.h"
+#include "lyrics.h"
+#include "clock_screen.h"
+#include <esp_flash.h>
+#include <esp_task_wdt.h>
 
 // Sonos logo
 LV_IMG_DECLARE(Sonos_idnu60bqes_1);
 
+static bool sonos_started = false;  // true once Sonos tasks are running
+static TaskHandle_t mainAppTaskHandle = nullptr;
+static void mainAppTask(void* param);  // forward declaration — defined after loop()
+
 void setup() {
-    Serial.begin(115200);
+    Serial.begin(SERIAL_BAUD_RATE);
     delay(500);
     Serial.println("\n=== SONOS CONTROLLER ===");
     Serial.printf("Free heap: %d, PSRAM: %d\n", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
+    // Detect flash chip - auto-suspend only works with specific chips
+    uint32_t flash_id = 0;
+    esp_err_t ret = esp_flash_read_id(esp_flash_default_chip, &flash_id);
+
+    if (ret == ESP_OK) {
+        uint8_t mfg_id = (flash_id >> 16) & 0xFF;
+        uint8_t capacity_id = flash_id & 0xFF;
+        int flash_size_mb = (1 << capacity_id) / (1024 * 1024);
+
+        const char* mfg_name;
+        switch(mfg_id) {
+            case 0x68: mfg_name = "Boya BY25Q"; break;
+            case 0xC8: mfg_name = "GigaDevice GD25"; break;
+            case 0x20: mfg_name = "XMC XM25"; break;
+            case 0xEF: mfg_name = "Winbond W25"; break;
+            case 0x1C: mfg_name = "EON EN25"; break;
+            case 0xA1: mfg_name = "Fudan FM25"; break;
+            default:   mfg_name = "Unknown"; break;
+        }
+
+        // Check if flash supports auto-suspend (ESP-IDF: GD25QxxE, XM25QxxC, FM25Q32)
+        bool suspend_ok = (mfg_id == 0xC8 || mfg_id == 0x20 || mfg_id == 0xA1);
+        Serial.printf("[FLASH] %s %dMB (0x%06X) - Auto-suspend: %s\n",
+                      mfg_name, flash_size_mb, flash_id, suspend_ok ? "YES" : "NO");
+    }
+
     // Create network mutex to serialize WiFi access (prevents SDIO buffer overflow)
     network_mutex = xSemaphoreCreateMutex();
 
+    // Create OTA progress mutex to protect OTA state and UI updates
+    ota_progress_mutex = xSemaphoreCreateMutex();
+
     // Initialize preferences with debug logging
-    wifiPrefs.begin("sonos_wifi", false);
-    String ssid = wifiPrefs.getString("ssid", DEFAULT_WIFI_SSID);
-    String pass = wifiPrefs.getString("pass", DEFAULT_WIFI_PASSWORD);
+    wifiPrefs.begin(NVS_NAMESPACE, false);
+    String ssid = wifiPrefs.getString(NVS_KEY_SSID, DEFAULT_WIFI_SSID);
+    String pass = wifiPrefs.getString(NVS_KEY_PASSWORD, DEFAULT_WIFI_PASSWORD);
 
     // Debug: Log what was loaded from NVS
     if (ssid.length() > 0) {
@@ -32,23 +68,59 @@ void setup() {
         Serial.println("[WIFI] No saved credentials found in NVS, using defaults");
     }
 
-    // Load display settings from NVS (defaults: brightness=100%, dimmed=20%, autodim=30sec)
-    brightness_level = wifiPrefs.getInt("brightness", 100);
-    brightness_dimmed = wifiPrefs.getInt("brightness_dimmed", 20);
-    autodim_timeout = wifiPrefs.getInt("autodim_sec", 30);
-    Serial.printf("[DISPLAY] Loaded settings from NVS: brightness=%d%%, dimmed=%d%%, autodim=%dsec\n",
-                  brightness_level, brightness_dimmed, autodim_timeout);
+    // Load display settings from NVS
+    brightness_level = wifiPrefs.getInt(NVS_KEY_BRIGHTNESS, DEFAULT_BRIGHTNESS);
+    brightness_dimmed = wifiPrefs.getInt(NVS_KEY_BRIGHTNESS_DIM, DEFAULT_BRIGHTNESS_DIM);
+    autodim_timeout = wifiPrefs.getInt(NVS_KEY_AUTODIM, DEFAULT_AUTODIM_SEC);
+    lyrics_enabled = wifiPrefs.getBool(NVS_KEY_LYRICS, true);
+    Serial.printf("[DISPLAY] Loaded settings from NVS: brightness=%d%%, dimmed=%d%%, autodim=%dsec, lyrics=%s\n",
+                  brightness_level, brightness_dimmed, autodim_timeout, lyrics_enabled ? "on" : "off");
+
+    // Load clock settings from NVS
+    clock_mode           = wifiPrefs.getInt(NVS_KEY_CLOCK_MODE,    CLOCK_DEFAULT_MODE);
+    clock_timeout_min    = wifiPrefs.getInt(NVS_KEY_CLOCK_TIMEOUT,  CLOCK_DEFAULT_TIMEOUT);
+    clock_tz_idx         = wifiPrefs.getInt(NVS_KEY_CLOCK_TZ,       CLOCK_DEFAULT_TZ_IDX);
+    clock_picsum_enabled = wifiPrefs.getBool(NVS_KEY_CLOCK_PICSUM,  (bool)CLOCK_DEFAULT_PICSUM);
+    clock_refresh_min    = wifiPrefs.getInt(NVS_KEY_CLOCK_REFRESH,  CLOCK_DEFAULT_REFRESH);
+    clock_bg_kw_idx      = wifiPrefs.getInt(NVS_KEY_CLOCK_KW,       CLOCK_DEFAULT_KW_IDX);
+    clock_12h            = wifiPrefs.getBool(NVS_KEY_CLOCK_12H,     (bool)CLOCK_DEFAULT_12H);
+    // Clamp indices in case lists changed between firmware versions
+    if (clock_tz_idx    < 0 || clock_tz_idx    >= CLOCK_ZONES_COUNT)   clock_tz_idx    = 0;
+    if (clock_bg_kw_idx < 0 || clock_bg_kw_idx >= CLOCK_BG_KW_COUNT)   clock_bg_kw_idx = 0;
+    clock_weather_enabled  = wifiPrefs.getBool(NVS_KEY_CLOCK_WEATHER_EN,   (bool)CLOCK_DEFAULT_WEATHER_EN);
+    clock_weather_city_idx = wifiPrefs.getInt(NVS_KEY_CLOCK_WEATHER_CITY,  CLOCK_DEFAULT_WEATHER_CITY);
+    if (clock_weather_city_idx < 0 || clock_weather_city_idx >= CLOCK_CITY_COUNT) clock_weather_city_idx = 0;
+    clock_wx_fahrenheit    = wifiPrefs.getBool(NVS_KEY_CLOCK_WEATHER_FAHR, (bool)CLOCK_DEFAULT_WEATHER_FAHR);
+    Serial.printf("[CLOCK] mode=%d timeout=%dmin tz=%s picsum=%s refresh=%dmin kw=%s 12h=%s weather=%s city=%s\n",
+                  clock_mode, clock_timeout_min,
+                  CLOCK_ZONES[clock_tz_idx].name,
+                  clock_picsum_enabled ? "on" : "off", clock_refresh_min,
+                  CLOCK_BG_KEYWORDS[clock_bg_kw_idx].label,
+                  clock_12h ? "yes" : "no",
+                  clock_weather_enabled ? "on" : "off",
+                  CLOCK_CITIES[clock_weather_city_idx].label);
 
     // Brightness will be set after display_init() is called
     Serial.println("[DISPLAY] ESP32-P4 uses ST7701 backlight control (no PWM needed)");
 
     //Initialise WiFi Connection
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
+    WiFi.setSleep(false);  // keep C6 radio always active — no modem sleep on mains-powered device
+    
 
     lv_init();
     if (!display_init()) { Serial.println("Display FAIL"); while(1) delay(1000); }
     if (!touch_init()) { Serial.println("Touch FAIL"); while(1) delay(1000); }
+
+    // Initialize hardware watchdog timer - auto-reboot if system hangs
+    esp_task_wdt_config_t wdt_config = {
+        .timeout_ms = WATCHDOG_TIMEOUT_SEC * 1000,
+        .idle_core_mask = 0,  // Don't watch idle tasks
+        .trigger_panic = true // Reboot on timeout
+    };
+    esp_task_wdt_reconfigure(&wdt_config);
+    // mainAppTask registers itself with the watchdog on startup (not loopTask — it becomes idle)
+    Serial.printf("[WDT] Watchdog configured: %d sec timeout\n", WATCHDOG_TIMEOUT_SEC);
 
     // Set initial brightness
     setBrightness(brightness_level);
@@ -79,6 +151,13 @@ void setup() {
     lv_bar_set_range(boot_bar, 0, 100);
     lv_bar_set_value(boot_bar, 0, LV_ANIM_OFF);
 
+    // Version number in bottom right corner
+    lv_obj_t* lbl_boot_version = lv_label_create(boot_scr);
+    lv_label_set_text(lbl_boot_version, "v" FIRMWARE_VERSION);
+    lv_obj_set_style_text_color(lbl_boot_version, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(lbl_boot_version, &lv_font_montserrat_12, 0);
+    lv_obj_align(lbl_boot_version, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+
     // Helper to update boot progress
     auto updateBootProgress = [&](int percent) {
         lv_bar_set_value(boot_bar, percent, LV_ANIM_ON);
@@ -97,6 +176,9 @@ void setup() {
     }, LV_EVENT_PRESSED, NULL);
 
     updateBootProgress(10);  // Callbacks ready
+
+    // Initialize lyrics PSRAM buffer before creating screens
+    initLyrics();
 
     createMainScreen();
     updateBootProgress(15);
@@ -137,6 +219,12 @@ void setup() {
         
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("\n[WIFI] Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
+            // Start NTP sync (SNTP daemon — no HTTPS, tiny UDP packets)
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            // Apply user-selected timezone via POSIX TZ string
+            setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
+            tzset();
+            Serial.printf("[NTP] Sync started, TZ=%s\n", CLOCK_ZONES[clock_tz_idx].name);
             
         } else {
             Serial.println("\n[WIFI] Attempt failed. Retrying...");
@@ -150,46 +238,212 @@ void setup() {
         Serial.println("[WIFI] All connection attempts failed.");
         }
     
+
     updateBootProgress(60);
 
     createWiFiScreen();
     updateBootProgress(62);
 
     createOTAScreen();
-    updateBootProgress(65);
+    updateBootProgress(80);
+
+    // =========================================================================
+    // BOOT OTA FAST PATH — before any background tasks start
+    // =========================================================================
+    // If ev_install_update() saved a URL to NVS and restarted, run the OTA
+    // download RIGHT HERE, before art/Sonos/lyrics tasks are created.
+    //
+    // Why this matters (DMA budget):
+    //   With tasks running: ~105KB DMA free → TLS uses ~71KB → ~34KB post-TLS
+    //     → SDIO RX pool + AES alignment + Update.begin() all fight over 34KB → crash
+    //   At this boot point: ~125KB DMA free → TLS uses ~71KB → ~54KB post-TLS
+    //     → plenty of headroom for SDIO (~16KB) + AES + Update.begin() (~6KB)
+    //
+    // PSRAM is irrelevant: flash writes and TLS buffers use DMA SRAM only.
+    // wifiPrefs is already open (read-write) from setup() — no new handle needed.
+    //
+    // If OTA is pending but the initial WiFi connect timed out, wait up to 30 extra seconds.
+    // Some routers/channels take 30–40s to assign an IP — the 20s initial window can be too short.
+    // We must NOT call triggerPendingOTA() without WiFi — it would silently fail and clear the URL.
+    if (wifiPrefs.getBool(NVS_KEY_OTA_PENDING, false) && WiFi.status() != WL_CONNECTED) {
+        Serial.println("[OTA] Boot OTA pending — waiting for WiFi...");
+        lv_obj_t* lbl_ota_wifi = lv_label_create(boot_scr);
+        lv_label_set_text(lbl_ota_wifi, "Waiting for WiFi (OTA pending)...");
+        lv_obj_set_style_text_color(lbl_ota_wifi, lv_color_hex(0xD4A84B), 0);
+        lv_obj_set_style_text_font(lbl_ota_wifi, &lv_font_montserrat_16, 0);
+        lv_obj_align(lbl_ota_wifi, LV_ALIGN_CENTER, 0, 50);
+        lv_refr_now(NULL);
+        int ota_wifi_tries = 0;
+        while (WiFi.status() != WL_CONNECTED && ota_wifi_tries++ < 60) {  // up to 30s extra
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("[OTA] WiFi connected — IP: %s\n", WiFi.localIP().toString().c_str());
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
+            tzset();
+        } else {
+            Serial.println("[OTA] WiFi still not connected after extra wait — skipping boot OTA");
+            wifiPrefs.putBool(NVS_KEY_OTA_PENDING, false);  // clear flag to avoid infinite reboot loop
+        }
+        lv_obj_del(lbl_ota_wifi);
+    }
+    if (WiFi.status() == WL_CONNECTED && wifiPrefs.getBool(NVS_KEY_OTA_PENDING, false)) {
+        wifiPrefs.putBool(NVS_KEY_OTA_PENDING, false);  // clear immediately — prevent reboot loops
+        Serial.printf("[OTA] Boot OTA: %d bytes DMA free (pre-task)\n",
+                      heap_caps_get_free_size(MALLOC_CAP_DMA));
+        esp_task_wdt_add(NULL);  // subscribe loopTask — performOTAUpdate() calls esp_task_wdt_reset()
+                                 // which spams "task not found" errors if the calling task isn't subscribed
+        triggerPendingOTA();  // loads saved URL → performOTAUpdate() → ESP.restart() on success
+        // If we reach here, all download retries failed (otaRecovery() was called).
+        // Restart to return to normal operation; NVS_KEY_OTA_PENDING is already false.
+        vTaskDelay(pdMS_TO_TICKS(5000));  // let user read the error message
+        ESP.restart();
+    }
 
     createSourcesScreen();
     updateBootProgress(68);
 
     createGroupsScreen();
-    updateBootProgress(70);
+    createGeneralScreen();
+    createClockScreen();
+    createClockSettingsScreen();
+    updateBootProgress(85);
 
     art_mutex = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(albumArtTask, "Art", 8192, NULL, 1, &albumArtTaskHandle, 0);  // Core 0, Priority 1 (low)
+    createArtTask();  // PSRAM stack — frees 20KB internal SRAM for SDIO/WiFi DMA
     updateBootProgress(90);
 
     sonos.begin();
     updateBootProgress(75);
 
-    int cnt = sonos.discoverDevices();
-    if (cnt > 0) {
-        sonos.selectDevice(0);
-        sonos.startTasks();
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[SONOS] WiFi not connected at boot - deferring discovery");
+    } else {
+        // Try to load cached device first for fast boot (~2s vs ~15s)
+        bool loadedFromCache = sonos.tryLoadCachedDevice();
+        if (loadedFromCache) {
+            sonos.selectDevice(0);
+            sonos.startTasks();
+            sonos_started = true;
+        } else {
+            // Cache miss or unreachable - skip SSDP at boot (device may not be ready yet)
+            // User can trigger discovery manually via Settings > Scan
+            Serial.println("[SONOS] Cached device unreachable at boot - use Settings to scan");
+        }
     }
 
     updateBootProgress(100);  // Complete!
     delay(300);  // Show 100% briefly
 
     lv_screen_load(scr_main);  // Now load main screen
+    lv_obj_del(boot_scr);     // Free boot screen objects (~3KB LVGL memory)
     Serial.println("Ready!");
+
+    // Launch mainAppTask in internal SRAM (NOT PSRAM).
+    // NVS writes (OTA settings, brightness, etc.) call spi_flash_disable_interrupts_caches_and_other_cpu()
+    // which asserts esp_task_stack_is_sane_cache_disabled() if the calling task's stack is in
+    // cache-mapped PSRAM. Art task (PSRAM, 20KB) already freed the critical DMA SRAM headroom,
+    // so 16KB here no longer triggers SDIO DMA boot crashes. HWM shows < 5KB actually used.
+    xTaskCreatePinnedToCore(mainAppTask, "Main", MAIN_APP_TASK_STACK, NULL,
+                            MAIN_APP_TASK_PRIORITY, &mainAppTaskHandle, 1);
+
+}
+
+// WiFi auto-reconnection check (runs every WIFI_CHECK_INTERVAL_MS when disconnected)
+static unsigned long lastWifiCheck = 0;
+
+void checkWiFiReconnect() {
+    if (millis() - lastWifiCheck < WIFI_CHECK_INTERVAL_MS) return;
+    lastWifiCheck = millis();
+
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WIFI] Connection lost, attempting reconnect...");
+        WiFi.reconnect();
+    } else if (!sonos_started) {
+        // WiFi connected but Sonos not yet started (WiFi was down at boot)
+        // (Re)start NTP sync now that we have connectivity
+        configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+        setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
+        tzset();
+        Serial.println("[SONOS] WiFi now connected - attempting deferred discovery from cache");
+        bool loadedFromCache = sonos.tryLoadCachedDevice();
+        if (loadedFromCache) {
+            sonos.selectDevice(0);
+            sonos.startTasks();
+            sonos_started = true;
+            Serial.println("[SONOS] Deferred discovery succeeded from cache");
+        } else {
+            Serial.println("[SONOS] No cached device - use Devices screen to discover");
+        }
+    }
+}
+
+// Periodic heap monitoring for debugging memory issues
+static unsigned long lastHeapLog = 0;
+
+void logHeapStatus() {
+    if (millis() - lastHeapLog < HEAP_LOG_INTERVAL_MS) return;
+    lastHeapLog = millis();
+
+    size_t free_heap = esp_get_free_heap_size();
+    size_t min_heap = esp_get_minimum_free_heap_size();
+    size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+
+    Serial.printf("[HEAP] Free: %dKB | Min: %dKB | PSRAM: %dKB\n",
+                  free_heap / 1024, min_heap / 1024, free_psram / 1024);
+
+    // Log task stack high water marks — minimum free bytes ever observed.
+    // On ESP-IDF 5.x (ESP32-P4 RISC-V), uxTaskGetStackHighWaterMark returns bytes directly.
+    // Lower number = more stack used, closer to overflow. 0 = already overflowed.
+    Serial.printf("[STACK] Main:%d ", uxTaskGetStackHighWaterMark(NULL));  // NULL = mainAppTask
+    Serial.printf("Art:%d ", albumArtTaskHandle ? uxTaskGetStackHighWaterMark(albumArtTaskHandle) : 0);
+    Serial.printf("Net:%d ", sonos.getNetworkTaskHandle() ? uxTaskGetStackHighWaterMark(sonos.getNetworkTaskHandle()) : 0);
+    Serial.printf("Poll:%d ", sonos.getPollingTaskHandle() ? uxTaskGetStackHighWaterMark(sonos.getPollingTaskHandle()) : 0);
+    Serial.printf("ClkBg:%d ", clockBgTaskHandle ? uxTaskGetStackHighWaterMark(clockBgTaskHandle) : 0);
+    Serial.printf("Lyrics:%d bytes free\n", lyricsTaskHandle ? uxTaskGetStackHighWaterMark(lyricsTaskHandle) : 0);
+
+    // Warn if heap is getting low
+    if (free_heap < 50000) {
+        Serial.println("[HEAP] WARNING: Low memory!");
+    }
+}
+
+// Main application task — runs all LVGL and UI logic with a 16KB internal SRAM stack.
+// The Arduino loopTask (fixed 8KB) becomes idle below; it was regularly hitting
+// only ~976 bytes free, causing Store access fault crashes via LVGL buffer corruption.
+static void mainAppTask(void* param) {
+    esp_task_wdt_add(NULL);  // Register this task with watchdog (not loopTask)
+
+    for (;;) {
+        esp_task_wdt_reset();
+
+        lv_tick_inc(3);
+
+        // Skip LVGL timer during OTA to prevent PSRAM access during flash writes
+        bool skip_updates = false;
+        if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(10))) {
+            skip_updates = ota_in_progress;
+            xSemaphoreGive(ota_progress_mutex);
+        }
+
+        if (!skip_updates) {
+            lv_timer_handler();
+            processUpdates();
+            checkAutoDim();
+            checkClockTrigger();
+            checkWiFiReconnect();
+            logHeapStatus();  // Periodic memory monitoring
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(3));
+    }
 }
 
 void loop() {
-    lv_tick_inc(3);
-    lv_timer_handler();
-    processUpdates();
-    checkAutoDim();  // Check if screen should be dimmed
-    vTaskDelay(pdMS_TO_TICKS(3));  // More efficient than delay() - allows other tasks to run
+    // Idle — all UI/LVGL work is done in mainAppTask (32KB stack).
+    // loopTask hard-coded 8KB stack cannot be changed via build flags.
+    vTaskDelay(pdMS_TO_TICKS(100));
 }
 
 

@@ -255,8 +255,8 @@ void createDevicesScreen() {
     lv_obj_set_style_bg_color(scr_devices, lv_color_hex(0x121212), 0);
     lv_obj_set_size(scr_devices, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
 
-    // Create sidebar and get content area (Speakers is index 0)
-    lv_obj_t* content = createSettingsSidebar(scr_devices, 0);
+    // Create sidebar and get content area (Speakers is index 1)
+    lv_obj_t* content = createSettingsSidebar(scr_devices, 1);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(720);
@@ -346,6 +346,19 @@ void createDevicesScreen() {
     lv_obj_set_style_arc_width(spinner_scan, arc_width, LV_PART_INDICATOR);
     lv_obj_set_style_arc_width(spinner_scan, arc_width, LV_PART_MAIN);
     lv_obj_set_style_arc_rounded(spinner_scan, true, LV_PART_INDICATOR);
-    lv_obj_move_foreground(spinner_scan);
-    lv_obj_add_flag(spinner_scan, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(spinner_scan);  // Ensure it's on top
+    lv_obj_add_flag(spinner_scan, LV_OBJ_FLAG_HIDDEN);  // Hidden by default
+
+    // Refresh list every time the screen is opened so cached/already-discovered
+    // speakers show immediately without requiring a manual Scan tap (issue #19).
+    lv_obj_add_event_cb(scr_devices, [](lv_event_t* e) {
+        if (lv_event_get_code(e) != LV_EVENT_SCREEN_LOADED) return;
+        int cnt = sonos.getDeviceCount();
+        if (cnt > 0) {
+            refreshDeviceList();
+            lv_label_set_text_fmt(lbl_status, "%d speaker%s found", cnt, cnt == 1 ? "" : "s");
+        } else {
+            lv_label_set_text(lbl_status, "Tap Scan to find speakers");
+        }
+    }, LV_EVENT_ALL, NULL);
 }

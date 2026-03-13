@@ -207,9 +207,9 @@ void refreshGroupsList() {
                 lv_obj_add_event_cb(removeBtn, [](lv_event_t* e) {
                     lv_event_stop_bubbling(e);
                     int idx = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
-                    sonos.leaveGroup(idx);
                     lv_label_set_text(lbl_groups_status, "Removing from group...");
-                    lv_timer_handler();
+                    lv_refr_now(NULL);
+                    sonos.leaveGroup(idx);
                     vTaskDelay(pdMS_TO_TICKS(500));
                     sonos.updateGroupInfo();
                     refreshGroupsList();
@@ -286,9 +286,9 @@ void refreshGroupsList() {
                 lv_obj_add_event_cb(addBtn, [](lv_event_t* e) {
                     int idx = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
                     if (selected_group_coordinator >= 0) {
-                        sonos.joinGroup(idx, selected_group_coordinator);
                         lv_label_set_text(lbl_groups_status, "Adding to group...");
-                        lv_timer_handler();
+                        lv_refr_now(NULL);
+                        sonos.joinGroup(idx, selected_group_coordinator);
                         vTaskDelay(pdMS_TO_TICKS(500));
                         sonos.updateGroupInfo();
                         refreshGroupsList();
@@ -304,8 +304,8 @@ void createGroupsScreen() {
     lv_obj_set_style_bg_color(scr_groups, lv_color_hex(0x121212), 0);
     lv_obj_set_size(scr_groups, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
 
-    // Create sidebar and get content area (Groups is index 1)
-    lv_obj_t* content = createSettingsSidebar(scr_groups, 1);
+    // Create sidebar and get content area (Groups is index 2)
+    lv_obj_t* content = createSettingsSidebar(scr_groups, 2);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(720);

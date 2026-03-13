@@ -16,8 +16,8 @@ void createOTAScreen() {
     lv_obj_set_style_bg_color(scr_ota, lv_color_hex(0x121212), 0);
     lv_obj_set_size(scr_ota, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
 
-    // Create sidebar and get content area (Update is index 5)
-    lv_obj_t* content = createSettingsSidebar(scr_ota, 5);
+    // Create sidebar and get content area (Update is index 7 — Clock added at 6)
+    lv_obj_t* content = createSettingsSidebar(scr_ota, 7);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(720);
@@ -58,10 +58,79 @@ void createOTAScreen() {
     lv_obj_set_style_text_font(lbl_latest_version, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(lbl_latest_version, COL_TEXT2, 0);
     lv_obj_align(lbl_latest_version, LV_ALIGN_TOP_LEFT, 0, SCALE(30));
+// Release channel selector card
+lv_obj_t* card_channel = lv_obj_create(content);
+int channel_card_width = lv_pct(100);              // Percentage, no scaling needed
+int channel_card_height = SCALE(60);
+int channel_card_y = SCALE(155);
+lv_obj_set_size(card_channel, channel_card_width, channel_card_height);
+lv_obj_set_pos(card_channel, 0, channel_card_y);
+lv_obj_set_style_bg_color(card_channel, lv_color_hex(0x2A2A2A), 0);
+
+int channel_card_radius = SCALE(12);
+lv_obj_set_style_radius(card_channel, channel_card_radius, 0);
+lv_obj_set_style_border_width(card_channel, 0, 0);
+
+int channel_card_pad = SCALE(16);
+lv_obj_set_style_pad_all(card_channel, channel_card_pad, 0);
+lv_obj_clear_flag(card_channel, LV_OBJ_FLAG_SCROLLABLE);
+
+lv_obj_t* lbl_channel = lv_label_create(card_channel);
+lv_label_set_text(lbl_channel, "Release Channel:");
+lv_obj_set_style_text_font(lbl_channel, &lv_font_montserrat_14, 0);
+lv_obj_set_style_text_color(lbl_channel, COL_TEXT2, 0);
+lv_obj_align(lbl_channel, LV_ALIGN_LEFT_MID, 0, 0);
+
+dd_ota_channel = lv_dropdown_create(card_channel);
+lv_dropdown_set_options(dd_ota_channel, "Stable\nNightly");
+int dropdown_width = SCALE(150);
+int dropdown_height = SCALE(40);
+lv_obj_set_size(dd_ota_channel, dropdown_width, dropdown_height);
+lv_obj_align(dd_ota_channel, LV_ALIGN_RIGHT_MID, 0, 0);
+
+// Style the dropdown button (closed state)
+lv_obj_set_style_bg_color(dd_ota_channel, COL_BTN, LV_PART_MAIN);
+lv_obj_set_style_bg_color(dd_ota_channel, COL_BTN_PRESSED, (lv_style_selector_t)((uint32_t)LV_PART_MAIN | (uint32_t)LV_STATE_PRESSED));
+lv_obj_set_style_text_color(dd_ota_channel, COL_TEXT, LV_PART_MAIN);
+
+int dropdown_radius = SCALE(8);
+lv_obj_set_style_radius(dd_ota_channel, dropdown_radius, LV_PART_MAIN);
+lv_obj_set_style_border_width(dd_ota_channel, 1, LV_PART_MAIN);
+lv_obj_set_style_border_color(dd_ota_channel, lv_color_hex(0x555555), LV_PART_MAIN);
+
+int dropdown_pad_left = SCALE(12);
+int dropdown_pad_right = SCALE(12);
+lv_obj_set_style_pad_left(dd_ota_channel, dropdown_pad_left, LV_PART_MAIN);
+lv_obj_set_style_pad_right(dd_ota_channel, dropdown_pad_right, LV_PART_MAIN);
+
+// Style the dropdown list (opened state) - this is the key for dark theme!
+lv_obj_set_style_bg_color(dd_ota_channel, lv_color_hex(0x2A2A2A), LV_PART_SELECTED);
+lv_obj_set_style_bg_color(dd_ota_channel, COL_ACCENT, (lv_style_selector_t)((uint32_t)LV_PART_SELECTED | (uint32_t)LV_STATE_CHECKED));
+lv_obj_set_style_text_color(dd_ota_channel, COL_TEXT, LV_PART_SELECTED);
+
+// Get the list object and style it for dark theme
+lv_obj_t* list = lv_dropdown_get_list(dd_ota_channel);
+if (list) {
+    lv_obj_set_style_bg_color(list, lv_color_hex(0x2A2A2A), 0);
+    lv_obj_set_style_text_color(list, COL_TEXT, 0);
+    lv_obj_set_style_border_color(list, lv_color_hex(0x555555), 0);
+    lv_obj_set_style_border_width(list, 1, 0);
+}
+
+// Load saved channel preference (default to Stable=0)
+ota_channel = wifiPrefs.getInt("ota_channel", 0);
+lv_dropdown_set_selected(dd_ota_channel, ota_channel);
+
+// Channel change callback
+lv_obj_add_event_cb(dd_ota_channel, [](lv_event_t* e) {
+    ota_channel = lv_dropdown_get_selected(dd_ota_channel);
+    wifiPrefs.putInt("ota_channel", ota_channel);
+    Serial.printf("[OTA] Channel changed to: %s\n", ota_channel == 0 ? "Stable" : "Nightly");
+}, LV_EVENT_VALUE_CHANGED, NULL);
 
     // Status label
     lbl_ota_status = lv_label_create(content);
-    int status_y = SCALE(160);
+    int status_y = SCALE(230);
     lv_obj_set_pos(lbl_ota_status, 0, status_y);
     lv_label_set_text(lbl_ota_status, "Tap 'Check for Updates' to begin");
     lv_obj_set_style_text_color(lbl_ota_status, COL_TEXT2, 0);
@@ -71,7 +140,7 @@ void createOTAScreen() {
 
     // Progress label
     lbl_ota_progress = lv_label_create(content);
-    int progress_y = SCALE(190);
+    int progress_y = SCALE(260);
     lv_obj_set_pos(lbl_ota_progress, 0, progress_y);
     lv_label_set_text(lbl_ota_progress, "");
     lv_obj_set_style_text_color(lbl_ota_progress, COL_ACCENT, 0);
@@ -79,15 +148,17 @@ void createOTAScreen() {
 
     // Visual progress bar (hidden by default)
     bar_ota_progress = lv_bar_create(content);
-    int bar_width = SCALE(720);
-    int bar_height = SCALE(16);
-    int bar_y = SCALE(220);
-    lv_obj_set_size(bar_ota_progress, bar_width, bar_height);
-    lv_obj_set_pos(bar_ota_progress, 0, bar_y);
+    int progress_bar_width = lv_pct(100);  // Percentage, no scaling needed
+    int progress_bar_height = SCALE(16);
+    int progress_bar_y = SCALE(330);
+    lv_obj_set_size(bar_ota_progress, progress_bar_width, progress_bar_height);
+    lv_obj_set_pos(bar_ota_progress, 0, progress_bar_y);
+
     lv_bar_set_range(bar_ota_progress, 0, 100);
     lv_bar_set_value(bar_ota_progress, 0, LV_ANIM_OFF);
+
     lv_obj_set_style_bg_color(bar_ota_progress, lv_color_hex(0x333333), LV_PART_MAIN);
-    lv_obj_set_style_bg_opa(bar_ota_progress, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar_ota_progress, LV_OPA_COVER, LV_PART_MAIN);  
     
     int bar_radius = SCALE(8);
     lv_obj_set_style_radius(bar_ota_progress, bar_radius, LV_PART_MAIN);
@@ -100,7 +171,7 @@ void createOTAScreen() {
     btn_check_update = lv_btn_create(content);
     int btn_width = SCALE(280);
     int btn_height = SCALE(50);
-    int btn_y = SCALE(260);
+    int btn_y = SCALE(330);
     lv_obj_set_size(btn_check_update, btn_width, btn_height);
     lv_obj_set_pos(btn_check_update, 0, btn_y);
     lv_obj_set_style_bg_color(btn_check_update, COL_ACCENT, 0);
@@ -137,9 +208,10 @@ void createOTAScreen() {
     lv_obj_set_pos(lbl_info, 0, info_y);
     lv_label_set_text(lbl_info,
         LV_SYMBOL_WARNING "  Do not disconnect power during update!\n"
-        "Updates are fetched from GitHub releases automatically.");
+        "Stable: Auto-releases | Nightly: Latest test builds (may be unstable)");
     lv_obj_set_style_text_color(lbl_info, COL_TEXT2, 0);
     lv_obj_set_style_text_font(lbl_info, &lv_font_montserrat_12, 0);
     lv_obj_set_width(lbl_info, SCALE(720));
     lv_label_set_long_mode(lbl_info, LV_LABEL_LONG_WRAP);
+    lv_obj_set_pos(lbl_info, 0, SCALE(400));
 }

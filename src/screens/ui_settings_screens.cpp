@@ -134,8 +134,10 @@ void createQueueScreen() {
     int btn_radius = SCALE(25);
     lv_obj_set_style_radius(btn_refresh, btn_radius, 0);
     lv_obj_set_style_shadow_width(btn_refresh, 0, 0);
-    lv_obj_add_event_cb(btn_refresh, [](lv_event_t* e) { sonos.updateQueue(); refreshQueueList(); }, LV_EVENT_CLICKED, NULL);
-    
+    // DO NOT call sonos.updateQueue() here — this runs on mainAppTask (UI thread), which has no
+    // SDIO cooldown protection. Fires a 20KB SOAP response with no mutex/cooldown → SDIO crash.
+    // requestQueueUpdate() enqueues CMD_UPDATE_QUEUE → runs in the network task safely.
+    lv_obj_add_event_cb(btn_refresh, [](lv_event_t* e) { sonos.requestQueueUpdate(); }, LV_EVENT_CLICKED, NULL);
     lv_obj_t* ico_refresh = lv_label_create(btn_refresh);
     lv_label_set_text(ico_refresh, LV_SYMBOL_REFRESH);
     lv_obj_set_style_text_color(ico_refresh, lv_color_hex(0xFFFFFF), 0);
@@ -213,8 +215,8 @@ void createSourcesScreen() {
     lv_obj_set_style_bg_color(scr_sources, lv_color_hex(0x121212), 0);
     lv_obj_set_size(scr_sources, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
 
-    // Create sidebar and get content area (Sources is index 2)
-    lv_obj_t* content = createSettingsSidebar(scr_sources, 2);
+    // Create sidebar and get content area (Sources is index 3)
+    lv_obj_t* content = createSettingsSidebar(scr_sources, 3);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(720);
@@ -250,11 +252,10 @@ void createSourcesScreen() {
     };
 
     MusicSource sources[] = {
-        {"Sonos Favorites", LV_SYMBOL_DIRECTORY, "FV:2"},
         {"Sonos Playlists", LV_SYMBOL_LIST, "SQ:"}
     };
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 1; i++) {
         lv_obj_t* btn = lv_btn_create(list);
         int btn_height = SCALE(50);
         lv_obj_set_size(btn, content_width, btn_height);
@@ -328,8 +329,8 @@ void createBrowseScreen() {
     lv_obj_set_style_bg_color(scr_browse, lv_color_hex(0x121212), 0);
     lv_obj_set_size(scr_browse, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
 
-    // Create sidebar and get content area (Sources is index 2)
-    lv_obj_t* content = createSettingsSidebar(scr_browse, 2);
+    // Create sidebar and get content area (Sources is index 3)
+    lv_obj_t* content = createSettingsSidebar(scr_browse, 3);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(720);
@@ -474,7 +475,7 @@ void createBrowseScreen() {
                 if (id.startsWith("SQ:") && id.indexOf("/") < 0) {
                     String title = sonos.extractXML(itemXML, "dc:title");
                     Serial.printf("[BROWSE] Playing playlist: %s (ID: %s)\n", title.c_str(), id.c_str());
-                    sonos.playPlaylist(id.c_str());
+                    sonos.playPlaylist(id.c_str(), title.c_str());
                     lv_screen_load(scr_main);
                 } else {
                     current_browse_id = id;
@@ -505,41 +506,8 @@ void createBrowseScreen() {
                 }
 
                 if (uri.startsWith("x-rincon-cpcontainer:")) {
-                    String title = sonos.extractXML(itemXML, "dc:title");
-                    Serial.printf("[BROWSE] Playing container: %s\n", title.c_str());
-
-                    // Extract inner DIDL-Lite from r:resMD tag
-                    String resMD = sonos.extractXML(itemXML, "r:resMD");
-                    if (resMD.length() > 0) {
-                        resMD = sonos.decodeHTML(resMD);
-
-                        // Extract <res> tag from outer item and inject into inner DIDL
-                        String resTag = sonos.extractXML(itemXML, "res");
-                        String protocolInfo = "";
-                        int protoStart = itemXML.indexOf("protocolInfo=\"");
-                        if (protoStart > 0) {
-                            int protoEnd = itemXML.indexOf("\"", protoStart + 14);
-                            if (protoEnd > protoStart) {
-                                protocolInfo = itemXML.substring(protoStart + 14, protoEnd);
-                            }
-                        }
-
-                        // Build complete <res> element
-                        String resElement = "<res protocolInfo=\"" + protocolInfo + "\">" + uri + "</res>";
-
-                        // Insert <res> into the inner DIDL's <item> (after <upnp:class>)
-                        int insertPos = resMD.indexOf("</upnp:class>") + 13;
-                        if (insertPos > 13) {
-                            resMD = resMD.substring(0, insertPos) + resElement + resMD.substring(insertPos);
-                        }
-
-                        Serial.printf("[BROWSE] Enhanced inner DIDL with <res> tag (%d bytes)\n", resMD.length());
-                        sonos.playContainer(uri.c_str(), resMD.c_str());
-                    } else {
-                        Serial.println("[BROWSE] No r:resMD found, using full itemXML");
-                        sonos.playContainer(uri.c_str(), itemXML.c_str());
-                    }
-                    lv_screen_load(scr_main);
+                    // Sonos Favorites (x-rincon-cpcontainer) not supported.
+                    Serial.println("[BROWSE] Sonos Favorites not supported");
                 } else if (uri.length() > 0) {
                     Serial.printf("[BROWSE] Playing URI: %s\n", uri.c_str());
                     sonos.playURI(uri.c_str(), itemXML.c_str());

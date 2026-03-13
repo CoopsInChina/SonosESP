@@ -19,7 +19,7 @@
 #define DEFAULT_WIFI_PASSWORD ""
 
 // Firmware version
-#define FIRMWARE_VERSION "1.1.6"
+#define FIRMWARE_VERSION "1.4.0"
 #define GITHUB_REPO "OpenSurface/SonosESP"
 #define GITHUB_API_URL "https://api.github.com/repos/" GITHUB_REPO "/releases/latest"
 
@@ -27,19 +27,10 @@
 #define ART_SIZE SCALE(420)        // 420 → ~538 pixels (1.28x scale)
 #define MAX_ART_SIZE 280000          // 280KB max - allows Spotify 640x640 images
 #define ART_CHUNK_SIZE 4096          // 4KB chunks for HTTP downloads
-#define ART_READ_TIMEOUT_MS 5000     // 5 second timeout for image downloads
-#define ART_COMPACT_THRESHOLD 200000 // Compact buffer if image >200KB
 
 // Network configuration
 #define NETWORK_MUTEX_TIMEOUT_MS 5000    // Timeout for acquiring network mutex (SOAP)
 #define NETWORK_MUTEX_TIMEOUT_ART_MS 10000 // Longer timeout for album art downloads
-#define WIFI_RECONNECT_INTERVAL_MS 2000  // Try reconnect every 2 seconds
-
-// Task configuration
-#define TASK_PRIORITY_ALBUM_ART 1    // Low priority - background task
-#define TASK_PRIORITY_NETWORK 2      // Medium priority
-#define TASK_PRIORITY_POLLING 3      // High priority - UI responsiveness
-#define TASK_STACK_ALBUM_ART 8192    // 8KB stack for album art task
 
 
 // Scaling Inputs 
@@ -81,15 +72,18 @@ extern Preferences wifiPrefs;
 extern int brightness_level;
 extern int brightness_dimmed;
 extern int autodim_timeout;
+extern bool lyrics_enabled;
 extern uint32_t last_touch_time;
 extern bool screen_dimmed;
 
 // Screen objects
 extern lv_obj_t *scr_main, *scr_devices, *scr_queue, *scr_settings;
-extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_display, *scr_ota, *scr_groups;
+extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_display, *scr_ota, *scr_groups, *scr_general;
+extern lv_obj_t *scr_clock, *scr_clock_settings;
 
 // Main screen UI elements
 extern lv_obj_t *img_album, *lbl_title, *lbl_artist, *lbl_album, *lbl_time, *lbl_time_remaining;
+extern lv_obj_t *lbl_lyrics_status;  // Lyrics status indicator (top of album art)
 extern lv_obj_t *btn_play, *btn_prev, *btn_next, *btn_mute, *btn_shuffle, *btn_repeat, *btn_queue;
 extern lv_obj_t *slider_progress, *slider_vol;
 extern lv_obj_t *panel_right, *panel_art;
@@ -112,15 +106,19 @@ extern uint16_t *art_buffer;
 extern uint16_t *art_temp_buffer;
 extern String last_art_url, pending_art_url;
 extern volatile bool art_ready;
+extern volatile bool art_show_placeholder;
 extern SemaphoreHandle_t art_mutex;
 extern uint32_t dominant_color;
 extern volatile bool color_ready;
 extern int art_offset_x, art_offset_y;
 extern bool is_sonos_radio_art;
 extern bool pending_is_station_logo;  // True when requesting radio station logo (PNG allowed)
-extern unsigned long last_source_change_time;
-extern volatile unsigned long last_queue_fetch_time;  // Track queue fetches for WiFi coordination
-extern SemaphoreHandle_t network_mutex;  // Serialize network access to prevent SDIO buffer overflow
+extern volatile unsigned long last_queue_fetch_time;  // Last updateQueue() completion (large HTTP — art waits 2000ms, sendSOAP unaffected)
+extern SemaphoreHandle_t network_mutex;  // Serializes all WiFi/HTTPS operations (SOAP, album art, OTA)
+extern volatile unsigned long last_network_end_ms;  // Last network operation end time (for SDIO cooldown)
+extern volatile unsigned long last_https_end_ms;   // Last HTTPS operation end time (TLS needs longer cooldown)
+extern volatile unsigned long last_art_download_end_ms;  // Last art download completion (art + lyrics use 3000ms cooldown)
+extern volatile bool art_download_in_progress;  // True while art task is actively receiving download data
 
 // UI state
 extern String ui_title, ui_artist, ui_repeat;
@@ -149,8 +147,13 @@ extern lv_obj_t *lbl_latest_version;
 extern lv_obj_t *btn_check_update;
 extern lv_obj_t *btn_install_update;
 extern lv_obj_t *bar_ota_progress;
+extern lv_obj_t *dd_ota_channel;
 extern String latest_version;
 extern String download_url;
+extern int ota_channel;  // 0=Stable, 1=Nightly
+extern volatile bool ota_in_progress;  // Flag to skip non-essential tasks during OTA
+extern bool ota_auto_pending;          // Set on boot if device rebooted for OTA (low DMA)
+extern SemaphoreHandle_t ota_progress_mutex;  // Protects OTA progress updates and state
 
 // ============================================================================
 // Function Declarations - Screen Creation
@@ -165,6 +168,9 @@ void createOTAScreen();
 void createSourcesScreen();
 void createBrowseScreen();
 void createGroupsScreen();
+void createGeneralScreen();
+void createClockScreen();
+void createClockSettingsScreen();
 
 // ============================================================================
 // Function Declarations - UI Refresh
@@ -209,6 +215,7 @@ void checkAutoDim();
 void requestAlbumArt(const String &url);
 void updateUI();
 void processUpdates();
+void triggerPendingOTA();  // Called from loop() when ota_auto_pending is set
 String urlEncode(const char *url);
 void cleanupBrowseData(lv_obj_t *list);
 lv_obj_t *createSettingsSidebar(lv_obj_t *screen, int activeIdx);
@@ -224,14 +231,33 @@ inline String decodeHTMLEntities(const String& str) {
     return result;
 }
 
-// Album art task
+// Album art task — stack lives in PSRAM to free internal SRAM for SDIO/WiFi DMA buffers
 extern TaskHandle_t albumArtTaskHandle;
+extern StaticTask_t albumArtTaskTCB;
+extern StackType_t* art_task_stack;
 extern volatile bool art_shutdown_requested;
 extern volatile bool art_abort_download;
+extern volatile bool art_suppress_source_change;  // Suppress intermediate art triggers during queue-select Seek→Play
+extern volatile bool cmd_queue_in_progress;        // CMD_PLAY_QUEUE_ITEM active — suppress all polling from drain through settle
+extern unsigned long last_cmd_queue_play_ms;       // Timestamp when CMD_PLAY_QUEUE_ITEM last cleared flags
 void albumArtTask(void *param);
+void createArtTask();   // PSRAM-stack wrapper — use instead of xTaskCreatePinnedToCore directly
+
+// Lyrics task — stack lives in PSRAM for same reason
+extern TaskHandle_t lyricsTaskHandle;
+extern StaticTask_t lyricsTaskTCB;
+extern StackType_t* lyrics_task_stack;
+extern volatile bool lyrics_shutdown_requested;
+
+// Sonos task shutdown (for OTA)
+extern volatile bool sonos_tasks_shutdown_requested;
+
+// Clock / screensaver
+void checkClockTrigger();
+void exitClockScreen();
+void clockBgTask(void* param);
 
 // Radio mode UI adaptation
-bool isCurrentlyRadio();
 void setRadioMode(bool enable);
 void updateRadioModeUI();
 

@@ -1,19 +1,21 @@
 #include "display_driver.h"
+#include "config.h"
 #include "jd9165_lcd.h"
 #include <esp_heap_caps.h>
 #include <esp_lcd_panel_ops.h>
+#include <esp_private/esp_cache_private.h>
 #include <driver/ppa.h>
 
 // ===== Display Configuration =====
 #define ROTATION_DEGREE 0             // No rotation
 #define USE_PPA_ACCELERATION 0        // PPA not used
-#define DISPLAY_WIDTH  1024           // Panel resolution: 1024x600
-#define DISPLAY_HEIGHT 600
 
 // ===== Global Variables =====
+
 static jd9165_lcd* lcd = nullptr;
 static lv_color_t *buf1 = nullptr;
 static lv_color_t *buf2 = nullptr;
+static lv_color_t *rotate_buf = NULL;  // Rotation buffer
 static lv_display_t *disp = nullptr;
 static bsp_lcd_handles_t lcd_handles;
 

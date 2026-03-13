@@ -16,8 +16,8 @@ void createWiFiScreen() {
     lv_obj_set_style_bg_color(scr_wifi, lv_color_hex(0x121212), 0);
     lv_obj_set_size(scr_wifi, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
 
-    // Create sidebar and get content area (WiFi is index 4)
-    lv_obj_t* content = createSettingsSidebar(scr_wifi, 4);
+    // Create sidebar and get content area (WiFi is index 5)
+    lv_obj_t* content = createSettingsSidebar(scr_wifi, 5);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(720);
@@ -156,6 +156,19 @@ void createWiFiScreen() {
     lv_obj_add_event_cb(kb, [](lv_event_t* e) {
         if (lv_event_get_code(e) == LV_EVENT_READY) {
             lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+        }
+    }, LV_EVENT_ALL, NULL);
+
+    // Show current connection status every time the screen is opened (issue #20).
+    // Without this the label always reads "Tap Scan to find networks" even when connected.
+    lv_obj_add_event_cb(scr_wifi, [](lv_event_t* e) {
+        if (lv_event_get_code(e) != LV_EVENT_SCREEN_LOADED) return;
+        if (WiFi.status() == WL_CONNECTED) {
+            lv_label_set_text_fmt(lbl_wifi_status, LV_SYMBOL_WIFI " Connected: %s", WiFi.SSID().c_str());
+            lv_obj_set_style_text_color(lbl_wifi_status, lv_color_hex(0x4ECB71), 0);
+        } else {
+            lv_label_set_text(lbl_wifi_status, "Not connected — tap Scan to find networks");
+            lv_obj_set_style_text_color(lbl_wifi_status, COL_TEXT2, 0);
         }
     }, LV_EVENT_ALL, NULL);
 }

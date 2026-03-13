@@ -10,6 +10,7 @@
 // Discovery
 // ============================================================================
 int SonosController::discoverDevices() {
+    if (!devices) { Serial.println("[SONOS] devices array not allocated"); return 0; }
     Serial.printf("[SONOS] Starting discovery...\n");
     deviceCount = 0;
 
@@ -144,50 +145,102 @@ int SonosController::discoverDevices() {
         lv_refr_now(NULL);
     }
 
-    // Deduplicate by room name to handle stereo pairs
-    // In stereo pairs, both speakers respond to SSDP but have the same room name
-    // Keep the first occurrence (usually the primary/left speaker)
-    Serial.printf("[SONOS] Starting deduplication process...\n");
+    // Fetch zone group topology to identify coordinator IPs for stereo pairs / bonded zones.
+    // Both speakers in a stereo pair respond to SSDP with the same room name, but only the
+    // coordinator IP accepts commands. SSDP response order is non-deterministic, so we must
+    // explicitly identify the coordinator rather than just keeping the first-seen IP.
+    const int MAX_COORDINATORS = 16;
+    String coordinatorRINCONs[MAX_COORDINATORS];
+    int coordCount = 0;
+    if (deviceCount > 0) {
+        Serial.printf("[SONOS] Fetching zone topology from %s...\n", devices[0].ip.toString().c_str());
+        coordCount = fetchTopologyCoordinators(devices[0].ip, coordinatorRINCONs, MAX_COORDINATORS);
+        if (coordCount == 0) {
+            Serial.printf("[SONOS] Topology unavailable - falling back to first-seen deduplication\n");
+        }
+    }
+
+    // Helper: returns true if dev's RINCON ID appears in the coordinator list
+    auto isCoordinator = [&](const SonosDevice& dev) -> bool {
+        if (dev.rinconID.length() == 0 || coordCount == 0) return false;
+        String rinconLower = dev.rinconID;
+        rinconLower.toLowerCase();
+        for (int k = 0; k < coordCount; k++) {
+            if (coordinatorRINCONs[k] == rinconLower) return true;
+        }
+        return false;
+    };
+
+    // Coordinator-aware deduplication by room name.
+    // When two IPs share the same room name (stereo pair / bonded zone), keep the coordinator.
+    Serial.printf("[SONOS] Starting coordinator-aware deduplication...\n");
     int uniqueCount = 0;
     for (int i = 0; i < deviceCount; i++) {
-        // Normalize room name: trim whitespace and convert to lowercase for comparison
         String normalizedCurrent = devices[i].roomName;
         normalizedCurrent.trim();
         normalizedCurrent.toLowerCase();
+        bool iIsCoord = isCoordinator(devices[i]);
 
         bool isDuplicate = false;
+        int replaceIdx = -1;  // index in unique list to swap (if i is coordinator and j is not)
+
         for (int j = 0; j < uniqueCount; j++) {
             String normalizedExisting = devices[j].roomName;
             normalizedExisting.trim();
             normalizedExisting.toLowerCase();
 
             if (normalizedExisting == normalizedCurrent) {
-                Serial.printf("[SONOS]   [DUPLICATE] '%s' (%s) matches existing '%s' (%s) - filtering out\n",
-                    devices[i].roomName.c_str(), devices[i].ip.toString().c_str(),
-                    devices[j].roomName.c_str(), devices[j].ip.toString().c_str());
                 isDuplicate = true;
+                if (iIsCoord && !isCoordinator(devices[j])) {
+                    // Current (i) is the coordinator; existing (j) is the slave — swap
+                    replaceIdx = j;
+                    Serial.printf("[SONOS]   [COORD SWAP] '%s': slave %s → coordinator %s\n",
+                        devices[i].roomName.c_str(),
+                        devices[j].ip.toString().c_str(),
+                        devices[i].ip.toString().c_str());
+                } else {
+                    Serial.printf("[SONOS]   [DUPLICATE] '%s' (%s) filtered (keeping %s%s)\n",
+                        devices[i].roomName.c_str(), devices[i].ip.toString().c_str(),
+                        devices[j].ip.toString().c_str(),
+                        isCoordinator(devices[j]) ? " [coord]" : "");
+                }
                 break;
             }
         }
 
         if (!isDuplicate) {
-            Serial.printf("[SONOS]   [UNIQUE] '%s' (%s) - keeping\n",
-                devices[i].roomName.c_str(), devices[i].ip.toString().c_str());
+            Serial.printf("[SONOS]   [UNIQUE] '%s' (%s)%s\n",
+                devices[i].roomName.c_str(), devices[i].ip.toString().c_str(),
+                iIsCoord ? " [coord]" : "");
             if (i != uniqueCount) {
-                // Move device to compact position
                 devices[uniqueCount] = devices[i];
             }
             uniqueCount++;
+        } else if (replaceIdx >= 0) {
+            devices[replaceIdx] = devices[i];  // Replace slave with coordinator
         }
     }
 
     int filteredCount = deviceCount - uniqueCount;
     if (filteredCount > 0) {
-        Serial.printf("[SONOS] Filtered %d duplicate(s) from stereo pairs\n", filteredCount);
+        Serial.printf("[SONOS] Filtered %d duplicate(s) from stereo pairs / bonded zones\n", filteredCount);
     } else {
         Serial.printf("[SONOS] No duplicates found - all %d devices are unique\n", uniqueCount);
     }
     deviceCount = uniqueCount;
+
+    // Fetch playing state for each unique zone so the devices screen shows which rooms are active
+    Serial.printf("[SONOS] Fetching playing state for %d zone(s)...\n", deviceCount);
+    for (int i = 0; i < deviceCount; i++) {
+        devices[i].isPlaying = fetchDevicePlayingState(&devices[i]);
+        Serial.printf("[SONOS]   '%s' (%s): %s\n",
+            devices[i].roomName.c_str(), devices[i].ip.toString().c_str(),
+            devices[i].isPlaying ? "PLAYING" : "stopped");
+        // Keep UI alive during the SOAP calls
+        lv_tick_inc(10);
+        lv_timer_handler();
+        lv_refr_now(NULL);
+    }
 
     if (deviceCount > 0) {
         prefs.putString("device_ip", devices[0].ip.toString());
@@ -195,6 +248,99 @@ int SonosController::discoverDevices() {
 
     Serial.printf("[SONOS] Discovery complete: %d visible zone(s)\n", deviceCount);
     return deviceCount;
+}
+
+// Fetch zone group topology via GetZoneGroupState SOAP and extract coordinator RINCON IDs.
+// Returns the number of coordinators found (0 on failure).
+// Coordinators are stored lowercase for case-insensitive comparison.
+//
+// NOTE: /status/topology was deprecated and no longer returns coordinator info on modern
+// Sonos firmware. GetZoneGroupState (ZoneGroupTopology service) is the correct API.
+// The ZoneGroupState inner XML may be HTML-entity-encoded inside the SOAP response.
+int SonosController::fetchTopologyCoordinators(IPAddress ip, String* coordinatorRINCONs, int maxCount) {
+    HTTPClient http;
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s:1400/ZoneGroupTopology/Control", ip.toString().c_str());
+
+    static const char soapBody[] =
+        "<?xml version=\"1.0\"?>"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+        "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+        "<s:Body><u:GetZoneGroupState xmlns:u=\"urn:schemas-upnp-org:service:ZoneGroupTopology:1\">"
+        "</u:GetZoneGroupState>"
+        "</s:Body></s:Envelope>";
+
+    http.begin(url);
+    http.setTimeout(3000);
+    http.addHeader("Content-Type", "text/xml; charset=\"utf-8\"");
+    http.addHeader("SOAPAction", "\"urn:schemas-upnp-org:service:ZoneGroupTopology:1#GetZoneGroupState\"");
+
+    int count = 0;
+    int code = http.POST((uint8_t*)soapBody, strlen(soapBody));
+    if (code == 200) {
+        String xml = http.getString();
+        // The ZoneGroupState inner XML is typically HTML-entity-encoded inside the SOAP response
+        // (e.g. &lt;ZoneGroups&gt; ... &lt;/ZoneGroups&gt;).  Decode then lowercase to handle
+        // both "Coordinator=" and any case variation uniformly.
+        xml.replace("&lt;", "<");
+        xml.replace("&gt;", ">");
+        xml.replace("&quot;", "\"");
+        xml.replace("&amp;", "&");  // must be last to avoid double-decoding
+        xml.toLowerCase();
+
+        // Parse all Coordinator="RINCON_..." attributes from ZoneGroup elements.
+        // After decoding + lowercase, they appear as: coordinator="rincon_..."
+        int searchPos = 0;
+        while (count < maxCount) {
+            int pos = xml.indexOf("coordinator=\"", searchPos);
+            if (pos < 0) break;
+            pos += 13;  // skip past coordinator="
+            int end = xml.indexOf("\"", pos);
+            if (end <= pos) break;
+            String rincon = xml.substring(pos, end);
+            if (rincon.length() > 0) {
+                coordinatorRINCONs[count++] = rincon;
+                Serial.printf("[SONOS]   Topology coordinator: %s\n", rincon.c_str());
+            }
+            searchPos = end + 1;
+        }
+        Serial.printf("[SONOS] Topology: %d coordinator(s) found\n", count);
+    } else {
+        Serial.printf("[SONOS] GetZoneGroupState failed (HTTP %d)\n", code);
+    }
+    http.end();
+    return count;
+}
+
+// Send a GetTransportInfo SOAP request directly to a device's IP and return true if playing.
+// Used during discovery to populate isPlaying for all zones (not just the selected one).
+bool SonosController::fetchDevicePlayingState(SonosDevice* dev) {
+    HTTPClient http;
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s:1400/MediaRenderer/AVTransport/Control",
+             dev->ip.toString().c_str());
+
+    static const char soapBody[] =
+        "<?xml version=\"1.0\"?>"
+        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" "
+        "s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">"
+        "<s:Body><u:GetTransportInfo xmlns:u=\"urn:schemas-upnp-org:service:AVTransport:1\">"
+        "<InstanceID>0</InstanceID></u:GetTransportInfo>"
+        "</s:Body></s:Envelope>";
+
+    http.begin(url);
+    http.setTimeout(3000);
+    http.addHeader("Content-Type", "text/xml; charset=\"utf-8\"");
+    http.addHeader("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\"");
+
+    bool playing = false;
+    int code = http.POST((uint8_t*)soapBody, strlen(soapBody));
+    if (code == 200) {
+        String resp = http.getString();
+        playing = (resp.indexOf("PLAYING") >= 0);
+    }
+    http.end();
+    return playing;
 }
 
 void SonosController::getRoomName(SonosDevice* dev) {
@@ -237,4 +383,95 @@ String SonosController::getCachedDeviceIP() {
 
 void SonosController::cacheDeviceIP(String ip) {
     prefs.putString("device_ip", ip);
+}
+
+void SonosController::cacheSelectedDevice() {
+    SonosDevice* dev = getCurrentDevice();
+    if (!dev) {
+        Serial.println("[SONOS] Cannot cache - no device selected");
+        return;
+    }
+
+    prefs.putString("cached_ip", dev->ip.toString());
+    prefs.putString("cached_room", dev->roomName);
+    prefs.putString("cached_rincon", dev->rinconID);
+
+    Serial.printf("[SONOS] Cached device: %s (%s) [%s]\n",
+                  dev->roomName.c_str(),
+                  dev->ip.toString().c_str(),
+                  dev->rinconID.c_str());
+}
+
+bool SonosController::tryLoadCachedDevice() {
+    if (!devices) { Serial.println("[SONOS] devices array not allocated"); return false; }
+    String cachedIP = prefs.getString("cached_ip", "");
+    String cachedRoom = prefs.getString("cached_room", "");
+    String cachedRincon = prefs.getString("cached_rincon", "");
+
+    if (cachedIP.length() == 0 || cachedRoom.length() == 0) {
+        Serial.println("========================================");
+        Serial.println("[SONOS] No cached device in NVS");
+        Serial.println("[SONOS] Running full SSDP discovery (~15 seconds)...");
+        Serial.println("========================================");
+        return false;
+    }
+
+    Serial.printf("[SONOS] Found cached device: %s (%s)\n", cachedRoom.c_str(), cachedIP.c_str());
+
+    // Parse IP address
+    IPAddress ip;
+    if (!ip.fromString(cachedIP)) {
+        Serial.printf("[SONOS] Invalid cached IP: %s - will run discovery\n", cachedIP.c_str());
+        return false;
+    }
+
+    // Quick HTTP check to verify device is reachable (with short timeout)
+    HTTPClient http;
+    char url[128];
+    snprintf(url, sizeof(url), "http://%s:1400/xml/device_description.xml", cachedIP.c_str());
+
+    http.begin(url);
+    http.setTimeout(5000);  // 5s timeout - speaker may take a few seconds to respond after WiFi join
+
+    Serial.printf("[SONOS] Verifying cached device is reachable at %s...\n", cachedIP.c_str());
+    int code = http.GET();
+    http.end();
+
+    if (code != 200) {
+        Serial.println("========================================");
+        Serial.printf("[SONOS] Cached device '%s' unreachable (HTTP %d)\n", cachedRoom.c_str(), code);
+        Serial.println("[SONOS] Running full SSDP discovery (~15 seconds)...");
+        Serial.println("========================================");
+        return false;
+    }
+
+    // Device is reachable - add it to the device list
+    deviceCount = 1;
+    devices[0].ip = ip;
+    devices[0].roomName = cachedRoom;
+    devices[0].rinconID = cachedRincon;
+    devices[0].isPlaying = false;
+    devices[0].volume = 50;
+    devices[0].isMuted = false;
+    devices[0].shuffleMode = false;
+    devices[0].repeatMode = "NONE";
+    devices[0].connected = false;
+    devices[0].errorCount = 0;
+    devices[0].currentTrackNumber = 0;
+    devices[0].totalTracks = 0;
+    devices[0].queueSize = 0;
+    devices[0].groupCoordinatorUUID = "";
+    devices[0].isGroupCoordinator = true;
+    devices[0].groupMemberCount = 1;
+
+    Serial.println("========================================");
+    Serial.println("[SONOS] ✓ FAST BOOT: Device loaded from NVS cache");
+    Serial.printf("[SONOS]   Speaker: %s\n", cachedRoom.c_str());
+    Serial.printf("[SONOS]   IP: %s\n", cachedIP.c_str());
+    Serial.printf("[SONOS]   RINCON: %s\n", cachedRincon.c_str());
+    Serial.println("[SONOS]   Boot time saved: ~13 seconds");
+    Serial.println("[SONOS]   To scan for other devices: Settings → Speakers → Scan");
+    Serial.println("========================================");
+
+    return true;
 }

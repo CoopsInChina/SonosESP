@@ -11,7 +11,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
-#define MAX_SONOS_DEVICES 10
+#define MAX_SONOS_DEVICES 32
 #define QUEUE_ITEMS_MAX 50  // Keep at 50 for stable performance
 
 // Command queue for network task
@@ -26,6 +26,7 @@ typedef enum {
     CMD_SET_REPEAT,
     CMD_SEEK,
     CMD_PLAY_QUEUE_ITEM,
+    CMD_UPDATE_QUEUE,   // Refresh queue from network (safe: runs in network task, not UI thread)
     CMD_UPDATE_STATE,
     CMD_JOIN_GROUP,
     CMD_LEAVE_GROUP
@@ -112,7 +113,9 @@ struct SonosDevice {
 
 class SonosController {
 private:
-    SonosDevice devices[MAX_SONOS_DEVICES];
+    // Allocated in PSRAM to preserve DMA-capable SRAM for SDIO WiFi ring buffers.
+    // MAX_SONOS_DEVICES × ~3.5KB = ~112KB - too large for DMA SRAM (~160KB total free).
+    SonosDevice* devices;
     int deviceCount;
     int currentDeviceIndex;
     WiFiUDP udp;
@@ -129,7 +132,9 @@ private:
     // Internal methods
     String sendSOAP(const char* service, const char* action, const char* args);
     void getRoomName(SonosDevice* dev);
-    int timeToSeconds(String time);
+    int fetchTopologyCoordinators(IPAddress ip, String* coordinatorRINCONs, int maxCount);
+    bool fetchDevicePlayingState(SonosDevice* dev);
+    int timeToSeconds(const String& time);
     void notifyUI(UIUpdateType_e type);
     
     // Task functions
@@ -149,6 +154,8 @@ public:
     int discoverDevices();
     String getCachedDeviceIP();
     void cacheDeviceIP(String ip);
+    bool tryLoadCachedDevice();        // Try to load cached device from NVS (fast boot)
+    void cacheSelectedDevice();        // Save selected device to NVS
     int getDeviceCount() { return deviceCount; }
     SonosDevice* getDevice(int index);
     SonosDevice* getCurrentDevice();
@@ -163,16 +170,18 @@ public:
     void setShuffle(bool enable);
     void setRepeat(const char* mode);  // "NONE", "ONE", "ALL"
     void playQueueItem(int index);     // Play specific track from queue (1-based)
+    void requestQueueUpdate();         // Async queue refresh (runs in network task, safe from UI thread)
     bool saveCurrentTrack(const char* playlistName = "Favorites");  // Save current track to playlist
     String browseContent(const char* objectID, int startIndex = 0, int count = 100);  // Browse ContentDirectory
     bool playURI(const char* uri, const char* metadata = "");  // Play URI with optional metadata
-    bool playPlaylist(const char* playlistID);  // Play a Sonos playlist by ID (e.g., "SQ:25")
+    bool playPlaylist(const char* playlistID, const char* title = "Playlist");  // Play a Sonos playlist by ID (e.g., "SQ:25")
     bool playContainer(const char* containerURI, const char* metadata = "");  // Play a container URI with DIDL metadata
     String listMusicServices();  // List available music services
     String getCurrentTrackInfo();  // Get current track URI and metadata for analysis
 
     // Helper methods (public for UI)
     String extractXML(const String& xml, const char* tag);
+    String extractXMLRange(const String& xml, const char* tag, int rangeStart, int rangeEnd);
     String decodeHTML(String text);
 
     // Volume control (non-blocking, queued)
@@ -194,6 +203,10 @@ public:
     // Queue access
     QueueHandle_t getCommandQueue() { return commandQueue; }
     QueueHandle_t getUIUpdateQueue() { return uiUpdateQueue; }
+
+    // Task handles for stack monitoring
+    TaskHandle_t getNetworkTaskHandle() { return networkTaskHandle; }
+    TaskHandle_t getPollingTaskHandle() { return pollingTaskHandle; }
     
     // Error handling
     void handleNetworkError(const char* message);
@@ -207,8 +220,8 @@ public:
     bool isDeviceInGroup(int deviceIndex, int coordinatorIndex);  // Check if device is in coordinator's group
 
     // Task management for OTA
-    void suspendTasks();  // Suspend polling/network tasks for OTA
-    void resumeTasks();   // Resume polling/network tasks after OTA
+    void suspendTasks();  // Delete polling/network tasks for OTA (frees WiFi buffers immediately)
+    void resumeTasks();   // Recreate polling/network tasks after OTA (only on failure)
 };
 
 #endif // SONOS_CONTROLLER_H
