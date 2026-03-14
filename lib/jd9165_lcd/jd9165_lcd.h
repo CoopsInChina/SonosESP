@@ -27,6 +27,7 @@ public:
     void fillScreen(uint16_t color);
     void te_on();
     void te_off();
+    void initBacklightPWM();
     uint16_t width();
     uint16_t height();
     bool get_handle(bsp_lcd_handles_t *ret_handles);

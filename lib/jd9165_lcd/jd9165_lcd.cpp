@@ -13,6 +13,15 @@
 #include "Arduino.h"
 #include "esp_lcd_jd9165.h"
 #include "jd9165_lcd.h"
+#include "driver/ledc.h"
+
+#define BACKLIGHT_PIN 23
+#define BACKLIGHT_CHANNEL LEDC_CHANNEL_0
+#define BACKLIGHT_TIMER LEDC_TIMER_0
+#define BACKLIGHT_MODE LEDC_LOW_SPEED_MODE
+#define BACKLIGHT_DUTY_RES LEDC_TIMER_13_BIT
+#define BACKLIGHT_FREQ 1000
+
 
 #define LCD_H_RES 1024
 #define LCD_V_RES 600
@@ -23,9 +32,6 @@
 // “VDD_MIPI_DPHY”应供电 2.5V，可从内部 LDO 稳压器或外部 LDO 芯片获取电源
 #define EXAMPLE_MIPI_DSI_PHY_PWR_LDO_CHAN 3 // LDO_VO3 连接至 VDD_MIPI_DPHY
 #define EXAMPLE_MIPI_DSI_PHY_PWR_LDO_VOLTAGE_MV 2500
-#define EXAMPLE_LCD_BK_LIGHT_ON_LEVEL 1
-#define EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL !EXAMPLE_LCD_BK_LIGHT_ON_LEVEL
-#define EXAMPLE_PIN_NUM_BK_LIGHT GPIO_NUM_23
 
 static const char *TAG = "example";
 esp_lcd_panel_handle_t panel_handle = NULL;
@@ -50,29 +56,59 @@ void jd9165_lcd::example_bsp_enable_dsi_phy_power()
 #endif
 }
 
-void jd9165_lcd::example_bsp_init_lcd_backlight()
-{
-#if EXAMPLE_PIN_NUM_BK_LIGHT >= 0
-    gpio_config_t bk_gpio_config = {
-        .pin_bit_mask = 1ULL << EXAMPLE_PIN_NUM_BK_LIGHT,
-        .mode = GPIO_MODE_OUTPUT
-        };
-    ESP_ERROR_CHECK(gpio_config(&bk_gpio_config));
-#endif
+
+
+bool pwm_initialized = false;
+
+void jd9165_lcd::initBacklightPWM() {
+    if (pwm_initialized) return;
+    
+    ledc_timer_config_t ledc_timer = {
+        .speed_mode = BACKLIGHT_MODE,
+        .duty_resolution = BACKLIGHT_DUTY_RES,
+        .timer_num = BACKLIGHT_TIMER,
+        .freq_hz = BACKLIGHT_FREQ,
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+    ledc_timer_config(&ledc_timer);
+    
+    ledc_channel_config_t ledc_channel = {
+        .gpio_num = BACKLIGHT_PIN,
+        .speed_mode = BACKLIGHT_MODE,
+        .channel = BACKLIGHT_CHANNEL,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = BACKLIGHT_TIMER,
+        .duty = 8191,  // 100%
+        .hpoint = 0
+    };
+    ledc_channel_config(&ledc_channel);
+    
+    pwm_initialized = true;
 }
 
 void jd9165_lcd::example_bsp_set_lcd_backlight(uint32_t level)
 {
-#if EXAMPLE_PIN_NUM_BK_LIGHT >= 0
-    gpio_set_level(EXAMPLE_PIN_NUM_BK_LIGHT, level);
-#endif
+    if (!pwm_initialized) {
+        initBacklightPWM();
+    }
+    
+    // 'level' is 0-100 percentage
+    level = constrain(level, 0, 100);
+    
+    // Convert percentage to PWM duty (0-8191)
+    // Keep minimum 5% for visibility (409 duty)
+    uint32_t duty = map(level, 0, 100, 0, 8191);
+    if (level > 0 && duty < 409) duty = 409;  // Minimum 5%
+    
+    ledc_set_duty(BACKLIGHT_MODE, BACKLIGHT_CHANNEL, duty);
+    ledc_update_duty(BACKLIGHT_MODE, BACKLIGHT_CHANNEL);
+    
+    Serial.printf("[Backlight] Set to %d%% (duty: %d)\n", level, duty);
 }
 
 void jd9165_lcd::begin()
 {   
     example_bsp_enable_dsi_phy_power();
-    example_bsp_init_lcd_backlight();
-    example_bsp_set_lcd_backlight(EXAMPLE_LCD_BK_LIGHT_OFF_LEVEL);
 
     // 首先创建 MIPI DSI 总线，它还将初始化 DSI PHY
     esp_lcd_dsi_bus_handle_t mipi_dsi_bus;
@@ -104,8 +140,6 @@ void jd9165_lcd::begin()
     ESP_ERROR_CHECK(esp_lcd_panel_reset(panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(panel_handle));
 
-    // 打开背光
-    example_bsp_set_lcd_backlight(EXAMPLE_LCD_BK_LIGHT_ON_LEVEL);
 }
 
 void jd9165_lcd::lcd_draw_bitmap(uint16_t x_start, uint16_t y_start, uint16_t x_end, uint16_t y_end, uint16_t *color_data)
