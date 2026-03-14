@@ -5,6 +5,7 @@
  */
 
 #include "ui_common.h"
+#include "config.h"
 
 // Forward declaration for sidebar (now in ui_sidebar.cpp)
 lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
@@ -219,7 +220,7 @@ void createSourcesScreen() {
     lv_obj_t* content = createSettingsSidebar(scr_sources, 3);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
-    int content_width = SCALE(720);
+    int content_width = SCALE(620);
     lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
 
     // Title
@@ -231,10 +232,11 @@ void createSourcesScreen() {
 
     // Scrollable list
     lv_obj_t* list = lv_obj_create(content);
+     int list_width = SCALE(620-CONTENT_PAD_EXTRA);
     int list_y = SCALE(50);
-    int list_height = SCALE(405);
+    int list_height = SCALE(380);
     lv_obj_set_pos(list, 0, list_y);
-    lv_obj_set_size(list, content_width, list_height);
+    lv_obj_set_size(list, list_width, list_height);
     lv_obj_set_style_bg_color(list, COL_BG, 0);
     lv_obj_set_style_border_width(list, 0, 0);
     lv_obj_set_style_pad_all(list, 0, 0);
@@ -258,7 +260,7 @@ void createSourcesScreen() {
     for (int i = 0; i < 1; i++) {
         lv_obj_t* btn = lv_btn_create(list);
         int btn_height = SCALE(50);
-        lv_obj_set_size(btn, content_width, btn_height);
+        lv_obj_set_size(btn, list_width, btn_height);
         
         int btn_radius = SCALE(12);
         lv_obj_set_style_radius(btn, btn_radius, 0);
@@ -333,7 +335,7 @@ void createBrowseScreen() {
     lv_obj_t* content = createSettingsSidebar(scr_browse, 3);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
-    int content_width = SCALE(720);
+    int content_width = SCALE(620);
     lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
 
     // Title
@@ -346,7 +348,7 @@ void createBrowseScreen() {
     // Content list
     lv_obj_t* list = lv_obj_create(content);
     int list_y = SCALE(50);
-    int list_height = SCALE(405);
+    int list_height = SCALE(380);
     lv_obj_set_pos(list, 0, list_y);
     lv_obj_set_size(list, content_width, list_height);
     lv_obj_set_style_bg_color(list, COL_BG, 0);

@@ -4,6 +4,7 @@
  */
 
 #include "ui_common.h"
+#include "config.h"
 
 // Forward declaration
 lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
@@ -39,7 +40,7 @@ void refreshDeviceList() {
         lv_obj_t* btn = lv_btn_create(list_devices);
         
         // Calculate dimensions first to avoid complex expressions
-        int btn_width = SCALE(720);
+        int btn_width = SCALE(620);
         int btn_height;
         if (hasGroup || isPlaying) {
             btn_height = SCALE(70);  // Use SCALE for both dimensions
@@ -208,7 +209,7 @@ void refreshDeviceList() {
             bool isSelected = (current && dev->ip == current->ip);
 
             lv_obj_t* btn = lv_btn_create(list_devices);
-            int btn_width = SCALE(720);
+            int btn_width = SCALE(620);
             int btn_height = SCALE(60);
             lv_obj_set_size(btn, btn_width, btn_height);
             lv_obj_set_user_data(btn, (void*)(intptr_t)i);
@@ -259,12 +260,12 @@ void createDevicesScreen() {
     lv_obj_t* content = createSettingsSidebar(scr_devices, 1);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
-    int content_width = SCALE(720);
+    int content_width = SCALE(620);
     lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
 
     // Title + Scan button row
     lv_obj_t* title_row = lv_obj_create(content);
-    int title_width = SCALE(720);
+    int title_width = SCALE(620);
     int title_height = SCALE(40);
     lv_obj_set_size(title_row, title_width, title_height);
     lv_obj_set_pos(title_row, 0, 0);
@@ -285,7 +286,7 @@ void createDevicesScreen() {
     int btn_width = SCALE(110);
     int btn_height = SCALE(40);
     lv_obj_set_size(btn_sonos_scan, btn_width, btn_height);
-    lv_obj_align(btn_sonos_scan, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_align(btn_sonos_scan, LV_ALIGN_RIGHT_MID, -SCALE(CONTENT_PAD_EXTRA), 0);
     lv_obj_set_style_bg_color(btn_sonos_scan, COL_ACCENT, 0);
     
     int btn_radius = SCALE(20);
@@ -309,7 +310,7 @@ void createDevicesScreen() {
 
     // Devices list
     list_devices = lv_list_create(content);
-    int list_width = SCALE(720);
+    int list_width = SCALE(620-CONTENT_PAD_EXTRA);
     int list_height = SCALE(380);
     int list_y = SCALE(75);
     lv_obj_set_size(list_devices, list_width, list_height);

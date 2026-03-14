@@ -144,8 +144,8 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
     lv_obj_set_style_border_width(content, 0, 0);
     lv_obj_set_style_radius(content, 0, 0);
     
-    int content_pad = SCALE(24);
-    lv_obj_set_style_pad_all(content, content_pad, 0);
+    
+    lv_obj_set_style_pad_all(content, SCALE(CONTENT_PAD), 0);
 
     return content;
 }

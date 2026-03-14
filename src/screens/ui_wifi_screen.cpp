@@ -4,6 +4,7 @@
  */
 
 #include "ui_common.h"
+#include "config.h"
 
 // Forward declaration
 lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
@@ -20,7 +21,8 @@ void createWiFiScreen() {
     lv_obj_t* content = createSettingsSidebar(scr_wifi, 5);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
-    int content_width = SCALE(720);
+    int content_width = SCALE(620);
+    int content_pad = SCALE(24);
     lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
 
     // Title + Scan button row
@@ -40,13 +42,13 @@ void createWiFiScreen() {
     lv_obj_align(lbl_title, LV_ALIGN_LEFT_MID, 0, 0);
 
     btn_wifi_scan = lv_btn_create(title_row);
-    int scan_btn_width = SCALE(90);
-    int scan_btn_height = SCALE(32);
+    int scan_btn_width = SCALE(110);
+    int scan_btn_height = SCALE(40);
     lv_obj_set_size(btn_wifi_scan, scan_btn_width, scan_btn_height);
-    lv_obj_align(btn_wifi_scan, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_align(btn_wifi_scan, LV_ALIGN_RIGHT_MID, -SCALE(CONTENT_PAD_EXTRA), 0);
     lv_obj_set_style_bg_color(btn_wifi_scan, COL_ACCENT, 0);
     
-    int scan_btn_radius = SCALE(16);
+    int scan_btn_radius = SCALE(20);
     lv_obj_set_style_radius(btn_wifi_scan, scan_btn_radius, 0);
     lv_obj_set_style_shadow_width(btn_wifi_scan, 0, 0);
     lv_obj_add_event_cb(btn_wifi_scan, ev_wifi_scan, LV_EVENT_CLICKED, NULL);
@@ -54,7 +56,7 @@ void createWiFiScreen() {
     lbl_scan_text = lv_label_create(btn_wifi_scan);
     lv_label_set_text(lbl_scan_text, LV_SYMBOL_REFRESH " Scan");
     lv_obj_set_style_text_color(lbl_scan_text, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_text_font(lbl_scan_text, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_font(lbl_scan_text, &lv_font_montserrat_16, 0);
     lv_obj_center(lbl_scan_text);
 
     // Status label

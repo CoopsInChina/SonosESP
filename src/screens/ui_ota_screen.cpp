@@ -4,6 +4,7 @@
  */
 
 #include "ui_common.h"
+#include "config.h"
 
 // Forward declaration
 lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
@@ -20,7 +21,7 @@ void createOTAScreen() {
     lv_obj_t* content = createSettingsSidebar(scr_ota, 7);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
-    int content_width = SCALE(720);
+    int content_width = SCALE(20);
     lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
 
     // Title
@@ -32,7 +33,7 @@ void createOTAScreen() {
 
     // Version info card
     lv_obj_t* card_version = lv_obj_create(content);
-    int card_width = SCALE(720);
+    int card_width = SCALE(620-CONTENT_PAD);
     int card_height = SCALE(100);
     int card_y = SCALE(40);
     lv_obj_set_size(card_version, card_width, card_height);
@@ -135,7 +136,7 @@ lv_obj_add_event_cb(dd_ota_channel, [](lv_event_t* e) {
     lv_label_set_text(lbl_ota_status, "Tap 'Check for Updates' to begin");
     lv_obj_set_style_text_color(lbl_ota_status, COL_TEXT2, 0);
     lv_obj_set_style_text_font(lbl_ota_status, &lv_font_montserrat_14, 0);
-    lv_obj_set_width(lbl_ota_status, SCALE(720));
+    lv_obj_set_width(lbl_ota_status, SCALE(620));
     lv_label_set_long_mode(lbl_ota_status, LV_LABEL_LONG_WRAP);
 
     // Progress label
@@ -211,7 +212,7 @@ lv_obj_add_event_cb(dd_ota_channel, [](lv_event_t* e) {
         "Stable: Auto-releases | Nightly: Latest test builds (may be unstable)");
     lv_obj_set_style_text_color(lbl_info, COL_TEXT2, 0);
     lv_obj_set_style_text_font(lbl_info, &lv_font_montserrat_12, 0);
-    lv_obj_set_width(lbl_info, SCALE(720));
+    lv_obj_set_width(lbl_info, SCALE(620));
     lv_label_set_long_mode(lbl_info, LV_LABEL_LONG_WRAP);
     lv_obj_set_pos(lbl_info, 0, SCALE(400));
 }

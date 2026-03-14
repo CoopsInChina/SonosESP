@@ -4,6 +4,7 @@
  */
 
 #include "ui_common.h"
+#include "config.h"
 
 // Forward declaration
 lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
@@ -52,7 +53,7 @@ void refreshGroupsList() {
 
         // Create group header button - taller to show now playing info
         lv_obj_t* btn = lv_btn_create(list_groups);
-        int btn_width = SCALE(720);
+        int btn_width = SCALE(620);
         int btn_height = (isPlaying && hasTrack) ? SCALE(85) : SCALE(70);
         lv_obj_set_size(btn, btn_width, btn_height);
         lv_obj_set_user_data(btn, (void*)(intptr_t)i);
@@ -191,7 +192,7 @@ void refreshGroupsList() {
                 int removeBtn_width = SCALE(90);
                 int removeBtn_height = SCALE(35);
                 lv_obj_set_size(removeBtn, removeBtn_width, removeBtn_height);
-                lv_obj_align(removeBtn, LV_ALIGN_RIGHT_MID, SCALE(-5), 0);
+                lv_obj_align(removeBtn, LV_ALIGN_RIGHT_MID, -5, 0);
                 lv_obj_set_style_bg_color(removeBtn, lv_color_hex(0x8B0000), 0);
                 
                 int removeBtn_radius = SCALE(8);
@@ -224,7 +225,7 @@ void refreshGroupsList() {
         if (coordinator) {
             // Header for available speakers
             lv_obj_t* hdr = lv_obj_create(list_groups);
-            int hdr_width = SCALE(720);
+            int hdr_width = SCALE(620);
             int hdr_height = SCALE(40);
             lv_obj_set_size(hdr, hdr_width, hdr_height);
             lv_obj_set_style_bg_color(hdr, lv_color_hex(0x1A1A1A), 0);
@@ -253,7 +254,7 @@ void refreshGroupsList() {
                 if (!dev->isGroupCoordinator) continue;
 
                 lv_obj_t* addBtn = lv_btn_create(list_groups);
-                int addBtn_width = SCALE(720);
+                int addBtn_width = SCALE(620);
                 int addBtn_height = SCALE(55);
                 lv_obj_set_size(addBtn, addBtn_width, addBtn_height);
                 lv_obj_set_user_data(addBtn, (void*)(intptr_t)i);
@@ -308,12 +309,12 @@ void createGroupsScreen() {
     lv_obj_t* content = createSettingsSidebar(scr_groups, 2);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
-    int content_width = SCALE(720);
+    int content_width = SCALE(620);
     lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
 
     // Title + Refresh button row
     lv_obj_t* title_row = lv_obj_create(content);
-    int title_row_width = SCALE(720);
+    int title_row_width = SCALE(620);
     int title_row_height = SCALE(40);
     lv_obj_set_size(title_row, title_row_width, title_row_height);
     lv_obj_set_pos(title_row, 0, 0);
@@ -332,7 +333,7 @@ void createGroupsScreen() {
     int btn_width = SCALE(110);
     int btn_height = SCALE(40);
     lv_obj_set_size(btn_groups_scan, btn_width, btn_height);
-    lv_obj_align(btn_groups_scan, LV_ALIGN_RIGHT_MID, 0, 0);
+    lv_obj_align(btn_groups_scan, LV_ALIGN_RIGHT_MID, -SCALE(CONTENT_PAD_EXTRA), 0);
     lv_obj_set_style_bg_color(btn_groups_scan, COL_ACCENT, 0);
     
     int btn_radius = SCALE(20);
@@ -395,7 +396,7 @@ void createGroupsScreen() {
 
     // Groups list
     list_groups = lv_obj_create(content);
-    int list_width = SCALE(720);
+    int list_width = SCALE(620-CONTENT_PAD_EXTRA);
     int list_height = SCALE(380);
     int list_y = SCALE(75);
     lv_obj_set_size(list_groups, list_width, list_height);

@@ -232,4 +232,10 @@
 #define WATCHDOG_TIMEOUT_SEC    30          // Watchdog timeout (device reboots if stuck)
 #define HEAP_LOG_INTERVAL_MS    60000       // Log heap status every 60 seconds
 
+// =============================================================================
+// CONTENT PADDING
+// =============================================================================
+#define CONTENT_PAD       24          // Horizontal padding for content areas
+#define CONTENT_PAD_EXTRA 50         // Create space for scrollbar by adding extra padding to the right
+
 #endif // CONFIG_H
