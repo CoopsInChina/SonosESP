@@ -21,7 +21,7 @@ void createOTAScreen() {
     lv_obj_t* content = createSettingsSidebar(scr_ota, 7);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
-    int content_width = SCALE(20);
+    int content_width = SCALE(620);
     lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
 
     // Title

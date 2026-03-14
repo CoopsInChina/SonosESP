@@ -13,7 +13,7 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
     // ========== LEFT SIDEBAR ==========
     lv_obj_t* sidebar = lv_obj_create(screen);
     int sidebar_width = SCALE(180);
-    int sidebar_height = SCALE(480);
+    int sidebar_height = DISPLAY_HEIGHT;
     lv_obj_set_size(sidebar, sidebar_width, sidebar_height);
     lv_obj_set_pos(sidebar, 0, 0);
     lv_obj_set_style_bg_color(sidebar, lv_color_hex(0x1A1A1A), 0);
@@ -135,7 +135,7 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
     // ========== RIGHT CONTENT AREA ==========
     lv_obj_t* content = lv_obj_create(screen);
     int content_width = SCALE(620);
-    int content_height = SCALE(480);
+    int content_height = DISPLAY_HEIGHT;
     lv_obj_set_size(content, content_width, content_height);
     
     int content_x = SCALE(180);
