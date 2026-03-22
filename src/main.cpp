@@ -62,7 +62,7 @@ void setup() {
 
     // Debug: Log what was loaded from NVS
     if (ssid.length() > 0) {
-        Serial.printf("[WIFI] Loaded from NVS: SSID='%s' (pass length: %d)\n", ssid.c_str(), pass.length());
+        Serial.printf("[WIFI] Loaded from NVS: SSID='%s', (length: %d)\n", ssid.c_str(), pass.length());
     } else {
         Serial.println("[WIFI] No saved credentials found in NVS, using defaults");
     }
@@ -102,28 +102,9 @@ void setup() {
     // Brightness will be set after display_init() is called
     Serial.println("[DISPLAY] ESP32-P4 uses ST7701 backlight control (no PWM needed)");
 
+    //Initialise WiFi Connection
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);  // keep C6 radio always active — no modem sleep on mains-powered device
-    // ESP32-C6 WiFi initialization delay - fixes ESP-Hosted SDIO timing issues
-    vTaskDelay(pdMS_TO_TICKS(WIFI_INIT_DELAY_MS));
-    WiFi.begin(ssid.c_str(), pass.c_str());
-    Serial.printf("[WIFI] Connecting to '%s'", ssid.c_str());
-    int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries++ < WIFI_CONNECT_RETRIES) {
-        vTaskDelay(pdMS_TO_TICKS(WIFI_CONNECT_TIMEOUT_MS));
-        Serial.print(".");
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.printf("\n[WIFI] Connected - IP: %s\n", WiFi.localIP().toString().c_str());
-        // Start NTP sync (SNTP daemon — no HTTPS, tiny UDP packets)
-        configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-        // Apply user-selected timezone via POSIX TZ string
-        setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
-        tzset();
-        Serial.printf("[NTP] Sync started, TZ=%s\n", CLOCK_ZONES[clock_tz_idx].name);
-    } else {
-        Serial.println("\n[WIFI] Connection failed - will retry from settings");
-    }
+    WiFi.setSleep(false);
 
     // === Memory map logged once at boot (post-WiFi, pre-LVGL) ===
     // Used to diagnose DMA depletion: compare to runtime [ART/*/MEM] logs.
@@ -224,7 +205,7 @@ void setup() {
         lv_timer_handler();
     };
 
-    updateBootProgress(10);  // Initial display
+    updateBootProgress(5);  // Initial display
 
     // Add global touch callback for screen wake
     lv_display_add_event_cb(lv_display_get_default(), [](lv_event_t* e) {
@@ -233,31 +214,70 @@ void setup() {
         }
     }, LV_EVENT_PRESSED, NULL);
 
-    updateBootProgress(20);  // Callbacks ready
+    updateBootProgress(10);  // Callbacks ready
 
     // Initialize lyrics PSRAM buffer before creating screens
     initLyrics();
 
     createMainScreen();
-    updateBootProgress(35);
+    updateBootProgress(15);
 
     createDevicesScreen();
-    updateBootProgress(45);
+    updateBootProgress(20);
 
     createQueueScreen();
-    updateBootProgress(55);
+    updateBootProgress(22);
 
     createSettingsScreen();
-    updateBootProgress(65);
+    updateBootProgress(25);
 
     createDisplaySettingsScreen();
-    updateBootProgress(70);
+    updateBootProgress(30);
+   
+    // Connect to WiFi
+    int retryCount = 0;
+    int maxRetries = 6;
+    
+
+    while (retryCount < maxRetries && WiFi.status() != WL_CONNECTED) {
+        Serial.printf("[WIFI] Attempt %d/%d to connect to '%s'\n", retryCount+1, maxRetries, ssid.c_str());
+        WiFi.begin(ssid.c_str(), pass.c_str());
+        
+        unsigned long startAttemptTime = millis();
+        bool connected = false;
+        
+        // Wait for connection with a timeout (e.g., 10 seconds)
+        while (millis() - startAttemptTime < 10000) {
+            if (WiFi.status() == WL_CONNECTED) {
+                
+                break;
+            }
+            delay(500);
+            Serial.print(".");
+        }
+        
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("\n[WIFI] Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
+            
+        } else {
+            Serial.println("\n[WIFI] Attempt failed. Retrying...");
+            retryCount++;
+            delay(1000); // Wait a second before retrying
+            updateBootProgress(30+(retryCount * 5)); // Shows system still alive while retrying
+        }
+    }
+    
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("[WIFI] All connection attempts failed.");
+        }
+    
+    updateBootProgress(60);
 
     createWiFiScreen();
-    updateBootProgress(75);
+    updateBootProgress(62);
 
     createOTAScreen();
-    updateBootProgress(80);
+    updateBootProgress(65);
 
     // =========================================================================
     // BOOT OTA FAST PATH — before any background tasks start
@@ -324,20 +344,21 @@ void setup() {
     }
 
     createSourcesScreen();
-    updateBootProgress(83);
+    updateBootProgress(68);
 
     createGroupsScreen();
+    updateBootProgress(70);
     createGeneralScreen();
     createClockScreen();
     createClockSettingsScreen();
-    updateBootProgress(85);
+    updateBootProgress(80);
 
     art_mutex = xSemaphoreCreateMutex();
     createArtTask();  // PSRAM stack — frees 20KB internal SRAM for SDIO/WiFi DMA
-    updateBootProgress(90);
+    updateBootProgress(85);
 
     sonos.begin();
-    updateBootProgress(95);
+    updateBootProgress(90);
 
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[SONOS] WiFi not connected at boot - deferring discovery");
