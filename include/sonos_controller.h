@@ -11,7 +11,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 
-#define MAX_SONOS_DEVICES 10
+#define MAX_SONOS_DEVICES 32
 #define QUEUE_ITEMS_MAX 50  // Keep at 50 for stable performance
 
 // Command queue for network task
@@ -26,6 +26,7 @@ typedef enum {
     CMD_SET_REPEAT,
     CMD_SEEK,
     CMD_PLAY_QUEUE_ITEM,
+    CMD_UPDATE_QUEUE,   // Refresh queue from network (safe: runs in network task, not UI thread)
     CMD_UPDATE_STATE,
     CMD_JOIN_GROUP,
     CMD_LEAVE_GROUP
@@ -112,7 +113,9 @@ struct SonosDevice {
 
 class SonosController {
 private:
-    SonosDevice devices[MAX_SONOS_DEVICES];
+    // Allocated in PSRAM to preserve DMA-capable SRAM for SDIO WiFi ring buffers.
+    // MAX_SONOS_DEVICES × ~3.5KB = ~112KB - too large for DMA SRAM (~160KB total free).
+    SonosDevice* devices;
     int deviceCount;
     int currentDeviceIndex;
     WiFiUDP udp;
@@ -123,12 +126,18 @@ private:
     SemaphoreHandle_t deviceMutex;
     QueueHandle_t commandQueue;
     QueueHandle_t uiUpdateQueue;
-    TaskHandle_t networkTaskHandle;
-    TaskHandle_t pollingTaskHandle;
+    TaskHandle_t  networkTaskHandle;
+    TaskHandle_t  pollingTaskHandle;
+    StaticTask_t  networkTaskTCB;           // TCB in internal SRAM (~88 bytes)
+    StaticTask_t  pollingTaskTCB;           // TCB in internal SRAM (~88 bytes)
+    StackType_t*  networkTaskStack = nullptr;  // Stack in PSRAM — allocated once in startTasks()
+    StackType_t*  pollingTaskStack = nullptr;  // Stack in PSRAM — allocated once in startTasks()
     
     // Internal methods
     String sendSOAP(const char* service, const char* action, const char* args);
     void getRoomName(SonosDevice* dev);
+    int fetchTopologyCoordinators(IPAddress ip, String* coordinatorRINCONs, int maxCount);
+    bool fetchDevicePlayingState(SonosDevice* dev);
     int timeToSeconds(const String& time);
     void notifyUI(UIUpdateType_e type);
     
@@ -165,10 +174,11 @@ public:
     void setShuffle(bool enable);
     void setRepeat(const char* mode);  // "NONE", "ONE", "ALL"
     void playQueueItem(int index);     // Play specific track from queue (1-based)
+    void requestQueueUpdate();         // Async queue refresh (runs in network task, safe from UI thread)
     bool saveCurrentTrack(const char* playlistName = "Favorites");  // Save current track to playlist
     String browseContent(const char* objectID, int startIndex = 0, int count = 100);  // Browse ContentDirectory
     bool playURI(const char* uri, const char* metadata = "");  // Play URI with optional metadata
-    bool playPlaylist(const char* playlistID);  // Play a Sonos playlist by ID (e.g., "SQ:25")
+    bool playPlaylist(const char* playlistID, const char* title = "Playlist");  // Play a Sonos playlist by ID (e.g., "SQ:25")
     bool playContainer(const char* containerURI, const char* metadata = "");  // Play a container URI with DIDL metadata
     String listMusicServices();  // List available music services
     String getCurrentTrackInfo();  // Get current track URI and metadata for analysis
@@ -191,7 +201,7 @@ public:
     bool updateMediaInfo();          // Get station name for radio from GetMediaInfo
     bool updatePlaybackState();
     bool updateVolume();
-    bool updateQueue();
+    bool updateQueue(int startIndex = 0);  // startIndex: 0-based SOAP StartingIndex for windowed fetch
     bool updateTransportSettings();
     
     // Queue access

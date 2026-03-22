@@ -5,6 +5,7 @@
  */
 
 #include "ui_common.h"
+#include "config.h"
 
 // Forward declaration for sidebar (now in ui_sidebar.cpp)
 lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
@@ -17,11 +18,21 @@ void refreshQueueList() {
     SonosDevice* d = sonos.getCurrentDevice();
     if (!d) { lv_label_set_text(lbl_queue_status, "No device"); return; }
     if (d->queueSize == 0) { lv_label_set_text(lbl_queue_status, "Queue is empty"); return; }
-    lv_label_set_text_fmt(lbl_queue_status, "%d %s in queue", d->queueSize, d->queueSize == 1 ? "track" : "tracks");
+
+    // Show window range when we have a partial view, e.g. "Tracks 4–13 of 47"
+    int firstTrack = d->queue[0].trackNumber;
+    int lastTrack  = d->queue[d->queueSize - 1].trackNumber;
+    if (d->totalTracks > 0 && d->queueSize < d->totalTracks) {
+        lv_label_set_text_fmt(lbl_queue_status, "Tracks %d-%d of %d",
+                              firstTrack, lastTrack, d->totalTracks);
+    } else {
+        lv_label_set_text_fmt(lbl_queue_status, "%d %s",
+                              d->queueSize, d->queueSize == 1 ? "track" : "tracks");
+    }
 
     for (int i = 0; i < d->queueSize; i++) {
         QueueItem* item = &d->queue[i];
-        int trackNum = i + 1;
+        int trackNum = item->trackNumber;  // absolute 1-based position in the full queue
         bool isPlaying = (trackNum == d->currentTrackNumber);
 
         lv_obj_t* btn = lv_btn_create(list_queue);
@@ -104,7 +115,20 @@ void createQueueScreen() {
     lv_obj_set_style_bg_color(btn_refresh, lv_color_hex(0x333333), 0);
     lv_obj_set_style_radius(btn_refresh, 25, 0);
     lv_obj_set_style_shadow_width(btn_refresh, 0, 0);
-    lv_obj_add_event_cb(btn_refresh, [](lv_event_t* e) { sonos.updateQueue(); refreshQueueList(); }, LV_EVENT_CLICKED, NULL);
+    lv_obj_add_event_cb(btn_refresh, [](lv_event_t* e) {
+        // Request a windowed fetch from the polling task (safe: no SOAP on UI thread).
+        SonosDevice* d = sonos.getCurrentDevice();
+        int start = 0;
+        if (d && d->currentTrackNumber > 0) {
+            start = d->currentTrackNumber - SONOS_QUEUE_BATCH_SIZE / 2;
+            if (start < 0) start = 0;
+            if (d->totalTracks > 0 && start + SONOS_QUEUE_BATCH_SIZE > d->totalTracks)
+                start = d->totalTracks - SONOS_QUEUE_BATCH_SIZE;
+            if (start < 0) start = 0;
+        }
+        queue_fetch_start_index = start;
+        queue_fetch_requested   = true;
+    }, LV_EVENT_CLICKED, NULL);
     lv_obj_t* ico_refresh = lv_label_create(btn_refresh);
     lv_label_set_text(ico_refresh, LV_SYMBOL_REFRESH);
     lv_obj_set_style_text_color(ico_refresh, lv_color_hex(0xFFFFFF), 0);
@@ -169,8 +193,8 @@ void createSourcesScreen() {
     scr_sources = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_sources, lv_color_hex(0x121212), 0);
 
-    // Create sidebar and get content area (Sources is index 2)
-    lv_obj_t* content = createSettingsSidebar(scr_sources, 2);
+    // Create sidebar and get content area (Sources is index 3)
+    lv_obj_t* content = createSettingsSidebar(scr_sources, 3);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
     // Title
@@ -199,11 +223,10 @@ void createSourcesScreen() {
     };
 
     MusicSource sources[] = {
-        {"Sonos Favorites", LV_SYMBOL_DIRECTORY, "FV:2"},
         {"Sonos Playlists", LV_SYMBOL_LIST, "SQ:"}
     };
 
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 1; i++) {
         lv_obj_t* btn = lv_btn_create(list);
         lv_obj_set_size(btn, lv_pct(100), 50);
         lv_obj_set_style_radius(btn, 12, 0);
@@ -268,8 +291,8 @@ void createBrowseScreen() {
     scr_browse = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_browse, lv_color_hex(0x121212), 0);
 
-    // Create sidebar and get content area (Sources is index 2)
-    lv_obj_t* content = createSettingsSidebar(scr_browse, 2);
+    // Create sidebar and get content area (Sources is index 3)
+    lv_obj_t* content = createSettingsSidebar(scr_browse, 3);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
     // Title
@@ -398,7 +421,7 @@ void createBrowseScreen() {
                 if (id.startsWith("SQ:") && id.indexOf("/") < 0) {
                     String title = sonos.extractXML(itemXML, "dc:title");
                     Serial.printf("[BROWSE] Playing playlist: %s (ID: %s)\n", title.c_str(), id.c_str());
-                    sonos.playPlaylist(id.c_str());
+                    sonos.playPlaylist(id.c_str(), title.c_str());
                     lv_screen_load(scr_main);
                 } else {
                     current_browse_id = id;
@@ -430,41 +453,8 @@ void createBrowseScreen() {
                 }
 
                 if (uri.startsWith("x-rincon-cpcontainer:")) {
-                    String title = sonos.extractXML(itemXML, "dc:title");
-                    Serial.printf("[BROWSE] Playing container: %s\n", title.c_str());
-
-                    // Extract inner DIDL-Lite from r:resMD tag
-                    String resMD = sonos.extractXML(itemXML, "r:resMD");
-                    if (resMD.length() > 0) {
-                        resMD = sonos.decodeHTML(resMD);
-
-                        // Extract <res> tag from outer item and inject into inner DIDL
-                        String resTag = sonos.extractXML(itemXML, "res");
-                        String protocolInfo = "";
-                        int protoStart = itemXML.indexOf("protocolInfo=\"");
-                        if (protoStart > 0) {
-                            int protoEnd = itemXML.indexOf("\"", protoStart + 14);
-                            if (protoEnd > protoStart) {
-                                protocolInfo = itemXML.substring(protoStart + 14, protoEnd);
-                            }
-                        }
-
-                        // Build complete <res> element
-                        String resElement = "<res protocolInfo=\"" + protocolInfo + "\">" + uri + "</res>";
-
-                        // Insert <res> into the inner DIDL's <item> (after <upnp:class>)
-                        int insertPos = resMD.indexOf("</upnp:class>") + 13;
-                        if (insertPos > 13) {
-                            resMD = resMD.substring(0, insertPos) + resElement + resMD.substring(insertPos);
-                        }
-
-                        Serial.printf("[BROWSE] Enhanced inner DIDL with <res> tag (%d bytes)\n", resMD.length());
-                        sonos.playContainer(uri.c_str(), resMD.c_str());
-                    } else {
-                        Serial.println("[BROWSE] No r:resMD found, using full itemXML");
-                        sonos.playContainer(uri.c_str(), itemXML.c_str());
-                    }
-                    lv_screen_load(scr_main);
+                    // Sonos Favorites (x-rincon-cpcontainer) not supported.
+                    Serial.println("[BROWSE] Sonos Favorites not supported");
                 } else if (uri.length() > 0) {
                     Serial.printf("[BROWSE] Playing URI: %s\n", uri.c_str());
                     sonos.playURI(uri.c_str(), itemXML.c_str());

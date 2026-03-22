@@ -5,9 +5,18 @@
 
 #include "sonos_controller.h"
 #include "config.h"
+#include "ui_network_guard.h"
 #include <HTTPClient.h>
 #include "lvgl.h"
 #include "ui_common.h"
+#include <new>  // placement new for PSRAM device array
+#include "esp_memory_utils.h"  // esp_ptr_external_ram()
+// Note: #include <lwip/sockets.h> removed — SO_LINGER (CONFIG_LWIP_SO_LINGER) is NOT
+// compiled into the pioarduino pre-built ESP-IDF framework. sdkconfig.defaults has no
+// effect on pre-compiled libs. lwip_setsockopt(fd, SO_LINGER) always returns -1.
+// TCP teardowns use FIN → TIME_WAIT (120s, CONFIG_LWIP_TCP_MSL=60000ms, also fixed).
+// The 16-slot PCB pool (CONFIG_LWIP_MAX_SOCKETS=16) is managed by tcp_kill_timewait()
+// which auto-recycles oldest TIME_WAIT slot when pool is exhausted — no crash.
 
 // Command debounce tracking
 static uint32_t lastCommandTime = 0;
@@ -21,6 +30,9 @@ static void encodeXML(String& s) {
 }
 
 SonosController::SonosController() {
+    // Keep constructor minimal - global objects are constructed before setup(),
+    // before PSRAM is guaranteed initialized. Allocation happens in begin().
+    devices = nullptr;
     deviceCount = 0;
     currentDeviceIndex = -1;
     deviceMutex = NULL;
@@ -28,6 +40,8 @@ SonosController::SonosController() {
     uiUpdateQueue = NULL;
     networkTaskHandle = NULL;
     pollingTaskHandle = NULL;
+    networkTaskStack  = nullptr;
+    pollingTaskStack  = nullptr;
 }
 
 SonosController::~SonosController() {
@@ -36,9 +50,41 @@ SonosController::~SonosController() {
     if (deviceMutex) vSemaphoreDelete(deviceMutex);
     if (commandQueue) vQueueDelete(commandQueue);
     if (uiUpdateQueue) vQueueDelete(uiUpdateQueue);
+
+    // Explicitly call destructors (frees String heap allocations) then free PSRAM block
+    if (devices) {
+        for (int i = 0; i < MAX_SONOS_DEVICES; i++) {
+            devices[i].~SonosDevice();
+        }
+        heap_caps_free(devices);
+        devices = nullptr;
+    }
 }
 
 void SonosController::begin() {
+    // Allocate devices array in PSRAM here (not in constructor) - PSRAM is
+    // guaranteed initialized by the time begin() is called from setup().
+    // Keeps ~112KB out of DMA-capable SRAM, preventing SDIO RX buffer exhaustion.
+    devices = (SonosDevice*)heap_caps_malloc(
+        MAX_SONOS_DEVICES * sizeof(SonosDevice), MALLOC_CAP_SPIRAM);
+    if (!devices) {
+        // Fallback: DRAM (should never happen with 32MB PSRAM)
+        Serial.println("[SONOS] WARNING: PSRAM unavailable, falling back to DRAM for devices");
+        devices = (SonosDevice*)heap_caps_malloc(
+            MAX_SONOS_DEVICES * sizeof(SonosDevice), MALLOC_CAP_8BIT);
+    }
+    if (devices) {
+        // Placement new: runs constructors on all String members (initialises to empty)
+        for (int i = 0; i < MAX_SONOS_DEVICES; i++) {
+            new (&devices[i]) SonosDevice();
+        }
+        Serial.printf("[SONOS] Devices array: %u bytes in %s\n",
+            (unsigned)(MAX_SONOS_DEVICES * sizeof(SonosDevice)),
+            esp_ptr_external_ram(devices) ? "PSRAM" : "DRAM");
+    } else {
+        Serial.println("[SONOS] FATAL: Could not allocate devices array - discovery disabled");
+    }
+
     deviceMutex = xSemaphoreCreateMutex();
     commandQueue = xQueueCreate(SONOS_CMD_QUEUE_SIZE, sizeof(CommandRequest_t));
     uiUpdateQueue = xQueueCreate(SONOS_UI_QUEUE_SIZE, sizeof(UIUpdate_t));
@@ -48,12 +94,30 @@ void SonosController::begin() {
 
 void SonosController::startTasks() {
     if (networkTaskHandle == NULL) {
-        xTaskCreatePinnedToCore(networkTaskFunction, "SonosNet", SONOS_NET_TASK_STACK,
-                                this, SONOS_NET_TASK_PRIORITY, &networkTaskHandle, 1);
+        if (!networkTaskStack)
+            networkTaskStack = (StackType_t*)heap_caps_malloc(SONOS_NET_TASK_STACK, MALLOC_CAP_SPIRAM);
+        if (networkTaskStack) {
+            networkTaskHandle = xTaskCreateStaticPinnedToCore(
+                networkTaskFunction, "SonosNet", SONOS_NET_TASK_STACK / sizeof(StackType_t),
+                this, SONOS_NET_TASK_PRIORITY, networkTaskStack, &networkTaskTCB, 1);
+        } else {
+            Serial.println("[SONOS] Net PSRAM stack alloc failed — using internal SRAM");
+            xTaskCreatePinnedToCore(networkTaskFunction, "SonosNet", SONOS_NET_TASK_STACK,
+                                    this, SONOS_NET_TASK_PRIORITY, &networkTaskHandle, 1);
+        }
     }
     if (pollingTaskHandle == NULL) {
-        xTaskCreatePinnedToCore(pollingTaskFunction, "SonosPoll", SONOS_POLL_TASK_STACK,
-                                this, SONOS_POLL_TASK_PRIORITY, &pollingTaskHandle, 1);
+        if (!pollingTaskStack)
+            pollingTaskStack = (StackType_t*)heap_caps_malloc(SONOS_POLL_TASK_STACK, MALLOC_CAP_SPIRAM);
+        if (pollingTaskStack) {
+            pollingTaskHandle = xTaskCreateStaticPinnedToCore(
+                pollingTaskFunction, "SonosPoll", SONOS_POLL_TASK_STACK / sizeof(StackType_t),
+                this, SONOS_POLL_TASK_PRIORITY, pollingTaskStack, &pollingTaskTCB, 1);
+        } else {
+            Serial.println("[SONOS] Poll PSRAM stack alloc failed — using internal SRAM");
+            xTaskCreatePinnedToCore(pollingTaskFunction, "SonosPoll", SONOS_POLL_TASK_STACK,
+                                    this, SONOS_POLL_TASK_PRIORITY, &pollingTaskHandle, 1);
+        }
     }
     Serial.println("[SONOS] Background tasks started");
 }
@@ -138,30 +202,50 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
     // Build SOAPAction header
     snprintf(soapAction, sizeof(soapAction), "urn:schemas-upnp-org:service:%s:1#%s", service, action);
 
-    // Simple, robust: Create fresh HTTPClient for each request (no pooling)
+    // Fresh HTTPClient per request — Sonos's embedded HTTP server does not support
+    // HTTP/1.1 keep-alive (persistent connections cause -1 / connection-refused errors).
     HTTPClient http;
     http.begin(url);
     http.setTimeout(2000);
     http.addHeader("Content-Type", "text/xml; charset=\"utf-8\"");
+    // Tell Sonos to close the connection after the response. Sonos already does this
+    // (no keep-alive per comment above), but making it explicit ensures the server
+    // sends its FIN immediately after the response body → FIN-wait loop (below) reliably
+    // detects CLOSE_WAIT → passive close → zero DMA cost per SOAP.
+    http.addHeader("Connection", "close");
 
     // Build full header value with quotes
     static char soapActionHeader[280];
     snprintf(soapActionHeader, sizeof(soapActionHeader), "\"%s\"", soapAction);
     http.addHeader("SOAPAction", soapActionHeader);
 
-    // CRITICAL: Acquire network_mutex to serialize WiFi access
-    // Prevents SDIO buffer overflow when album art downloads happen during SOAP requests
+    // PRE-WAIT: general 200ms cooldown only. SOAP is plain HTTP — it does NOT need the
+    // HTTPS cooldown (SDIO_HTTPS_COOLDOWN_MS = 3s). That cooldown was preventing SOAPs
+    // from firing for 3s after every lyrics fetch → SDIO DMA idled → pkt_rxbuff :928
+    // overflow when the next art download started on a cold DMA.
+    // mbedTLS DMA buffers from lyrics HTTPS are irrelevant to plain HTTP SOAP traffic.
+    // TCP FIN-ACKs from a prior HTTPS session drain within the 200ms general cooldown.
+    if (last_network_end_ms > 0) {
+        unsigned long elapsed = millis() - last_network_end_ms;
+        if (elapsed < SDIO_GENERAL_COOLDOWN_MS) {
+            vTaskDelay(pdMS_TO_TICKS(SDIO_GENERAL_COOLDOWN_MS - elapsed));
+        }
+    }
+
+    // Acquire network_mutex to serialize WiFi access
     if (!xSemaphoreTake(network_mutex, pdMS_TO_TICKS(NETWORK_MUTEX_TIMEOUT_MS))) {
         Serial.println("[SOAP] Failed to acquire network mutex - request failed");
         http.end();
         return "";
     }
 
-    // CRITICAL: Wait for SDIO cooldown (200ms since last network operation)
-    unsigned long now = millis();
-    unsigned long elapsed = now - last_network_end_ms;
-    if (last_network_end_ms > 0 && elapsed < 200) {
-        vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
+    // POST-MUTEX re-check: another task may have used the network while we waited.
+    // General 200ms only — no HTTPS cooldown (see pre-wait comment above).
+    {
+        unsigned long elapsed = millis() - last_network_end_ms;
+        if (last_network_end_ms > 0 && elapsed < SDIO_GENERAL_COOLDOWN_MS) {
+            vTaskDelay(pdMS_TO_TICKS(SDIO_GENERAL_COOLDOWN_MS - elapsed));
+        }
     }
 
     int code = http.POST(body);
@@ -171,6 +255,23 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
         response = http.getString();
         dev->errorCount = 0;
         dev->connected = true;
+    } else if (code == 500) {
+        // Sonos returns 500 during source transitions (e.g. radio switching)
+        // This is transient - don't count as error.
+        // Read and discard the 500 response body: this lets the server send its FIN
+        // alongside/after the body → we reach CLOSE_WAIT → passive close → no TIME_WAIT.
+        http.getString();
+        last_transient_500_ms = millis();  // arm 3s storm gate in art task pre-wait (unthrottled)
+        // Throttle logging to avoid spam (only log first 500 in a burst)
+        static unsigned long last_500_log = 0;
+        if (millis() - last_500_log > 2000) {  // 2s throttle
+            Serial.printf("[SOAP] Transient 500 for %s.%s | adlp=%d heap=%u dma=%u\n",
+                service, action,
+                (int)art_download_in_progress,
+                heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+                heap_caps_get_free_size(MALLOC_CAP_DMA));
+            last_500_log = millis();
+        }
     } else {
         Serial.printf("[SOAP] HTTP error %d for %s.%s\n", code, service, action);
         dev->errorCount++;
@@ -199,7 +300,44 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
         }
     }
 
+    // Passive close: wait up to 100ms for server's FIN to arrive.
+    // With Connection:close header, Sonos sends FIN immediately after response body.
+    // stream->connected() = false once lwIP receives FIN → we're in CLOSE_WAIT.
+    // http.end() from CLOSE_WAIT → LAST_ACK → CLOSED: server enters TIME_WAIT, not us.
+    // Result: zero DMA cost per SOAP. 100ms (was 20ms) gives more margin for Sonos FINs.
+    // Fallback: if no FIN in 100ms → active close (TIME_WAIT on our side, ~400B PCB DMA).
+    // DMA savings: even 50% passive-close success at 1 SOAP/300ms = ~3KB DMA saved per 300ms.
+    if (code == 200 || code == 500) {
+        if (WiFiClient* s = http.getStreamPtr()) {
+            for (int i = 0; i < 100 && s->connected(); i++)
+                vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+
+    // Measure DMA delta across http.end() to track per-SOAP PCB cost.
+    // Passive close (FIN already received → CLOSE_WAIT): delta ≈ 0, no TIME_WAIT.
+    // Active close fallback (no FIN in 5ms): delta ~6KB, TIME_WAIT on our side.
+    size_t dma_pre_end = heap_caps_get_free_size(MALLOC_CAP_DMA);
     http.end();
+    vTaskDelay(pdMS_TO_TICKS(1));  // allow lwIP to process RST/FIN synchronously
+    size_t dma_post_end = heap_caps_get_free_size(MALLOC_CAP_DMA);
+
+    // Per-SOAP DMA tracking: detects gradual DMA depletion from TIME_WAIT PCBs.
+    // Logs: every SOAP when DMA < 50KB (danger zone), else every 50 SOAPs.
+    {
+        static size_t session_start_dma = 0;
+        static int soap_count = 0;
+        if (session_start_dma == 0) session_start_dma = dma_post_end;
+        soap_count++;
+        int delta_end  = (int)((long)dma_post_end  - (long)dma_pre_end);
+        int delta_sess = (int)((long)dma_post_end  - (long)session_start_dma);
+        if (dma_post_end < 50000 || delta_end < -2048 || soap_count % 10 == 0) {
+            Serial.printf("[SOAP/DMA] #%d: pre=%uKB post=%uKB delta=%+dB session=%+dKB\n",
+                          soap_count,
+                          (unsigned)dma_pre_end/1024, (unsigned)dma_post_end/1024,
+                          delta_end, delta_sess/1024);
+        }
+    }
 
     // Update timestamp before releasing mutex (for SDIO cooldown tracking)
     last_network_end_ms = millis();
@@ -397,6 +535,14 @@ void SonosController::setRepeat(const char* mode) {
 void SonosController::playQueueItem(int index) {
     // index is 1-based queue position
     CommandRequest_t cmd = { CMD_PLAY_QUEUE_ITEM, index };
+    xQueueSend(commandQueue, &cmd, 0);
+}
+
+void SonosController::requestQueueUpdate() {
+    // Enqueue an async queue refresh — runs in network task with proper SDIO cooldowns.
+    // Safe to call from UI thread (mainAppTask); updateQueue() must NOT be called directly
+    // from the UI thread as it fires a 20KB SOAP response without mutex/cooldown protection.
+    CommandRequest_t cmd = { CMD_UPDATE_QUEUE, 0 };
     xQueueSend(commandQueue, &cmd, 0);
 }
 
@@ -610,35 +756,70 @@ bool SonosController::playURI(const char* uri, const char* metadata) {
     return false;
 }
 
-bool SonosController::playPlaylist(const char* playlistID) {
+bool SonosController::playPlaylist(const char* playlistID, const char* title) {
     SonosDevice* dev = getCurrentDevice();
     if (!dev || !dev->connected) {
         Serial.println("[PLAYLIST] Device not available");
         return false;
     }
 
-    Serial.printf("[PLAYLIST] Loading playlist: %s\n", playlistID);
+    Serial.printf("[PLAYLIST] Loading playlist: %s (%s)\n", playlistID, title);
 
     sendSOAP("AVTransport", "RemoveAllTracksFromQueue", "<InstanceID>0</InstanceID>");
-    vTaskDelay(pdMS_TO_TICKS(100));
+    // 500ms: Sonos enters a brief transient state after RemoveAllTracksFromQueue
+    // and returns HTTP 500 for subsequent AddURIToQueue if we fire too quickly.
+    vTaskDelay(pdMS_TO_TICKS(500));
 
     String playlistNum = String(playlistID);
     playlistNum.replace("SQ:", "");
 
-    // Use static buffers to avoid String concatenation
     static char playlistURI[128];
-    static char addArgs[512];
-    snprintf(playlistURI, sizeof(playlistURI), "file:///jffs/settings/savedqueues.rsq#%s", playlistNum.c_str());
+    snprintf(playlistURI, sizeof(playlistURI),
+             "file:///jffs/settings/savedqueues.rsq#%s", playlistNum.c_str());
+
+    // Sonos requires DIDL-Lite metadata in EnqueuedURIMetaData for playlist URIs.
+    // Without it, AddURIToQueue returns a SOAP Fault and the playlist never loads.
+    static char rawMeta[512];
+    snprintf(rawMeta, sizeof(rawMeta),
+        "<DIDL-Lite xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\""
+        " xmlns:dc=\"http://purl.org/dc/elements/1.1/\""
+        " xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\""
+        " xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">"
+        "<container id=\"%s\" parentID=\"SQ:\" restricted=\"false\">"
+        "<dc:title>%s</dc:title>"
+        "<upnp:class>object.container.playlistContainer</upnp:class>"
+        "<res protocolInfo=\"x-rincon-playlist:*:*:*\">%s</res>"
+        "</container>"
+        "</DIDL-Lite>",
+        playlistID, title, playlistURI);
+
+    // encodeXML converts < > " & to &lt; &gt; &quot; &amp; so the DIDL
+    // can be safely embedded as a SOAP field value.
+    String metaEncoded = String(rawMeta);
+    encodeXML(metaEncoded);
+
+    static char addArgs[1024];
     snprintf(addArgs, sizeof(addArgs),
         "<InstanceID>0</InstanceID>"
         "<EnqueuedURI>%s</EnqueuedURI>"
-        "<EnqueuedURIMetaData></EnqueuedURIMetaData>"
-        "<DesiredFirstTrackNumberEnqueued>0</DesiredFirstTrackNumberEnqueued>"
-        "<EnqueueAsNext>1</EnqueueAsNext>",
-        playlistURI);
+        "<EnqueuedURIMetaData>%s</EnqueuedURIMetaData>"
+        "<DesiredFirstTrackNumberEnqueued>1</DesiredFirstTrackNumberEnqueued>"
+        "<EnqueueAsNext>0</EnqueueAsNext>",
+        playlistURI, metaEncoded.c_str());
 
     Serial.printf("[PLAYLIST] Adding to queue: %s\n", playlistURI);
-    String resp = sendSOAP("AVTransport", "AddURIToQueue", addArgs);
+
+    // 3-retry loop: Sonos may return HTTP 500 (transient) briefly after
+    // RemoveAllTracksFromQueue even with the 500ms delay on slow devices.
+    String resp;
+    for (int attempt = 0; attempt < 3; attempt++) {
+        resp = sendSOAP("AVTransport", "AddURIToQueue", addArgs);
+        if (resp.length() > 0 && resp.indexOf("Fault") < 0) {
+            break;
+        }
+        Serial.printf("[PLAYLIST] AddURIToQueue attempt %d failed, retrying\n", attempt + 1);
+        vTaskDelay(pdMS_TO_TICKS(400));
+    }
 
     if (resp.length() > 0 && resp.indexOf("Fault") < 0) {
         vTaskDelay(pdMS_TO_TICKS(200));
@@ -655,7 +836,6 @@ bool SonosController::playPlaylist(const char* playlistID) {
         Serial.println("[PLAYLIST] Playlist loaded and playing");
         sendSOAP("AVTransport", "SetAVTransportURI", setArgs);
         vTaskDelay(pdMS_TO_TICKS(100));
-
         sendSOAP("AVTransport", "Play", "<InstanceID>0</InstanceID><Speed>1</Speed>");
         vTaskDelay(pdMS_TO_TICKS(300));
         updateTrackInfo();
@@ -822,10 +1002,12 @@ void SonosController::notifyUI(UIUpdateType_e type) {
 
 // Helper: Detect if URI is a radio station
 // Based on research: x-sonosapi-stream:, x-rincon-mp3radio:, x-sonosapi-radio:, aac://, hls-radio:
+// x-sonosapi-hls: = BBC Sounds live radio (NOT x-sonosapi-hls-static: which is on-demand podcasts)
 static bool isRadioURI(const String& uri) {
     return uri.startsWith("x-sonosapi-stream:") ||
            uri.startsWith("x-rincon-mp3radio:") ||
            uri.startsWith("x-sonosapi-radio:") ||
+           uri.startsWith("x-sonosapi-hls:") ||
            uri.startsWith("aac://") ||
            uri.startsWith("hls-radio:");
 }
@@ -999,6 +1181,7 @@ bool SonosController::updateMediaInfo() {
         // Extract station logo from upnp:albumArtURI
         String stationArt = extractXML(meta, "upnp:albumArtURI");
         stationArt = decodeHTML(stationArt);
+        Serial.printf("[RADIO] Extracted albumArtURI: '%s'\n", stationArt.c_str());
 
         // Store station name if valid (not URL junk)
         if (stationName.length() > 0) {
@@ -1021,6 +1204,9 @@ bool SonosController::updateMediaInfo() {
             } else {
                 dev->radioStationArtURL = stationArt;
             }
+            Serial.printf("[RADIO] Set radioStationArtURL: '%s'\n", dev->radioStationArtURL.c_str());
+        } else {
+            Serial.println("[RADIO] No station art found in metadata");
         }
 
         xSemaphoreGive(deviceMutex);
@@ -1085,20 +1271,38 @@ bool SonosController::updateTransportSettings() {
     return false;
 }
 
-bool SonosController::updateQueue() {
-    String resp = sendSOAP("ContentDirectory", "Browse",
+bool SonosController::updateQueue(int startIndex) {
+    // SONOS_QUEUE_BATCH_SIZE=10 → ~4KB response, ~3 WiFi RX buffers.
+    // Was 50 items → ~20KB, 14 TCP segs, all 32 WiFi RX buffers (~51KB DMA) — never released.
+    // startIndex: 0-based offset into queue. For a window centred on currentTrackNumber:
+    //   startIndex = max(0, currentTrackNumber - SONOS_QUEUE_BATCH_SIZE/2)
+    // so the view shows ~5 tracks before and ~5 after the currently playing track.
+    if (startIndex < 0) startIndex = 0;
+
+    String queueArgs =
         "<ObjectID>Q:0</ObjectID>"
         "<BrowseFlag>BrowseDirectChildren</BrowseFlag>"
         "<Filter>*</Filter>"
-        "<StartingIndex>0</StartingIndex>"
-        "<RequestedCount>50</RequestedCount>"
-        "<SortCriteria></SortCriteria>");
-    
+        "<StartingIndex>" + String(startIndex) + "</StartingIndex>"
+        "<RequestedCount>" + String(SONOS_QUEUE_BATCH_SIZE) + "</RequestedCount>"
+        "<SortCriteria></SortCriteria>";
+
+    size_t dma_pre_q = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    String resp = sendSOAP("ContentDirectory", "Browse", queueArgs.c_str());
+    size_t dma_post_q = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    Serial.printf("[QUEUE/DMA] pre=%uKB post=%uKB delta=%+dB start=%d batch=%d\n",
+                  (unsigned)(dma_pre_q / 1024), (unsigned)(dma_post_q / 1024),
+                  (int)((long)dma_post_q - (long)dma_pre_q), startIndex, SONOS_QUEUE_BATCH_SIZE);
+
     if (resp.length() == 0) {
         Serial.printf("[SONOS] Queue response empty\n");
         return false;
     }
-    
+
+    // Record completion time so art/lyrics tasks wait before starting a large download.
+    // sendSOAP() does NOT check this — SOAP play/pause commands are unaffected.
+    last_queue_fetch_time = millis();
+
     SonosDevice* dev = getCurrentDevice();
     if (!dev) return false;
     
@@ -1130,7 +1334,7 @@ bool SonosController::updateQueue() {
             dev->queue[dev->queueSize].artist = decodeHTML(extractXMLRange(result, "dc:creator", itemStart, itemEnd));
             dev->queue[dev->queueSize].album = decodeHTML(extractXMLRange(result, "upnp:album", itemStart, itemEnd));
             dev->queue[dev->queueSize].albumArtURL = decodeHTML(extractXMLRange(result, "upnp:albumArtURI", itemStart, itemEnd));
-            dev->queue[dev->queueSize].trackNumber = dev->queueSize + 1;
+            dev->queue[dev->queueSize].trackNumber = startIndex + dev->queueSize + 1;  // 1-based absolute position
             dev->queueSize++;
 
             pos = itemEnd + 7;
@@ -1175,12 +1379,18 @@ void SonosController::processCommand(CommandRequest_t* cmd) {
             break;
 
         case CMD_NEXT:
+            // Suppress pollingTask before the SOAP fires: art_download_in_progress=true blocks
+            // the early-exit guard. Without this, pollingTask races through during the 200ms
+            // vTaskDelay and fires GetPositionInfo concurrently with the Next SOAP + subsequent
+            // updateTrackInfo SOAP — 3 simultaneous TCP teardowns overflow C6 pkt_rxbuff → :928.
+            art_download_in_progress = true;
             sendSOAP("AVTransport", "Next", "<InstanceID>0</InstanceID>");
             vTaskDelay(pdMS_TO_TICKS(200));
-            updateTrackInfo();
+            updateTrackInfo();  // sets pending_art_url → requestAlbumArt() keeps flag true
             break;
 
         case CMD_PREV:
+            art_download_in_progress = true;  // same race fix as CMD_NEXT
             sendSOAP("AVTransport", "Previous", "<InstanceID>0</InstanceID>");
             vTaskDelay(pdMS_TO_TICKS(200));
             updateTrackInfo();
@@ -1240,6 +1450,11 @@ void SonosController::processCommand(CommandRequest_t* cmd) {
         }
 
         case CMD_PLAY_QUEUE_ITEM: {
+            Serial.printf("[CMD] PLAY_QUEUE_ITEM: track=%d | heap=%u dma=%u\n",
+                cmd->value,
+                heap_caps_get_free_size(MALLOC_CAP_DEFAULT),
+                heap_caps_get_free_size(MALLOC_CAP_DMA));
+            art_download_in_progress = true;  // same race fix: suppress polling during Seek+Play+settle
             snprintf(args, sizeof(args),
                 "<InstanceID>0</InstanceID><Unit>TRACK_NR</Unit><Target>%d</Target>",
                 cmd->value);
@@ -1252,6 +1467,13 @@ void SonosController::processCommand(CommandRequest_t* cmd) {
             }
             vTaskDelay(pdMS_TO_TICKS(200));
             updateTrackInfo();
+            break;
+        }
+
+        case CMD_UPDATE_QUEUE: {
+            // Triggered by the queue screen refresh button — runs here in the network task,
+            // NOT on the UI/mainAppTask thread, so SDIO cooldowns and mutex are handled properly.
+            updateQueue();
             break;
         }
 
@@ -1328,9 +1550,136 @@ void SonosController::pollingTaskFunction(void* param) {
         }
 
         if (dev && dev->connected) {
+            // ── Per-cycle DMA snapshot ────────────────────────────────────────────
+            // Log DMA at the START of every poll cycle (before any SOAP fires).
+            // This pinpoints exactly when/where the mystery 68KB drop occurs.
+            {
+                static size_t cycle_session_start = 0;
+                static uint32_t cycle_count = 0;
+                size_t dma_cycle = heap_caps_get_free_size(MALLOC_CAP_DMA);
+                if (cycle_session_start == 0) cycle_session_start = dma_cycle;
+                cycle_count++;
+                int cycle_delta = (int)((long)dma_cycle - (long)cycle_session_start);
+                // Log: every cycle when DMA < 60KB (danger zone), else every 20 cycles
+                if (dma_cycle < 60000 || cycle_count % 20 == 0) {
+                    Serial.printf("[POLL/DMA] cycle=%u dma=%uKB session=%+dKB art_dl=%d\n",
+                                  (unsigned)cycle_count,
+                                  (unsigned)(dma_cycle / 1024),
+                                  cycle_delta / 1024,
+                                  (int)art_download_in_progress);
+                }
+            }
+            // ── SDIO early-exit guard ─────────────────────────────────────────────
+            {
+                bool in_500_storm   = last_transient_500_ms > 0 &&
+                                      millis() - last_transient_500_ms < (SDIO_STORM_COOLDOWN_MS + SDIO_POST_STORM_SETTLE_MS);
+                bool post_download  = last_art_download_end_ms > 0 &&
+                                      millis() - last_art_download_end_ms < SDIO_INTER_DOWNLOAD_MS;
+                bool track_settling = last_track_change_ms > 0 &&
+                                      millis() - last_track_change_ms < SDIO_TRACK_CHANGE_SETTLE_MS;
+
+                // Art downloading (or post-download residue): skip ALL SOAPs, short sleep.
+                if (art_download_in_progress || post_download || track_settling) {
+                    static unsigned long last_poll_skip_log = 0;
+                    if (millis() - last_poll_skip_log > 2000) {
+                        Serial.printf("[POLL] Skip: art_dl=%d post_dl=%d settling=%d\n",
+                            (int)art_download_in_progress, (int)post_download, (int)track_settling);
+                        last_poll_skip_log = millis();
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(track_settling ? 1000 : POLL_BASE_INTERVAL_MS));
+                    continue;
+                }
+
+                // NOTE: in_500_storm early-exit REMOVED.
+                // Sleeping 1000ms during 500-storm caused SDIO idle → C6 DMA clock-gate →
+                // pkt_rxbuff overflow when art download started (intermittent :928 crash).
+                // The protection it provided (preventing SOAP FIN-ACKs from competing with
+                // art burst) is already handled by:
+                //   (a) art inside-mutex post-500 drain (SDIO_TCP_CLOSE_MS = 200ms)
+                //   (b) art_download_in_progress=true blocking polling during actual download
+                //   (c) post-SOAP-1 guard (in_500_now) skipping updatePlaybackState
+                // Polling now fires at normal rate during 500-storm, keeping SDIO warm.
+                // One SOAP per 300ms cycle (only updateTrackInfo fires; post-SOAP-1 guard
+                // blocks updatePlaybackState when in_500_now=true). Harmless traffic.
+                (void)in_500_storm;
+            }
+            // ─────────────────────────────────────────────────────────────────────
+
             // Track info every cycle for instant updates when changing sources
             ctrl->updateTrackInfo();
+
+            // ── Post-SOAP-1 guard ─────────────────────────────────────────────────
+            // updateTrackInfo() calls onSonosUpdate() which may set pending_art_url
+            // synchronously (same task). If a track just changed, skip GetTransportInfo
+            // this cycle — its SOAP response + UPnP NOTIFY burst overlap in pkt_rxbuff.
+            // Guard uses pending != last (not just isEmpty) so it clears once the art
+            // task downloads and syncs them. isEmpty() never cleared → d->isPlaying stuck.
+            // in_500_now: also skip GetTransportInfo when GetPositionInfo just returned
+            // 500 — both SOAP responses + Sonos NOTIFYs in same cycle overflow pkt_rxbuff.
+            // Timeout (10s): if art permanently fails (DMA floor), guard would fire forever
+            // → updatePlaybackState() never runs → progress bar freezes. After 10s we give
+            // up waiting and let GetTransportInfo through so playback state stays live.
+            {
+                bool in_500_now = last_transient_500_ms > 0 &&
+                                  millis() - last_transient_500_ms < SDIO_STORM_COOLDOWN_MS;
+                bool art_still_pending = pending_art_url != last_art_url &&
+                                         last_track_change_ms > 0 &&
+                                         millis() - last_track_change_ms < 10000;
+                if (art_still_pending || in_500_now) {
+                    tick++;
+                    vTaskDelay(pdMS_TO_TICKS(POLL_BASE_INTERVAL_MS));
+                    continue;
+                }
+            }
+
             ctrl->updatePlaybackState();
+
+            // ── On-demand queue window fetch ──────────────────────────────────────
+            // Placed here (after both mandatory SOAPs, BEFORE mid-cycle guard) so
+            // it executes even during stable playback when pending==last_art_url.
+            // Two triggers:
+            //   (a) User opens queue screen / taps refresh → ev_queue() sets flag
+            //   (b) Track number changed → auto-set below so Next Up stays current
+            {
+                static int lastQueuedTrackNum = -1;
+                // Auto-trigger when track number changes (keeps Next Up populated)
+                if (!dev->isRadioStation && dev->currentTrackNumber > 0 &&
+                    dev->currentTrackNumber != lastQueuedTrackNum) {
+                    int half  = SONOS_QUEUE_BATCH_SIZE / 2;
+                    int start = dev->currentTrackNumber - half;
+                    if (start < 0) start = 0;
+                    if (dev->totalTracks > 0 && start + SONOS_QUEUE_BATCH_SIZE > dev->totalTracks)
+                        start = dev->totalTracks - SONOS_QUEUE_BATCH_SIZE;
+                    if (start < 0) start = 0;
+                    queue_fetch_start_index = start;
+                    queue_fetch_requested   = true;
+                    lastQueuedTrackNum = dev->currentTrackNumber;
+                }
+
+                if (queue_fetch_requested) {
+                    queue_fetch_requested = false;
+                    size_t dma_now = heap_caps_get_free_size(MALLOC_CAP_DMA);
+                    if (dma_now >= ART_MIN_DMA_PRE_BURST) {
+                        ctrl->updateQueue(queue_fetch_start_index);
+                        vTaskDelay(pdMS_TO_TICKS(SDIO_POST_QUEUE_DRAIN_MS));
+                    } else {
+                        Serial.printf("[POLL] Queue fetch deferred: DMA too low (%uKB)\n",
+                                      (unsigned)(dma_now / 1024));
+                        queue_fetch_requested = true;  // retry next cycle
+                    }
+                }
+            }
+
+            // ── Mid-cycle guard ───────────────────────────────────────────────────
+            // Skip optional SOAPs while a new track's art is still pending download.
+            // Guard clears once the art task downloads and syncs pending_art_url=last_art_url.
+            // Uses != last_art_url (NOT !isEmpty()): isEmpty() is true for any stream with
+            // art → would block volume/transport/queue polling forever during stable playback.
+            if (art_download_in_progress || pending_art_url != last_art_url) {
+                tick++;
+                continue;
+            }
+            // ─────────────────────────────────────────────────────────────────────
 
             // Detect station change and fetch station name immediately
             if (dev->isRadioStation && dev->currentURI != previousURI) {
@@ -1361,9 +1710,23 @@ void SonosController::pollingTaskFunction(void* param) {
                 ctrl->updateTransportSettings();
             }
 
-            // Queue polling - skip for radio stations
+            // Background queue refresh every POLL_QUEUE_MODULO cycles (60s).
+            // Uses windowed fetch centred on currentTrackNumber — same window as on-demand.
             if (tick % POLL_QUEUE_MODULO == 0 && !dev->isRadioStation) {
-                ctrl->updateQueue();
+                size_t dma_now = heap_caps_get_free_size(MALLOC_CAP_DMA);
+                if (dma_now >= ART_MIN_DMA_PRE_BURST) {
+                    int half  = SONOS_QUEUE_BATCH_SIZE / 2;
+                    int start = (dev->currentTrackNumber > 0) ? (dev->currentTrackNumber - half) : 0;
+                    if (start < 0) start = 0;
+                    if (dev->totalTracks > 0 && start + SONOS_QUEUE_BATCH_SIZE > dev->totalTracks)
+                        start = dev->totalTracks - SONOS_QUEUE_BATCH_SIZE;
+                    if (start < 0) start = 0;
+                    ctrl->updateQueue(start);
+                    vTaskDelay(pdMS_TO_TICKS(SDIO_POST_QUEUE_DRAIN_MS));
+                } else {
+                    Serial.printf("[POLL] Queue poll skipped: DMA too low (%uKB < %uKB)\n",
+                                  (unsigned)(dma_now / 1024), (unsigned)(ART_MIN_DMA_PRE_BURST / 1024));
+                }
             }
 
             tick++;

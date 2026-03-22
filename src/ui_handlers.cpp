@@ -4,8 +4,11 @@
  */
 
 #include "ui_common.h"
+#include <vector>
 #include "config.h"
 #include "lyrics.h"
+#include "clock_screen.h"
+#include <esp_task_wdt.h>
 
 // ============================================================================
 // Brightness Control
@@ -105,6 +108,10 @@ void ev_mute(lv_event_t* e) {
 }
 
 void ev_queue_item(lv_event_t* e) {
+    static uint32_t last_click_ms = 0;
+    uint32_t now = millis();
+    if (now - last_click_ms < 1500) return;  // debounce: ignore rapid repeat taps
+    last_click_ms = now;
     int trackNum = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
     sonos.playQueueItem(trackNum);
     lv_screen_load(scr_main);
@@ -118,7 +125,20 @@ void ev_devices(lv_event_t* e) {
 }
 
 void ev_queue(lv_event_t* e) {
-    sonos.updateQueue();
+    // Show cached data immediately, then request a fresh windowed fetch.
+    // The polling task picks up queue_fetch_requested and calls updateQueue(startIndex)
+    // on its next cycle (safe: no SOAP on UI thread).
+    SonosDevice* d = sonos.getCurrentDevice();
+    int start = 0;
+    if (d && d->currentTrackNumber > 0) {
+        start = d->currentTrackNumber - SONOS_QUEUE_BATCH_SIZE / 2;
+        if (start < 0) start = 0;
+        if (d->totalTracks > 0 && start + SONOS_QUEUE_BATCH_SIZE > d->totalTracks)
+            start = d->totalTracks - SONOS_QUEUE_BATCH_SIZE;
+        if (start < 0) start = 0;
+    }
+    queue_fetch_start_index = start;
+    queue_fetch_requested   = true;
     refreshQueueList();
     lv_screen_load(scr_queue);
 }
@@ -209,9 +229,17 @@ void ev_wifi_scan(lv_event_t* e) {
         lv_label_set_text(lbl_scan_text, LV_SYMBOL_REFRESH "  Scanning...");
     }
 
-    lv_label_set_text(lbl_wifi_status, LV_SYMBOL_REFRESH " Scanning for networks...");
+    lv_label_set_text(lbl_wifi_status, "Scanning for networks...");
     lv_obj_set_style_text_color(lbl_wifi_status, COL_ACCENT, 0);
     lv_obj_clean(list_wifi);
+    // Hide password strip if visible from a previous selection
+    lv_obj_add_flag(pw_strip, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
+    // Show spinner
+    if (spinner_wifi_scan) {
+        lv_obj_remove_flag(spinner_wifi_scan, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_move_foreground(spinner_wifi_scan);
+    }
     lv_timer_handler();  // Update UI immediately
 
     WiFi.disconnect();
@@ -220,13 +248,10 @@ void ev_wifi_scan(lv_event_t* e) {
     int n = WiFi.scanNetworks();
     wifiNetworkCount = min(n, 20);
 
-    // Re-enable button
-    if (btn_wifi_scan) {
-        lv_obj_clear_state(btn_wifi_scan, LV_STATE_DISABLED);
-    }
-    if (lbl_scan_text) {
-        lv_label_set_text(lbl_scan_text, LV_SYMBOL_REFRESH "  Scan");
-    }
+    // Hide spinner, re-enable button
+    if (spinner_wifi_scan) lv_obj_add_flag(spinner_wifi_scan, LV_OBJ_FLAG_HIDDEN);
+    if (btn_wifi_scan)     lv_obj_clear_state(btn_wifi_scan, LV_STATE_DISABLED);
+    if (lbl_scan_text)     lv_label_set_text(lbl_scan_text, LV_SYMBOL_REFRESH " Scan");
 
     if (n == 0) {
         lv_label_set_text(lbl_wifi_status, LV_SYMBOL_WARNING " No networks found");
@@ -243,39 +268,64 @@ void ev_wifi_scan(lv_event_t* e) {
     lv_label_set_text_fmt(lbl_wifi_status, LV_SYMBOL_OK " Found %d network%s", n, n == 1 ? "" : "s");
     lv_obj_set_style_text_color(lbl_wifi_status, lv_color_hex(0x4ECB71), 0);
 
+    // Deduplicate: for mesh networks (same SSID, multiple APs) keep best RSSI only
+    std::vector<int> unique_indices;
     for (int i = 0; i < wifiNetworkCount; i++) {
-        wifiNetworks[i] = WiFi.SSID(i);
+        String ssid = WiFi.SSID(i);
+        int32_t rssi = WiFi.RSSI(i);
+        bool found = false;
+        for (int& j : unique_indices) {
+            if (WiFi.SSID(j) == ssid) {
+                if (rssi > WiFi.RSSI(j)) j = i;  // keep stronger signal
+                found = true;
+                break;
+            }
+        }
+        if (!found) unique_indices.push_back(i);
+    }
+    wifiNetworkCount = min((int)unique_indices.size(), 20);
+
+    for (int ui = 0; ui < wifiNetworkCount; ui++) {
+        int i = unique_indices[ui];
+        wifiNetworks[ui] = WiFi.SSID(i);
         int32_t rssi = WiFi.RSSI(i);
 
+        // Icon color only: green=strong, accent=medium, red=weak
+        lv_color_t icon_color;
+        if      (rssi > -60) icon_color = lv_color_hex(0x4ECB71);
+        else if (rssi > -75) icon_color = COL_ACCENT;
+        else                 icon_color = lv_color_hex(0xFF6B6B);
+
         lv_obj_t* btn = lv_btn_create(list_wifi);
-        lv_obj_set_size(btn, 340, 50);
-        lv_obj_set_user_data(btn, (void*)(intptr_t)i);
+        lv_obj_set_size(btn, lv_pct(100), 50);
+        lv_obj_set_user_data(btn, (void*)(intptr_t)ui);
         lv_obj_set_style_bg_color(btn, COL_CARD, 0);
-        lv_obj_set_style_bg_color(btn, COL_BTN_PRESSED, LV_STATE_PRESSED);
+        lv_obj_set_style_bg_color(btn, COL_BTN, LV_STATE_PRESSED);
         lv_obj_set_style_radius(btn, 10, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, [](lv_event_t* e) {
             int idx = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
             selectedSSID = wifiNetworks[idx];
-            lv_label_set_text_fmt(lbl_wifi_status, LV_SYMBOL_WIFI " Selected: %s", selectedSSID.c_str());
+            // Show password strip + update SSID label
+            lv_label_set_text(lbl_pw_ssid, selectedSSID.c_str());
+            lv_obj_clear_flag(pw_strip, LV_OBJ_FLAG_HIDDEN);
+            lv_label_set_text_fmt(lbl_wifi_status, LV_SYMBOL_WIFI " %s", selectedSSID.c_str());
             lv_obj_set_style_text_color(lbl_wifi_status, COL_TEXT, 0);
             lv_obj_clear_flag(kb, LV_OBJ_FLAG_HIDDEN);
         }, LV_EVENT_CLICKED, NULL);
 
         lv_obj_t* icon = lv_label_create(btn);
         lv_label_set_text(icon, LV_SYMBOL_WIFI);
-        // Signal strength by color: green=strong, gold=medium, red=weak
-        if (rssi > -50) lv_obj_set_style_text_color(icon, lv_color_hex(0x4ECB71), 0);
-        else if (rssi > -70) lv_obj_set_style_text_color(icon, COL_ACCENT, 0);
-        else lv_obj_set_style_text_color(icon, lv_color_hex(0xFF6B6B), 0);
+        lv_obj_set_style_text_color(icon, icon_color, 0);
         lv_obj_align(icon, LV_ALIGN_LEFT_MID, 10, 0);
 
-        lv_obj_t* ssid = lv_label_create(btn);
-        lv_label_set_text(ssid, wifiNetworks[i].c_str());
-        lv_obj_set_style_text_color(ssid, COL_TEXT, 0);
-        lv_obj_set_width(ssid, 260);
-        lv_label_set_long_mode(ssid, LV_LABEL_LONG_DOT);
-        lv_obj_align(ssid, LV_ALIGN_LEFT_MID, 40, 0);
+        lv_obj_t* ssid_lbl = lv_label_create(btn);
+        lv_label_set_text(ssid_lbl, wifiNetworks[ui].c_str());
+        lv_obj_set_style_text_color(ssid_lbl, COL_TEXT, 0);
+        lv_obj_set_style_text_font(ssid_lbl, &lv_font_montserrat_14, 0);
+        lv_obj_set_width(ssid_lbl, lv_pct(80));
+        lv_label_set_long_mode(ssid_lbl, LV_LABEL_LONG_DOT);
+        lv_obj_align(ssid_lbl, LV_ALIGN_LEFT_MID, 36, 0);
     }
     WiFi.scanDelete();
 }
@@ -303,15 +353,19 @@ void ev_wifi_connect(lv_event_t* e) {
     vTaskDelay(pdMS_TO_TICKS(100));
     WiFi.begin(selectedSSID.c_str(), pwd);
 
-    // Non-blocking connection with visual feedback (max 15 seconds)
+    // Non-blocking connection with visual feedback (max 30 seconds — mesh/Orbi can be slow).
+    // MUST reset the hardware WDT each iteration: this function runs on mainAppTask which is
+    // registered with the 30s WDT. The loop itself takes up to 30s → WDT fires at loop end.
     int tries = 0;
-    while (WiFi.status() != WL_CONNECTED && tries++ < 30) {
+    while (WiFi.status() != WL_CONNECTED && tries++ < 60) {
+        esp_task_wdt_reset();  // Feed WDT — loop runs up to 30s, WDT timeout = 30s
         vTaskDelay(pdMS_TO_TICKS(500));
         lv_timer_handler();  // Keep UI responsive
         lv_label_set_text_fmt(lbl_wifi_status, LV_SYMBOL_REFRESH " Connecting to %s%s",
             selectedSSID.c_str(),
             tries % 4 == 0 ? "..." : tries % 4 == 1 ? ".  " : tries % 4 == 2 ? ".. " : " ..");
     }
+    esp_task_wdt_reset();  // Reset after loop exits (NVS write below can take ~100ms)
 
     // Re-enable button
     if (btn_wifi_connect) {
@@ -336,13 +390,13 @@ void ev_wifi_connect(lv_event_t* e) {
 
         String ip = WiFi.localIP().toString();
         lv_label_set_text_fmt(lbl_wifi_status,
-            LV_SYMBOL_OK " Connected!\n"
-            LV_SYMBOL_WIFI " Network: %s\n"
-            LV_SYMBOL_SETTINGS " IP: %s",
+            LV_SYMBOL_WIFI " Connected to %s  (%s)",
             selectedSSID.c_str(), ip.c_str());
         lv_obj_set_style_text_color(lbl_wifi_status, lv_color_hex(0x4ECB71), 0);
 
-        // Clear password field for security
+        // Hide strip + keyboard, clear password field
+        lv_obj_add_flag(pw_strip, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(kb, LV_OBJ_FLAG_HIDDEN);
         lv_textarea_set_text(ta_password, "");
     } else {
         // Determine failure reason
@@ -356,7 +410,7 @@ void ev_wifi_connect(lv_event_t* e) {
         } else if (status == WL_CONNECTION_LOST) {
             reason = "Connection lost";
         } else if (status == WL_DISCONNECTED) {
-            reason = "Connection timeout - check password";
+            reason = "Connection timeout — check password and try again";
         }
 
         lv_label_set_text_fmt(lbl_wifi_status, LV_SYMBOL_WARNING " Failed: %s", reason);
@@ -375,6 +429,20 @@ static void checkForUpdates() {
         }
         return;
     }
+
+    // CRITICAL: Prevent rapid clicking - minimum 5 seconds between checks
+    // Rapid HTTPS checks exhaust SDIO buffer pool even with cooldowns
+    static unsigned long last_check_time = 0;
+    unsigned long now = millis();
+    if (last_check_time > 0 && (now - last_check_time) < OTA_CHECK_DEBOUNCE_MS) {
+        unsigned long wait_sec = (OTA_CHECK_DEBOUNCE_MS - (now - last_check_time)) / 1000 + 1;
+        if (lbl_ota_status) {
+            lv_label_set_text_fmt(lbl_ota_status, LV_SYMBOL_WARNING " Please wait %lu seconds", wait_sec);
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFA500), 0);
+        }
+        return;
+    }
+    last_check_time = now;
 
     // Disable check button during check
     if (btn_check_update) lv_obj_add_state(btn_check_update, LV_STATE_DISABLED);
@@ -403,11 +471,7 @@ static void checkForUpdates() {
         Serial.println("[OTA] Checking Nightly channel (fetching recent releases)");
     }
 
-    http.begin(client, apiUrl);
-    http.addHeader("Accept", "application/vnd.github.v3+json");
-    http.setTimeout(15000);
-
-    // CRITICAL: Acquire network_mutex to prevent conflict with album art HTTPS downloads
+    // CRITICAL: Acquire network_mutex BEFORE http.begin() to prevent SDIO overlap
     if (!xSemaphoreTake(network_mutex, pdMS_TO_TICKS(NETWORK_MUTEX_TIMEOUT_MS))) {
         Serial.println("[OTA] Failed to acquire network mutex - check aborted");
         if (lbl_ota_status) {
@@ -415,29 +479,64 @@ static void checkForUpdates() {
             lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
         }
         if (btn_check_update) lv_obj_clear_state(btn_check_update, LV_STATE_DISABLED);
-        http.end();
         return;
     }
 
-    // CRITICAL: Wait for SDIO cooldown (200ms since last network operation)
-    unsigned long now = millis();
+    // CRITICAL: Wait for general SDIO cooldown (200ms since last network op)
+    now = millis();
     unsigned long elapsed = now - last_network_end_ms;
     if (last_network_end_ms > 0 && elapsed < 200) {
         vTaskDelay(pdMS_TO_TICKS(200 - elapsed));
     }
 
-    int httpCode = http.GET();
+    // CRITICAL: Wait for HTTPS-specific cooldown (2000ms since last HTTPS)
+    now = millis();
+    elapsed = now - last_https_end_ms;
+    if (last_https_end_ms > 0 && elapsed < OTA_HTTPS_COOLDOWN_MS) {
+        vTaskDelay(pdMS_TO_TICKS(OTA_HTTPS_COOLDOWN_MS - elapsed));
+    }
 
-    // Update timestamp before releasing mutex (for SDIO cooldown tracking)
+    int httpCode = -1;
+    String payload = "";
+
+    // Retry once on connection failure — TLS to api.github.com needs ~114KB DMA;
+    // a brief wait lets previous sessions fully release their DMA buffers.
+    for (int attempt = 1; attempt <= 2 && httpCode < 0; attempt++) {
+        if (attempt > 1) {
+            Serial.printf("[OTA] Retry (attempt %d) — free DMA: %d bytes\n",
+                          attempt, heap_caps_get_free_size(MALLOC_CAP_DMA));
+            vTaskDelay(pdMS_TO_TICKS(3000));
+        } else {
+            Serial.printf("[OTA] Free DMA before check: %d bytes\n",
+                          heap_caps_get_free_size(MALLOC_CAP_DMA));
+        }
+
+        http.begin(client, apiUrl);
+        http.addHeader("Accept", "application/vnd.github.v3+json");
+        http.addHeader("User-Agent", "SonosESP/" FIRMWARE_VERSION);
+        http.setTimeout(OTA_CHECK_TIMEOUT_MS);
+
+        httpCode = http.GET();
+
+        if (httpCode == 200) {
+            payload = http.getString();
+        }
+
+        http.end();
+        client.stop();
+        vTaskDelay(pdMS_TO_TICKS(OTA_CHECK_CLEANUP_MS));
+    }
+
+    // Update timestamps before releasing mutex
     last_network_end_ms = millis();
+    last_https_end_ms = millis();
 
-    // Release mutex after GET completes
+    // Release mutex after ALL network activity including TLS cleanup
     xSemaphoreGive(network_mutex);
 
     if (btn_check_update) lv_obj_clear_state(btn_check_update, LV_STATE_DISABLED);
 
     if (httpCode == 200) {
-        String payload = http.getString();
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, payload);
 
@@ -475,7 +574,6 @@ static void checkForUpdates() {
                         if (lbl_latest_version) {
                             lv_label_set_text(lbl_latest_version, "Latest (Nightly): None");
                         }
-                        http.end();
                         return;
                     }
                 } else {
@@ -484,7 +582,6 @@ static void checkForUpdates() {
                         lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " No nightly releases found");
                         lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
                     }
-                    http.end();
                     return;
                 }
             } else {
@@ -510,7 +607,6 @@ static void checkForUpdates() {
                 if (lbl_latest_version) {
                     lv_label_set_text(lbl_latest_version, "Latest (Stable): None");
                 }
-                http.end();
                 return;
             }
 
@@ -543,7 +639,6 @@ static void checkForUpdates() {
                         lv_label_set_text(lbl_latest_version, "Latest (Nightly): None");
                     }
                 }
-                http.end();
                 return;
             }
 
@@ -599,8 +694,219 @@ static void checkForUpdates() {
             lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
         }
     }
+}
 
-    http.end();
+// Helper: Restore all tasks and state after OTA failure
+static void otaRecovery() {
+    // Close HTTP/TLS cleanup
+    Serial.println("[OTA] === RECOVERY: Restoring normal operation ===");
+
+    // Update HTTPS timestamps so art/lyrics tasks use proper cooldown after restarting.
+    // performOTAUpdate() always does HTTPS before calling otaRecovery() on failure,
+    // so art/lyrics must not fire HTTPS immediately after.
+    last_network_end_ms = millis();
+    last_https_end_ms = millis();
+
+    // Hide progress bar and re-enable buttons
+    if (bar_ota_progress) {
+        lv_obj_add_flag(bar_ota_progress, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (btn_check_update) lv_obj_clear_state(btn_check_update, LV_STATE_DISABLED);
+    if (btn_install_update) lv_obj_clear_state(btn_install_update, LV_STATE_DISABLED);
+
+    // Re-enable WiFi features
+    WiFi.setAutoReconnect(true);
+
+    // Clear OTA flag
+    if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
+        ota_in_progress = false;
+        xSemaphoreGive(ota_progress_mutex);
+    }
+
+    // Resume Sonos background tasks
+    sonos.resumeTasks();
+
+    // ALWAYS clear ALL shutdown/abort flags before restarting tasks.
+    // These must be cleared unconditionally — tasks can't start cleanly if any
+    // flag is still set. Add any new task's flags here when adding new features.
+    art_shutdown_requested         = false;
+    art_abort_download             = false;
+    lyrics_shutdown_requested      = false;
+    lyrics_abort_requested         = false;
+    clock_bg_shutdown_requested    = false;
+    sonos_tasks_shutdown_requested = false;  // resumeTasks() also resets this, belt-and-suspenders
+
+    // Restart album art task if it isn't already running
+    if (albumArtTaskHandle == NULL) {
+        Serial.println("[OTA] Restarting album art task");
+        createArtTask();  // PSRAM stack — frees 20KB internal SRAM for SDIO/WiFi DMA
+    }
+
+    Serial.println("[OTA] === Recovery complete ===");
+}
+
+// Signals all background tasks to stop, waits up to 12s for clean exit,
+// force-kills stragglers, recreates the network mutex, sets ota_in_progress.
+// Returns true if any task was force-killed (indicates possible DMA leak).
+static bool otaStopTasks() {
+    if (lbl_ota_status) {
+        lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Stopping background tasks...");
+    }
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
+
+    // Signal ALL tasks to stop SIMULTANEOUSLY — do this before any waiting
+    // so all tasks start their shutdown paths in parallel at t=0.
+    art_abort_download            = true;
+    art_shutdown_requested        = true;
+    lyrics_shutdown_requested     = true;
+    lyrics_abort_requested        = true;
+    clock_bg_shutdown_requested   = true;
+    sonos_tasks_shutdown_requested = true;
+
+    bool force_killed = false;
+    {
+        const uint32_t SHUTDOWN_BUDGET_MS = 12000;
+        uint32_t shutdown_start = millis();
+        Serial.println("[OTA] Waiting for all tasks to exit (parallel)...");
+
+        while (millis() - shutdown_start < SHUTDOWN_BUDGET_MS) {
+            if (albumArtTaskHandle == nullptr &&
+                lyricsTaskHandle   == nullptr &&
+                clockBgTaskHandle  == nullptr) break;
+            vTaskDelay(pdMS_TO_TICKS(100));
+            esp_task_wdt_reset();
+        }
+
+        if (albumArtTaskHandle) {
+            Serial.println("[OTA] WARNING: Force-killing art task (possible DMA leak)");
+            vTaskDelete(albumArtTaskHandle);
+            albumArtTaskHandle = nullptr;
+            force_killed = true;
+        }
+        if (lyricsTaskHandle) {
+            Serial.println("[OTA] WARNING: Force-killing lyrics task (possible DMA leak)");
+            vTaskDelete(lyricsTaskHandle);
+            lyricsTaskHandle = nullptr;
+            force_killed = true;
+        }
+        if (clockBgTaskHandle) {
+            Serial.println("[OTA] WARNING: Force-killing clock bg task (possible DMA leak)");
+            vTaskDelete(clockBgTaskHandle);
+            clockBgTaskHandle = nullptr;
+            force_killed = true;
+        }
+        if (force_killed) {
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_task_wdt_reset();
+        }
+        Serial.printf("[OTA] Task shutdown in %lums — DMA: %d bytes\n",
+                      (unsigned long)(millis() - shutdown_start),
+                      heap_caps_get_free_size(MALLOC_CAP_DMA));
+    }
+
+    Serial.println("[OTA] Suspending Sonos tasks...");
+    sonos.suspendTasks();
+
+    // Recreate network mutex — a force-killed task may have left it poisoned.
+    if (network_mutex) {
+        vSemaphoreDelete(network_mutex);
+        network_mutex = xSemaphoreCreateMutex();
+        Serial.println("[OTA] Network mutex recreated (clean state)");
+    }
+
+    if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
+        ota_in_progress = true;
+        xSemaphoreGive(ota_progress_mutex);
+    }
+
+    return force_killed;
+}
+
+// Waits for TIME_WAIT TCP sockets to release DMA after task shutdown.
+// If DMA remains below OTA_TARGET_FREE_DMA after OTA_DMA_POLL_MS, saves URL
+// to NVS and calls ESP.restart() — does NOT return in that case.
+// On success, configures WiFi for the download and returns normally.
+static void otaCheckDMA() {
+    // ================================================================
+    // PHASE 4: CLEAR NETWORK STATE AND VERIFY DMA
+    // ================================================================
+    // DMA may be low because recent HTTPS sessions (OTA check, lyrics, weather)
+    // leave their TCP sockets in TIME_WAIT for ~12s (lwIP: 2×MSL = 2×6s).
+    // Each TIME_WAIT socket holds ~5-6KB DMA. With 3 sessions: ~15KB held.
+    // Wait up to OTA_DMA_POLL_MS (15s) for them to expire naturally — no WiFi
+    // disruption needed. WiFi.disconnect/reconnect is NEVER done here: it
+    // destabilises the ESP32-C6 SDIO transport driver and causes download crashes.
+    //
+    // Only reboot if DMA is STILL insufficient after 15s. That would indicate an
+    // mbedTLS DMA leak from a force-killed task — extremely rare with clean shutdown.
+    uint32_t free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    Serial.printf("[OTA] DMA after task cleanup: %d bytes (need %d)\n", free_dma, OTA_TARGET_FREE_DMA);
+
+    if (free_dma < OTA_TARGET_FREE_DMA) {
+        // TIME_WAIT sockets are still alive — poll until they expire (up to 15s).
+        // Exit early if DMA plateaus for 3 consecutive seconds (no more recovery
+        // possible — mbedTLS state is permanent until full restart).
+        Serial.println("[OTA] Waiting for TIME_WAIT sockets to expire...");
+        uint32_t poll_start = millis();
+        size_t prev_dma = 0;
+        int plateau_count = 0;
+        while (millis() - poll_start < OTA_DMA_POLL_MS) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_task_wdt_reset();
+            free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
+            uint32_t elapsed = (millis() - poll_start) / 1000;
+            Serial.printf("[OTA] DMA: %d bytes (need %d) — %lus elapsed\n",
+                free_dma, OTA_TARGET_FREE_DMA, (unsigned long)elapsed);
+            if (lbl_ota_status) {
+                lv_label_set_text_fmt(lbl_ota_status,
+                    LV_SYMBOL_REFRESH " Freeing memory... (%d/%d KB)",
+                    (int)(free_dma / 1024), (int)(OTA_TARGET_FREE_DMA / 1024));
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xAAAAAA), 0);
+            }
+            lv_tick_inc(1000);
+            lv_refr_now(NULL);
+            if (free_dma >= OTA_TARGET_FREE_DMA) break;
+            // Plateau detection: if DMA hasn't changed in 3s, reboot now
+            if (free_dma == prev_dma) {
+                if (++plateau_count >= OTA_DMA_PLATEAU_COUNT) {
+                    Serial.printf("[OTA] DMA plateaued at %d bytes — restarting early\n", free_dma);
+                    break;
+                }
+            } else {
+                plateau_count = 0;
+            }
+            prev_dma = free_dma;
+        }
+    }
+
+    if (free_dma < OTA_TARGET_FREE_DMA) {
+        // Still insufficient after 15s — likely an mbedTLS DMA leak from a
+        // force-killed task. Only a full restart can reclaim it.
+        // Save URL to NVS; auto-trigger on next boot skips checkForUpdates() HTTPS.
+        Serial.printf("[OTA] DMA still insufficient (%d / %d) — restarting\n",
+            free_dma, OTA_TARGET_FREE_DMA);
+        Preferences prefs;
+        prefs.begin(NVS_NAMESPACE, false);
+        prefs.putBool(NVS_KEY_OTA_PENDING, true);
+        prefs.putString(NVS_KEY_OTA_URL, download_url.c_str());
+        prefs.end();
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Restarting to apply update...");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFFFFF), 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        display_set_brightness(0);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        ESP.restart();
+        return;  // unreachable
+    }
+
+    // WiFi already connected; disable auto-reconnect and power-save for download
+    WiFi.setAutoReconnect(false);
+    WiFi.setSleep(false);
 }
 
 static void performOTAUpdate() {
@@ -612,296 +918,419 @@ static void performOTAUpdate() {
         return;
     }
 
-    Serial.println("[OTA] ========================================");
-    Serial.println("[OTA] PREPARING FOR FIRMWARE UPDATE");
-    Serial.println("[OTA] ========================================");
-
-    // Stop album art task and WAIT for it to finish
-    if (albumArtTaskHandle) {
-        art_abort_download = true;     // Abort any active download immediately
-        art_shutdown_requested = true;  // Request clean shutdown
-        Serial.println("[OTA] Aborting album art downloads and waiting for task to stop...");
-
-        // Wait up to 10 seconds for clean exit
-        int wait_count = 0;
-        while (albumArtTaskHandle != NULL && wait_count < 100) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            wait_count++;
-        }
-
-        if (albumArtTaskHandle == NULL) {
-            Serial.println("[OTA] ✓ Album art stopped");
-        } else {
-            Serial.println("[OTA] Force killing album art task");
-            vTaskDelete(albumArtTaskHandle);
-            albumArtTaskHandle = NULL;
-        }
-    }
-
-    // Suspend Sonos tasks during OTA (critical for Radio playback)
-    Serial.println("[OTA] Suspending Sonos tasks...");
-    sonos.suspendTasks();
-
-    // Set flag to skip non-essential tasks during OTA (protected by mutex)
-    if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
-        ota_in_progress = true;
-        xSemaphoreGive(ota_progress_mutex);
-    }
-
-    // Small delay to allow SSL cleanup in album art task to complete
-    vTaskDelay(pdMS_TO_TICKS(500));
-
-    Serial.printf("[OTA] Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
-
-    // Optimize WiFi for OTA download
-    WiFi.setAutoReconnect(false);
-    WiFi.setSleep(false);
-
-    // Disable buttons during update
-    if (btn_check_update) lv_obj_add_state(btn_check_update, LV_STATE_DISABLED);
+    // ================================================================
+    // PHASE 1: IMMEDIATE UI FEEDBACK
+    // ================================================================
+    // Show "Preparing..." IMMEDIATELY so user knows button press registered
     if (btn_install_update) lv_obj_add_state(btn_install_update, LV_STATE_DISABLED);
-
-    // Show and reset progress bar
+    if (btn_check_update) lv_obj_add_state(btn_check_update, LV_STATE_DISABLED);
+    if (lbl_ota_status) {
+        lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Preparing update...");
+        lv_obj_set_style_text_color(lbl_ota_status, COL_ACCENT, 0);
+    }
     if (bar_ota_progress) {
         lv_obj_clear_flag(bar_ota_progress, LV_OBJ_FLAG_HIDDEN);
         lv_bar_set_value(bar_ota_progress, 0, LV_ANIM_OFF);
     }
+    lv_tick_inc(10);
+    lv_refr_now(NULL);  // Force immediate refresh so user sees feedback
 
+    Serial.println("[OTA] ========================================");
+    Serial.println("[OTA] PREPARING FOR FIRMWARE UPDATE");
+    Serial.println("[OTA] ========================================");
+
+    // ================================================================
+    // PHASE 2: WAIT FOR PREVIOUS HTTPS CLEANUP
+    // ================================================================
+    unsigned long now = millis();
+    unsigned long elapsed = now - last_https_end_ms;
+    if (last_https_end_ms > 0 && elapsed < OTA_HTTPS_COOLDOWN_MS) {
+        unsigned long wait_ms = OTA_HTTPS_COOLDOWN_MS - elapsed;
+        Serial.printf("[OTA] Waiting for previous HTTPS cleanup: %lums\n", wait_ms);
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Waiting for network cleanup...");
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
+        vTaskDelay(pdMS_TO_TICKS(wait_ms));
+    }
+
+    // ================================================================
+    // PHASE 3: STOP ALL BACKGROUND TASKS
+    // ================================================================
+    bool force_killed = otaStopTasks();
+
+    // ================================================================
+    // PHASE 4: CLEAR NETWORK STATE AND VERIFY DMA
+    // ================================================================
+    otaCheckDMA();  // polls TIME_WAIT sockets; restarts if DMA still low; sets WiFi mode
+
+    // ================================================================
+    // PHASE 5+6: CONNECT AND DOWNLOAD (retry on connection failure)
+    // ================================================================
+    // TLS handshake allocates ~71KB DMA (mbedTLS context + certificate chain +
+    // crypto operation buffers). These remain allocated for the entire download
+    // — TLS must stay active to decrypt the incoming firmware stream.
+    // Called from setup() boot OTA path: ~125KB pre-TLS → ~54KB post-TLS (safe).
+    // The retry loop retries on connection-level failures (stream drops,
+    // 0 bytes received). Stall and timeout are fatal — do not retry.
     if (lbl_ota_status) {
         lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Connecting to server...");
-        lv_obj_set_style_text_color(lbl_ota_status, COL_ACCENT, 0);
     }
     if (lbl_ota_progress) {
         lv_label_set_text(lbl_ota_progress, "0%");
     }
-
-    // Force immediate display refresh to show progress bar
     lv_tick_inc(10);
-    lv_refr_now(NULL);  // Force immediate refresh
-    vTaskDelay(pdMS_TO_TICKS(200));
+    lv_refr_now(NULL);
+    vTaskDelay(pdMS_TO_TICKS(100));
 
-    WiFiClientSecure client;
-    client.setInsecure();  // Skip certificate validation
+    WiFiClientSecure* clientPtr = nullptr;
+    HTTPClient* httpPtr = nullptr;
+    int contentLength = 0;
+    size_t written = 0;
+    uint32_t download_start = 0;
+    static uint8_t buff[OTA_BUFFER_SIZE];
 
-    HTTPClient http;
-    // Log memory before starting HTTPS connection
-    Serial.println("[OTA] ========================================");
-    Serial.println("[OTA] STARTING OTA DOWNLOAD");
-    Serial.printf("[OTA] Before connection - Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
-    Serial.printf("[OTA] Before connection - Free heap: %d bytes\n", ESP.getFreeHeap());
-    Serial.println("[OTA] ========================================");
+    for (int attempt = 1; attempt <= OTA_TLS_MAX_RETRIES; attempt++) {
+        written = 0;
 
-    http.begin(client, download_url);
-    http.setTimeout(60000);  // 60 second timeout for large files
-    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+        if (attempt > 1) {
+            uint32_t wait_sec = (uint32_t)(attempt - 1) * (OTA_TLS_RETRY_DELAY_MS / 1000);
+            Serial.printf("[OTA] Connection failed - waiting %lus before retry %d/%d\n",
+                (unsigned long)wait_sec, attempt, OTA_TLS_MAX_RETRIES);
 
-    Serial.printf("[OTA] After begin() - Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
+            for (uint32_t s = wait_sec; s > 0; s--) {
+                if (lbl_ota_status) {
+                    lv_label_set_text_fmt(lbl_ota_status,
+                        LV_SYMBOL_REFRESH " Retrying in %lus... (%d/%d)",
+                        (unsigned long)s, attempt, OTA_TLS_MAX_RETRIES);
+                    lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFA500), 0);
+                }
+                lv_tick_inc(1000);
+                lv_refr_now(NULL);
+                esp_task_wdt_reset();
+                vTaskDelay(pdMS_TO_TICKS(1000));
+            }
 
-    int httpCode = http.GET();
+            if (lbl_ota_status) {
+                lv_label_set_text_fmt(lbl_ota_status,
+                    LV_SYMBOL_DOWNLOAD " Connecting (attempt %d/%d)...", attempt, OTA_TLS_MAX_RETRIES);
+                lv_obj_set_style_text_color(lbl_ota_status, COL_ACCENT, 0);
+            }
+            lv_tick_inc(10);
+            lv_refr_now(NULL);
+        }
 
-    Serial.printf("[OTA] After GET() - Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
-    Serial.printf("[OTA] HTTP code: %d\n", httpCode);
+        // --- CONNECT ---
+        clientPtr = new WiFiClientSecure();
+        clientPtr->setInsecure();
+        httpPtr = new HTTPClient();
 
-    if (httpCode == 200) {
-        int contentLength = http.getSize();
+        Serial.println("[OTA] ========================================");
+        Serial.printf("[OTA] DOWNLOAD ATTEMPT %d/%d\n", attempt, OTA_TLS_MAX_RETRIES);
+        Serial.printf("[OTA] Free DMA: %d bytes | Free heap: %d bytes\n",
+            heap_caps_get_free_size(MALLOC_CAP_DMA), ESP.getFreeHeap());
+        Serial.println("[OTA] ========================================");
 
-        // OPTIMIZATION: Pre-download validation
-        if (contentLength <= 0 || contentLength > 10 * 1024 * 1024) {  // Max 10MB
+        // Update UI BEFORE GET() — lv_refr_now() after GET() causes a ~50ms delay during
+        // which lwIP buffers 40–50 KB of firmware into DMA-backed TCP receive buffers,
+        // consuming DMA needed for AES encryption and the SDIO RX pool (→ AES failure /
+        // sdio_push_data_to_queue assert crash). Rendering before TLS connect is safe:
+        // no firmware is flowing yet so no unexpected lwIP DMA consumption occurs.
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Downloading firmware...");
+            lv_obj_set_style_text_color(lbl_ota_status, COL_ACCENT, 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
+
+        httpPtr->begin(*clientPtr, download_url);
+        httpPtr->setTimeout(60000);
+        httpPtr->setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+
+        int httpCode = httpPtr->GET();
+        size_t post_tls_total = heap_caps_get_free_size(MALLOC_CAP_DMA);
+        Serial.printf("[OTA] HTTP %d - Post-TLS DMA: %d bytes\n", httpCode, post_tls_total);
+
+        if (httpCode != 200) {
+            if (lbl_ota_status) {
+                lv_label_set_text_fmt(lbl_ota_status, LV_SYMBOL_WARNING " Download failed (HTTP %d)", httpCode);
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+            }
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
+            httpPtr = nullptr; clientPtr = nullptr;
+            otaRecovery();
+            return;
+        }
+
+        contentLength = httpPtr->getSize();
+        if (contentLength <= 0 || contentLength > OTA_MAX_FIRMWARE_SIZE) {
             Serial.printf("[OTA] Invalid firmware size: %d bytes\n", contentLength);
             if (lbl_ota_status) {
                 lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Invalid firmware file");
                 lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
             }
-            http.end();
-            WiFi.setAutoReconnect(true);
-            if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
-                ota_in_progress = false;
-                xSemaphoreGive(ota_progress_mutex);
-            }
-            sonos.resumeTasks();  // Resume suspended tasks
-            if (albumArtTaskHandle == NULL) {
-                art_shutdown_requested = false;
-                xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
-            }
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
+            httpPtr = nullptr; clientPtr = nullptr;
+            otaRecovery();
             return;
         }
 
-        Serial.printf("[OTA] Firmware size: %d bytes (%.1f KB)\n", contentLength, contentLength / 1024.0);
-        bool canBegin = Update.begin(contentLength);
+        Serial.printf("[OTA] Firmware: %d bytes (%.1f KB)\n", contentLength, contentLength / 1024.0);
 
-        if (canBegin) {
+        // Post-TLS DMA check: if total free DMA is below the threshold, SDIO RX buffers
+        // will be starved during download causing an assert crash. Retry the full TLS
+        // handshake — the previous session's DMA will be returned to the pool first.
+        // Note: heap_caps_get_largest_free_block(MALLOC_CAP_DMA) always returns 0 on
+        // ESP32-P4 (DMA heap is managed outside the standard allocator), so we check
+        // total free only. If TLS session resumption leaves a fragmented heap and causes
+        // an mbedTLS AES failure downstream, the natural retry (written=0 → continue)
+        // will start a fresh full handshake from clean ~126KB DMA state.
+        if (post_tls_total < OTA_MIN_DMA_AFTER_TLS) {
+            Serial.printf("[OTA] Post-TLS DMA too low (%d bytes, need %d) — retrying\n",
+                post_tls_total, OTA_MIN_DMA_AFTER_TLS);
             if (lbl_ota_status) {
-                lv_label_set_text(lbl_ota_status, LV_SYMBOL_DOWNLOAD " Downloading firmware...");
+                lv_label_set_text_fmt(lbl_ota_status,
+                    LV_SYMBOL_REFRESH " Low memory after TLS (%d KB) - retrying...",
+                    post_tls_total / 1024);
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFA500), 0);
             }
             lv_tick_inc(10);
             lv_refr_now(NULL);
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
+            httpPtr = nullptr; clientPtr = nullptr;
+            continue;  // Retry — do not call otaRecovery()
+        }
 
-            WiFiClient* stream = http.getStreamPtr();
-            size_t written = 0;
-            int lastPercent = -1;
-            uint32_t lastUIUpdate = millis();
+        // --- DOWNLOAD ---
+        // Update.begin() is deferred (lazy) — called only on first received byte.
+        // This avoids allocating the DMA-backed flash write buffer (~11KB) before we
+        // know data actually flows; an early connection drop would otherwise leak that
+        // allocation across retry attempts, starving DMA for the next TLS handshake.
+        WiFiClient* stream = httpPtr->getStreamPtr();
+        int lastPercent = -1;
+        uint32_t lastUIUpdate = millis();
+        int chunk_count = 0;
+        download_start = millis();
+        uint32_t last_data_time = millis();
+        bool fatal_abort = false;
+        bool update_begun = false;
 
-            // Buffer size and yield interval defined in config.h
-            static uint8_t buff[OTA_BUFFER_SIZE];
-            int writeCount = 0;
+        Serial.printf("[OTA] Downloading... DMA: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
 
-            Serial.printf("[OTA] Starting download - Free DMA heap: %d bytes\n", heap_caps_get_free_size(MALLOC_CAP_DMA));
-
-            while (http.connected() && (written < contentLength)) {
-                size_t available = stream->available();
-                if (available) {
-                    size_t toRead = (available < sizeof(buff)) ? available : sizeof(buff);
-                    int bytesRead = stream->readBytes(buff, toRead);
-                    written += Update.write(buff, bytesRead);
-                    writeCount++;
-
-                    // Yield periodically
-                    if (writeCount >= OTA_YIELD_EVERY_WRITES) {
-                        taskYIELD();
-                        writeCount = 0;
-                    }
-
-                    int percent = (written * 100) / contentLength;
-
-                    // Update UI every 1%
-                    if (percent != lastPercent) {
-                        if (lbl_ota_progress) {
-                            lv_label_set_text_fmt(lbl_ota_progress, "%d%%", percent);
-                        }
-                        if (bar_ota_progress) {
-                            lv_bar_set_value(bar_ota_progress, percent, LV_ANIM_OFF);
-                        }
-                        lastPercent = percent;
-
-                        // Refresh display every 10%
-                        if (percent % 10 == 0) {
-                            uint32_t now = millis();
-                            lv_tick_inc(now - lastUIUpdate);
-                            lv_refr_now(NULL);
-                            lastUIUpdate = now;
-                            Serial.printf("[OTA] %d%% - Free DMA heap: %d bytes\n", percent, heap_caps_get_free_size(MALLOC_CAP_DMA));
-                        }
-                    }
-                } else {
-                    vTaskDelay(pdMS_TO_TICKS(1));
+        while (httpPtr->connected() && (written < (size_t)contentLength)) {
+            if ((millis() - last_data_time) > OTA_STALL_TIMEOUT_MS) {
+                Serial.printf("[OTA] STALL: No data for %ds at %d%% - aborting\n",
+                    OTA_STALL_TIMEOUT_MS / 1000, (int)(written * 100 / contentLength));
+                if (lbl_ota_status) {
+                    lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download stalled - network timeout");
+                    lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
                 }
+                lv_tick_inc(10);
+                lv_refr_now(NULL);
+                fatal_abort = true;
+                break;
             }
 
-            if (written == contentLength) {
-                // DOWNLOAD COMPLETE - Show 100%
-                if (bar_ota_progress) {
-                    lv_bar_set_value(bar_ota_progress, 100, LV_ANIM_OFF);
-                }
-                if (lbl_ota_progress) {
-                    lv_label_set_text(lbl_ota_progress, "100%");
-                }
+            if ((millis() - download_start) > OTA_DOWNLOAD_TIMEOUT_MS) {
+                Serial.printf("[OTA] TIMEOUT: >%ds at %d%% - aborting\n",
+                    OTA_DOWNLOAD_TIMEOUT_MS / 1000, (int)(written * 100 / contentLength));
                 if (lbl_ota_status) {
-                    lv_label_set_text(lbl_ota_status, LV_SYMBOL_OK " Download complete!");
+                    lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download timeout - try again");
+                    lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
                 }
                 lv_tick_inc(10);
                 lv_refr_now(NULL);
-                vTaskDelay(pdMS_TO_TICKS(500));
+                fatal_abort = true;
+                break;
+            }
 
-                // START INSTALL - Reset progress bar and animate
-                if (bar_ota_progress) {
-                    lv_bar_set_value(bar_ota_progress, 0, LV_ANIM_OFF);
-                }
-                if (lbl_ota_progress) {
-                    lv_label_set_text(lbl_ota_progress, "");
-                }
-                if (lbl_ota_status) {
-                    lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Installing & verifying...");
-                }
-                lv_tick_inc(10);
-                lv_refr_now(NULL);
+            size_t available = stream->available();
+            if (available) {
+                last_data_time = millis();
 
-                // Animate install progress (0-100% smoothly)
-                for (int i = 0; i <= 100; i += 10) {
+                // Lazy Update.begin() — only allocate the DMA-backed flash write buffer
+                // once actual data starts flowing. This prevents ~11KB DMA leaks when the
+                // connection drops before any bytes arrive (e.g. AES failure path).
+                if (!update_begun) {
+                    if (!Update.begin(contentLength)) {
+                        Serial.println("[OTA] Update.begin() failed — not enough flash space");
+                        if (lbl_ota_status) {
+                            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Not enough space for OTA");
+                            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+                        }
+                        lv_tick_inc(10);
+                        lv_refr_now(NULL);
+                        fatal_abort = true;
+                        break;
+                    }
+                    update_begun = true;
+                    Serial.printf("[OTA] Update.begin() OK — DMA: %d bytes\n",
+                        heap_caps_get_free_size(MALLOC_CAP_DMA));
+                }
+
+                size_t toRead = (available < OTA_READ_SIZE) ? available : OTA_READ_SIZE;
+                if (toRead > sizeof(buff)) toRead = sizeof(buff);
+                int bytesRead = stream->readBytes(buff, toRead);
+                written += Update.write(buff, bytesRead);
+
+                chunk_count++;
+                if (chunk_count % OTA_DMA_CHECK_INTERVAL == 0) {
+                    size_t cur_free_dma = heap_caps_get_free_size(MALLOC_CAP_DMA);
+                    if (cur_free_dma < OTA_DMA_CRITICAL) {
+                        vTaskDelay(pdMS_TO_TICKS(80));
+                    } else if (cur_free_dma < OTA_DMA_LOW) {
+                        vTaskDelay(pdMS_TO_TICKS(30));
+                    } else {
+                        vTaskDelay(pdMS_TO_TICKS(OTA_BASE_DELAY_MS));
+                    }
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(OTA_BASE_DELAY_MS));
+                }
+
+                esp_task_wdt_reset();
+
+                int percent = (written * 100) / contentLength;
+                if (percent != lastPercent) {
+                    if (lbl_ota_progress) {
+                        lv_label_set_text_fmt(lbl_ota_progress, "%d%%", percent);
+                    }
                     if (bar_ota_progress) {
-                        lv_bar_set_value(bar_ota_progress, i, LV_ANIM_OFF);
+                        lv_bar_set_value(bar_ota_progress, percent, LV_ANIM_OFF);
                     }
-                    lv_tick_inc(50);
-                    lv_refr_now(NULL);
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                }
-            }
+                    lastPercent = percent;
 
-            if (Update.end()) {
-                if (Update.isFinished()) {
-                    // INSTALL COMPLETE - Clean screen and show "REBOOTING..." message
-                    lv_obj_clean(lv_screen_active());  // Remove all children
-                    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x000000), 0);
-
-                    // Create centered "REBOOTING..." label
-                    lv_obj_t *reboot_label = lv_label_create(lv_screen_active());
-                    lv_label_set_text(reboot_label, "REBOOTING...");
-                    lv_obj_set_style_text_color(reboot_label, lv_color_hex(0xFFFFFF), 0);
-                    lv_obj_center(reboot_label);
-
-                    lv_tick_inc(10);
-                    lv_refr_now(NULL);
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-
-                    // Turn off backlight before restart to avoid blue screen flash
-                    display_set_brightness(0);
-                    vTaskDelay(pdMS_TO_TICKS(100));
-
-                    ESP.restart();
-                } else {
-                    if (lbl_ota_status) {
-                        lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Update failed: Not finished");
-                        lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+                    if (percent % OTA_PROGRESS_LOG_INTERVAL == 0) {
+                        uint32_t ui_now = millis();
+                        lv_tick_inc(ui_now - lastUIUpdate);
+                        lv_refr_now(NULL);
+                        lastUIUpdate = ui_now;
+                        Serial.printf("[OTA] %d%% (%d/%d bytes) - Free DMA: %d bytes\n",
+                            percent, written, contentLength, heap_caps_get_free_size(MALLOC_CAP_DMA));
                     }
                 }
             } else {
-                if (lbl_ota_status) {
-                    lv_label_set_text_fmt(lbl_ota_status, LV_SYMBOL_WARNING " Update failed: %s", Update.errorString());
-                    lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
-                }
+                esp_task_wdt_reset();
+                vTaskDelay(pdMS_TO_TICKS(1));
             }
+        }
+
+        if (fatal_abort) {
+            // Stall, timeout, or Update.begin() failure — not retryable
+            if (update_begun) Update.abort();
+            httpPtr->end(); clientPtr->stop();
+            delete httpPtr; delete clientPtr;
+            otaRecovery();
+            return;
+        }
+
+        if (written == (size_t)contentLength) {
+            break;  // SUCCESS — exit retry loop
+        }
+
+        // Connection dropped before completion — retryable
+        Serial.printf("[OTA] Attempt %d/%d: %d/%d bytes — %s\n",
+            attempt, OTA_TLS_MAX_RETRIES, written, contentLength,
+            (attempt < OTA_TLS_MAX_RETRIES) ? "retrying" : "failed");
+        if (update_begun) Update.abort();
+        httpPtr->end(); clientPtr->stop();
+        delete httpPtr; delete clientPtr;
+        httpPtr = nullptr; clientPtr = nullptr;
+
+        if (attempt == OTA_TLS_MAX_RETRIES) {
+            if (lbl_ota_status) {
+                lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download failed - try again later");
+                lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+            }
+            lv_tick_inc(10);
+            lv_refr_now(NULL);
+            otaRecovery();
+            return;
+        }
+    }
+
+    // Guard: all retry attempts exhausted via DMA check (continue on last attempt
+    // exits the loop normally without hitting the return above).
+    if (written != (size_t)contentLength) {
+        Serial.printf("[OTA] All %d attempts failed (written=%d, expected=%d) — recovering\n",
+            OTA_TLS_MAX_RETRIES, written, contentLength);
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Download failed - try again later");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
+        otaRecovery();
+        return;
+    }
+
+    // ================================================================
+    // PHASE 7: VERIFY AND INSTALL
+    // ================================================================
+    // Reaches here only on full successful download (written == contentLength).
+    if (bar_ota_progress) lv_bar_set_value(bar_ota_progress, 100, LV_ANIM_OFF);
+    if (lbl_ota_progress) lv_label_set_text(lbl_ota_progress, "100%");
+    if (lbl_ota_status) lv_label_set_text(lbl_ota_status, LV_SYMBOL_OK " Download complete!");
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
+
+    Serial.printf("[OTA] Download complete: %d bytes in %lus\n", written, (millis() - download_start) / 1000);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    // START INSTALL
+    if (bar_ota_progress) lv_bar_set_value(bar_ota_progress, 0, LV_ANIM_OFF);
+    if (lbl_ota_progress) lv_label_set_text(lbl_ota_progress, "");
+    if (lbl_ota_status) lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Installing & verifying...");
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
+
+    // Animate install progress
+    for (int i = 0; i <= 100; i += 10) {
+        if (bar_ota_progress) lv_bar_set_value(bar_ota_progress, i, LV_ANIM_OFF);
+        lv_tick_inc(50);
+        lv_refr_now(NULL);
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+
+    if (Update.end()) {
+        if (Update.isFinished()) {
+            // INSTALL COMPLETE - Clean screen and show reboot message
+            lv_obj_clean(lv_screen_active());
+            lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x000000), 0);
+
+            lv_obj_t *reboot_label = lv_label_create(lv_screen_active());
+            lv_label_set_text(reboot_label, "REBOOTING...");
+            lv_obj_set_style_text_color(reboot_label, lv_color_hex(0xFFFFFF), 0);
+            lv_obj_set_style_text_font(reboot_label, &lv_font_montserrat_24, 0);
+            lv_obj_center(reboot_label);
+
+            lv_tick_inc(10);
+            lv_refr_now(NULL);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+
+            display_set_brightness(0);
+            vTaskDelay(pdMS_TO_TICKS(100));
+
+            ESP.restart();
         } else {
             if (lbl_ota_status) {
-                lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Not enough space for OTA");
+                lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " Update failed: Not finished");
                 lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
             }
         }
     } else {
         if (lbl_ota_status) {
-            lv_label_set_text_fmt(lbl_ota_status, LV_SYMBOL_WARNING " Download failed (HTTP %d)", httpCode);
+            lv_label_set_text_fmt(lbl_ota_status, LV_SYMBOL_WARNING " Update failed: %s", Update.errorString());
             lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
         }
     }
 
-    http.end();
-
-    // Hide progress bar and re-enable buttons
-    if (bar_ota_progress) {
-        lv_obj_add_flag(bar_ota_progress, LV_OBJ_FLAG_HIDDEN);
-    }
-    if (btn_check_update) lv_obj_clear_state(btn_check_update, LV_STATE_DISABLED);
-    if (btn_install_update) lv_obj_clear_state(btn_install_update, LV_STATE_DISABLED);
-
-    // Re-enable WiFi features (if update failed - successful update will restart device)
-    WiFi.setAutoReconnect(true);
-    Serial.println("[OTA] WiFi auto-reconnect re-enabled");
-
-    // Re-enable loop functions (if update failed - successful update will restart device)
-    if (xSemaphoreTake(ota_progress_mutex, pdMS_TO_TICKS(1000))) {
-        ota_in_progress = false;
-        xSemaphoreGive(ota_progress_mutex);
-    }
-    Serial.println("[OTA] Non-essential tasks re-enabled (processUpdates, checkAutoDim)");
-
-    // Resume Sonos background tasks (if update failed - successful update will restart device)
-    Serial.println("[OTA] Resuming Sonos background tasks");
-    sonos.resumeTasks();
-
-    // Restart album art task (if update failed - successful update will restart device)
-    if (albumArtTaskHandle == NULL) {
-        Serial.println("[OTA] Restarting album art task");
-        art_shutdown_requested = false;
-        xTaskCreatePinnedToCore(albumArtTask, "Art", ART_TASK_STACK_SIZE, NULL, ART_TASK_PRIORITY, &albumArtTaskHandle, 0);
-    }
+    httpPtr->end(); clientPtr->stop();
+    delete httpPtr; delete clientPtr;
+    otaRecovery();
 }
 
 void ev_check_update(lv_event_t* e) {
@@ -909,32 +1338,97 @@ void ev_check_update(lv_event_t* e) {
 }
 
 void ev_install_update(lv_event_t* e) {
-    performOTAUpdate();
+    if (download_url.isEmpty()) {
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_WARNING " No firmware URL — check for updates first");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFF6B6B), 0);
+        }
+        return;
+    }
+
+    // Save URL to NVS and restart immediately.
+    // The firmware download runs at the START of the next boot, before any background
+    // tasks (art, Sonos, lyrics) are created. This gives TLS the full ~125KB DMA
+    // headroom it needs. The ~71KB consumed by the TLS handshake leaves ~54KB free —
+    // enough for the SDIO RX pool, AES alignment buffers, and Update.begin() buffer.
+    //
+    // Attempting a live download (tasks running) leaves only ~34KB DMA after TLS,
+    // which starves the SDIO RX pool → sdio_push_data_to_queue assert crash.
+    Preferences prefs;
+    prefs.begin(NVS_NAMESPACE, false);
+    prefs.putBool(NVS_KEY_OTA_PENDING, true);
+    prefs.putString(NVS_KEY_OTA_URL, download_url.c_str());
+    prefs.end();
+
+    Serial.println("[OTA] URL saved to NVS — restarting for boot OTA");
+    if (lbl_ota_status) {
+        lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Restarting to install update...");
+        lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFFFFF), 0);
+    }
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
+    vTaskDelay(pdMS_TO_TICKS(1500));  // let user see the message
+    display_set_brightness(0);
+    vTaskDelay(pdMS_TO_TICKS(100));
+    ESP.restart();
+}
+
+// Called from loop() when ota_auto_pending is set (device rebooted for OTA due to low DMA).
+// Uses the URL saved before reboot - skips checkForUpdates() entirely so no HTTPS session
+// consumes DMA before the OTA TLS handshake. This breaks the reboot loop.
+void triggerPendingOTA() {
+    // Load saved URL - skip checkForUpdates() (its HTTPS session costs ~8KB DMA we can't afford)
+    Preferences prefs;
+    prefs.begin(NVS_NAMESPACE, false);
+    String saved_url = prefs.getString(NVS_KEY_OTA_URL, "");
+    prefs.remove(NVS_KEY_OTA_URL);
+    prefs.end();
+
+    lv_screen_load(scr_ota);
+    lv_tick_inc(10);
+    lv_refr_now(NULL);
+    vTaskDelay(pdMS_TO_TICKS(500));
+
+    if (saved_url.length() > 0) {
+        Serial.printf("[OTA] Auto-trigger: using saved URL (no pre-OTA HTTPS - max DMA preserved)\n");
+        download_url = saved_url;
+        if (lbl_ota_status) {
+            lv_label_set_text(lbl_ota_status, LV_SYMBOL_REFRESH " Resuming update after restart...");
+            lv_obj_set_style_text_color(lbl_ota_status, lv_color_hex(0xFFFFFF), 0);
+        }
+        lv_tick_inc(10);
+        lv_refr_now(NULL);
+        performOTAUpdate();
+    } else {
+        // No saved URL (e.g. flag set manually) - fall back to normal check
+        Serial.println("[OTA] Auto-trigger: no saved URL - running check");
+        checkForUpdates();
+        if (download_url.length() > 0) {
+            performOTAUpdate();
+        }
+    }
 }
 
 // ============================================================================
-// UI Update Function
 // ============================================================================
-void updateUI() {
-    SonosDevice* d = sonos.getCurrentDevice();
-    if (!d) return;
+// updateUI() Sub-Functions (static — implementation details, not in any header)
+// ============================================================================
 
-    // Track connection state - start as disconnected to avoid false triggers
-    static bool was_connected = false;
-    static bool ui_cleared = false;
+// Handles disconnect/reconnect UI state. Returns true if device is connected
+// and updateUI() should continue. Returns false → caller must return immediately.
+static bool updateConnectionState(SonosDevice* d) {
+    static bool was_connected  = false;
+    static bool ui_cleared     = false;
     static bool last_conn_state = false;
 
-    // Debug: Log connection state changes
     if (d->connected != last_conn_state) {
         Serial.printf("[UI] Connection state changed: %s (errorCount=%d)\n",
                      d->connected ? "CONNECTED" : "DISCONNECTED", d->errorCount);
         last_conn_state = d->connected;
     }
 
-    // Handle disconnection - only clear UI once
     if (!d->connected) {
         if (was_connected || !ui_cleared) {
-            // Device just disconnected or first time showing disconnect state
             lv_label_set_text(lbl_title, "Device Not Connected");
             lv_label_set_text(lbl_artist, "");
             lv_label_set_text(lbl_album, "");
@@ -942,21 +1436,17 @@ void updateUI() {
             lv_label_set_text(lbl_time_remaining, "0:00");
             lv_slider_set_value(slider_progress, 0, LV_ANIM_OFF);
 
-            // Hide album art, show placeholder
             lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
             lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
 
-            // Hide next track info
             lv_obj_add_flag(img_next_album, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(lbl_next_title, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(lbl_next_artist, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(lbl_next_header, LV_OBJ_FLAG_HIDDEN);
 
-            // Reset background color to default dark
-            if (panel_art) lv_obj_set_style_bg_color(panel_art, lv_color_hex(0x1a1a1a), 0);
+            if (panel_art)   lv_obj_set_style_bg_color(panel_art,   lv_color_hex(0x1a1a1a), 0);
             if (panel_right) lv_obj_set_style_bg_color(panel_right, COL_BG, 0);
 
-            // Reset play button to pause icon
             lv_obj_t* lbl = lv_obj_get_child(btn_play, 0);
             lv_label_set_text(lbl, LV_SYMBOL_PAUSE);
             lv_obj_center(lbl);
@@ -967,119 +1457,57 @@ void updateUI() {
             ui_cleared = true;
             Serial.println("[UI] Device disconnected - UI cleared");
         }
-        return;  // Don't update UI when disconnected
+        return false;  // not connected
     }
 
-    // Handle reconnection - force UI refresh
     if (d->connected && !was_connected) {
         was_connected = true;
         ui_cleared = false;
-        // Force refresh of all UI elements by clearing cached values
         ui_title = "";
         ui_artist = "";
         Serial.println("[UI] Device reconnected - forcing UI refresh");
     }
+    return true;  // connected
+}
 
-    // Device is connected - update UI normally
+// Displays art or placeholder from the background art task.
+// Must be called on the main LVGL thread. Takes art_mutex internally.
+static void displayCompletedArt() {
+    if (!xSemaphoreTake(art_mutex, 0)) return;
 
-    // Title
-    if (d->currentTrack != ui_title) {
-        lv_label_set_text(lbl_title, d->currentTrack.length() > 0 ? d->currentTrack.c_str() : "Not Playing");
-        ui_title = d->currentTrack;
+    if (art_ready) {
+        // Build art_dsc here on the main thread — same thread as lv_timer_handler() /
+        // LVGL renderer — so there is never concurrent read+write of the descriptor.
+        // The background art task only writes art_buffer (pixels); we set the header here.
+        memset(&art_dsc, 0, sizeof(art_dsc));
+        art_dsc.header.w    = ART_SIZE;
+        art_dsc.header.h    = ART_SIZE;
+        art_dsc.header.cf   = LV_COLOR_FORMAT_RGB565;
+        art_dsc.data_size   = ART_SIZE * ART_SIZE * 2;
+        art_dsc.data        = (const uint8_t*)art_buffer;
+        lv_img_set_src(img_album, &art_dsc);
+        lv_obj_set_size(img_album, ART_SIZE, ART_SIZE);
+        lv_obj_center(img_album);
+        lv_obj_remove_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+        art_ready = false;
+        art_show_placeholder = false;
+    } else if (art_show_placeholder) {
+        lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+        art_show_placeholder = false;
     }
-
-    // Artist
-    if (d->currentArtist != ui_artist) {
-        lv_label_set_text(lbl_artist, d->currentArtist.c_str());
-        ui_artist = d->currentArtist;
+    if (color_ready && panel_art && panel_right) {
+        setBackgroundColor(dominant_color);
+        color_ready = false;
     }
+    xSemaphoreGive(art_mutex);
+}
 
-    // Fetch synced lyrics when track changes
-    static String lyrics_last_track = "";
-    String lyrics_key = d->currentArtist + "|" + d->currentTrack;
-    if (lyrics_key != lyrics_last_track && d->currentTrack.length() > 0) {
-        lyrics_last_track = lyrics_key;
-        if (lyrics_enabled && !d->isRadioStation && d->durationSeconds > 0) {
-            requestLyrics(d->currentArtist, d->currentTrack, d->durationSeconds);
-        } else {
-            clearLyrics();
-        }
-    }
-
-    // Album name (below album art)
-    static String ui_album_name = "";
-    if (d->currentAlbum != ui_album_name) {
-        lv_label_set_text(lbl_album, d->currentAlbum.c_str());
-        ui_album_name = d->currentAlbum;
-    }
-
-    // Device name in header
-    static String ui_device_name = "";
-    if (d->roomName != ui_device_name) {
-        String np = "Now Playing - " + d->roomName;
-        lv_label_set_text(lbl_device_name, np.c_str());
-        ui_device_name = d->roomName;
-    }
-
-    // Time display
-    String t = d->relTime;
-    if (t.startsWith("0:")) t = t.substring(2);
-    lv_label_set_text(lbl_time, t.c_str());
-
-    // Total duration
-    if (d->durationSeconds > 0) {
-        int dm = d->durationSeconds / 60;
-        int ds = d->durationSeconds % 60;
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%d:%02d", dm, ds);
-        lv_label_set_text(lbl_time_remaining, buf);
-    }
-
-    // Progress slider
-    if (!dragging_prog && d->durationSeconds > 0)
-        lv_slider_set_value(slider_progress, (d->relTimeSeconds * 100) / d->durationSeconds, LV_ANIM_OFF);
-
-    // Update synced lyrics display
-    updateLyricsDisplay(d->relTimeSeconds);
-
-    // Play/Pause button
-    if (d->isPlaying != ui_playing) {
-        lv_obj_t* lbl = lv_obj_get_child(btn_play, 0);
-        lv_label_set_text(lbl, d->isPlaying ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
-
-        // Center the icon properly - play triangle needs offset to look centered
-        if (d->isPlaying) {
-            lv_obj_center(lbl);  // Pause is centered
-        } else {
-            lv_obj_align(lbl, LV_ALIGN_CENTER, 2, 0);  // Play needs 2px right offset
-        }
-
-        ui_playing = d->isPlaying;
-    }
-
-    // Volume slider update
-    if (!dragging_vol && d->volume != ui_vol && slider_vol) {
-        lv_slider_set_value(slider_vol, d->volume, LV_ANIM_OFF);
-        ui_vol = d->volume;
-    }
-
-    // Mute button
-    if (d->isMuted != ui_muted && btn_mute) {
-        lv_obj_t* lbl = lv_obj_get_child(btn_mute, 0);
-        lv_label_set_text(lbl, d->isMuted ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
-        ui_muted = d->isMuted;
-    }
-
-    // Shuffle
-    if (d->shuffleMode != ui_shuffle) {
-        lv_obj_t* lbl = lv_obj_get_child(btn_shuffle, 0);
-        lv_obj_set_style_text_color(lbl, d->shuffleMode ? COL_ACCENT : COL_TEXT2, 0);
-        ui_shuffle = d->shuffleMode;
-    }
-
-    // Next track info - find next track in queue
-    // SKIP FOR RADIO MODE - radio stations don't have a queue/next track
+// Updates the "Next Up" track labels from the cached queue.
+static void updateNextTrackUI(SonosDevice* d) {
     static String last_next_title = "";
+
     if (!d->isRadioStation && d->queueSize > 0 && d->currentTrackNumber > 0) {
         int nextIdx = -1;
 
@@ -1128,27 +1556,14 @@ void updateUI() {
             last_next_title = "";
         }
     }
+}
 
-    // Repeat
-    if (d->repeatMode != ui_repeat) {
-        lv_obj_t* lbl = lv_obj_get_child(btn_repeat, 0);
-        if (d->repeatMode == "ONE") {
-            lv_label_set_text(lbl, "1");
-            lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
-        } else if (d->repeatMode == "ALL") {
-            lv_label_set_text(lbl, LV_SYMBOL_LOOP);
-            lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
-        } else {
-            lv_label_set_text(lbl, LV_SYMBOL_LOOP);
-            lv_obj_set_style_text_color(lbl, COL_TEXT2, 0);
-        }
-        ui_repeat = d->repeatMode;
-    }
-
-    // Album art - only request if URL changed to prevent download loops
-    static String last_art_url = "";
+// Selects the correct art URL and calls requestAlbumArt() when needed.
+// Also handles URI change detection and "not playing" transitions.
+static void updateAlbumArtRequest(SonosDevice* d) {
     static String last_track_uri = "";
     static String last_source_prefix = "";
+    static bool had_track = false;
 
     // Extract source prefix to detect actual source changes (not just track changes)
     String current_source_prefix = "";
@@ -1174,22 +1589,92 @@ void updateUI() {
     // Detect any URI change (track or source)
     bool uri_changed = (d->currentURI != last_track_uri);
 
-    if (uri_changed && d->currentURI.length() > 0) {
-        if (actual_source_change) {
-            Serial.printf("[ART] SOURCE CHANGE: %s -> %s\n", last_source_prefix.c_str(), current_source_prefix.c_str());
-            last_source_prefix = current_source_prefix;
-            // CRITICAL: Abort any in-progress album art download immediately
-            // This prevents Spotify download from blocking YouTube Music download
-            art_abort_download = true;
-        } else {
-            Serial.printf("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
-        }
-        last_art_url = "";  // Force art refresh on any URI change
+    if (uri_changed) {
+        // Always update last_track_uri (even when empty) to prevent repeated firing
+        // when Sonos reports empty URI in stopped state
         last_track_uri = d->currentURI;
+
+        if (d->currentURI.length() > 0) {
+            if (actual_source_change) {
+                Serial.printf("[ART] SOURCE CHANGE: %s -> %s\n", last_source_prefix.c_str(), current_source_prefix.c_str());
+                last_source_prefix = current_source_prefix;
+            } else {
+                Serial.printf("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
+            }
+            // CRITICAL: Abort any in-progress album art download immediately
+            // Applies to ALL track changes (not just source changes) so the art task
+            // doesn't wait for a 10-second HTTP timeout before processing the new track
+            art_abort_download = true;
+            // CRITICAL: Must hold art_mutex when writing last_art_url/pending_art_url -
+            // the art task reads both under mutex, and String assignment is not atomic.
+            if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
+                last_art_url    = "";  // Force art refresh on any URI change
+                pending_art_url = "";  // Prevent art task downloading old song's art during
+                                       // the window between URI detection and requestAlbumArt()
+                                       // call ~100 lines below. Without this, art task wakes,
+                                       // sees pending=old_url != last_art_url="" and starts
+                                       // downloading wrong art, wasting SDIO traffic and setting
+                                       // last_art_download_end_ms (adding 1s cooldown for new art).
+                art_ready = false;  // Discard any just-completed download — prevents old art
+                                    // flashing for the new track if displayCompletedArt() fires
+                                    // before the new art task iteration starts.
+                xSemaphoreGive(art_mutex);
+            }
+            // Clear LRU cache: prevents cached art from the OLD track flashing for
+            // the NEW track if the art task picks up the new URL within the same
+            // updateUI frame (cache hit would bypass the placeholder entirely).
+            clearAlbumArtCache();
+            // Show placeholder immediately (main thread = LVGL-safe)
+            if (img_album)       lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+            if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+        }
     }
 
-    // Request album art if URL changed or URI changed
-    if (d->albumArtURL != last_art_url || uri_changed) {
+    // Show placeholder when device transitions to "Not Playing" (no active track)
+    // Without this, the last track's art stays frozen when playback stops
+    bool has_track = (d->currentTrack.length() > 0);
+    if (had_track && !has_track) {
+        Serial.println("[ART] Not playing - clearing art display");
+        art_abort_download = true;  // Stop any in-progress download immediately
+        clearAlbumArtCache();
+        if (img_album) lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+        if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+        if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
+            last_art_url = "";
+            pending_art_url = "";  // Prevent art task re-fetching the old URL
+            art_ready = false;     // Discard any just-completed download (prevents art flash)
+            xSemaphoreGive(art_mutex);
+        }
+    }
+    had_track = has_track;
+
+    // Request album art if URL provided and (URL changed or track changed)
+    // Compare against last_requested_art_url (HTTPS, same type as d->albumArtURL) NOT pending_art_url.
+    // The art task converts pending_art_url to HTTP internally — comparing HTTPS vs HTTP always
+    // returns "changed", calling requestAlbumArt() every frame and keeping art_download_in_progress=true
+    // permanently (blocking the clock screensaver and spamming last_track_change_ms).
+    static String last_requested_art_url = "";
+    bool hasArt = (d->albumArtURL.length() > 0) || (d->isRadioStation && d->radioStationArtURL.length() > 0);
+    bool artChanged = uri_changed || (d->albumArtURL.length() > 0 && d->albumArtURL != last_requested_art_url);
+
+    // For radio stations: also check if radioStationArtURL changed (even if albumArtURL is empty)
+    if (d->isRadioStation && d->radioStationArtURL.length() > 0 && d->radioStationArtURL != last_requested_art_url) {
+        artChanged = true;
+    }
+
+    if (!hasArt && uri_changed) {
+        // Track changed but has NO art URL — clear old art and show placeholder immediately
+        // (Without this, the old track's art stays on screen forever)
+        Serial.println("[ART] No art URL for this track - showing placeholder");
+        if (img_album) lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+        if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+        if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
+            last_art_url = "";
+            pending_art_url = "";  // Prevent art task re-fetching the old URL
+            art_ready = false;     // Discard any just-completed download (prevents art flash)
+            xSemaphoreGive(art_mutex);
+        }
+    } else if (hasArt && artChanged) {
         String artURL = "";
         bool usingStationLogo = false;  // Track if we're using station logo (PNG allowed)
 
@@ -1203,6 +1688,8 @@ void updateUI() {
         if (d->isRadioStation) {
             bool hasSongArt = (artURL.length() > 0);
             bool hasStationLogo = (d->radioStationArtURL.length() > 0);
+            Serial.printf("[ART] Radio check - hasSongArt=%d, hasStationLogo=%d, artURL='%s', stationURL='%s'\n",
+                         hasSongArt, hasStationLogo, artURL.c_str(), d->radioStationArtURL.c_str());
 
             // If no song art but have station logo, use the logo
             if (!hasSongArt && hasStationLogo) {
@@ -1215,7 +1702,8 @@ void updateUI() {
                 // Check if it's pointing to the radio URI (generic icon)
                 if (artURL.indexOf("x-sonosapi-stream") > 0 ||
                     artURL.indexOf("x-rincon-mp3radio") > 0 ||
-                    artURL.indexOf("x-sonosapi-radio") > 0) {
+                    artURL.indexOf("x-sonosapi-radio") > 0 ||
+                    artURL.indexOf("x-sonosapi-hls") > 0) {
                     artURL = d->radioStationArtURL;
                     usingStationLogo = true;
                     Serial.println("[ART] Radio: Using station logo (replacing generic icon)");
@@ -1241,30 +1729,161 @@ void updateUI() {
             }
 
             requestAlbumArt(artURL);
-            last_art_url = artURL;  // Track the actual URL we requested
+            last_requested_art_url = artURL;  // track HTTPS URL; prevents HTTPS!=HTTP false-positive on next frame
         } else {
-            // No art available - clear display and tracking
-            if (last_art_url.length() > 0) {
-                Serial.println("[ART] No art URL - clearing display");
-                if (img_album) lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
-                if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
-                last_art_url = "";
+            // No art available - clear display
+            Serial.println("[ART] No art URL - clearing display");
+            if (img_album) lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+            if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+            // CRITICAL: Must hold art_mutex when writing last_art_url (not atomic)
+            if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(50))) {
+                last_art_url = "";  // Clear to allow next art request
+                xSemaphoreGive(art_mutex);
             }
         }
     }
-    if (xSemaphoreTake(art_mutex, 0)) {
-        if (art_ready) {
-            lv_img_set_src(img_album, &art_dsc);
-            lv_obj_remove_flag(img_album, LV_OBJ_FLAG_HIDDEN);  // Show album art
-            lv_obj_add_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);  // Hide placeholder
-            art_ready = false;
-        }
-        if (color_ready && panel_art && panel_right) {
-            setBackgroundColor(dominant_color);
-            color_ready = false;
-        }
-        xSemaphoreGive(art_mutex);
+}
+
+// ============================================================================
+// UI Update Function
+// ============================================================================
+void updateUI() {
+    SonosDevice* d = sonos.getCurrentDevice();
+    if (!d) return;
+
+    if (!updateConnectionState(d)) return;
+
+    // Device is connected - update UI normally
+
+    // Title
+    if (d->currentTrack != ui_title) {
+        lv_label_set_text(lbl_title, d->currentTrack.length() > 0 ? d->currentTrack.c_str() : "Not Playing");
+        ui_title = d->currentTrack;
     }
+
+    // Artist
+    if (d->currentArtist != ui_artist) {
+        lv_label_set_text(lbl_artist, d->currentArtist.c_str());
+        ui_artist = d->currentArtist;
+    }
+
+    // Fetch synced lyrics when track changes
+    static String lyrics_last_track = "";
+    String lyrics_key = d->currentArtist + "|" + d->currentTrack;
+    if (lyrics_key != lyrics_last_track && d->currentTrack.length() > 0) {
+        last_track_change_ms = millis();
+        if (lyrics_enabled && !d->isRadioStation) {
+            // requestLyrics() returns false if the previous task is still running
+            // (e.g. blocked inside http.GET() with up to 10s timeout). In that case
+            // we do NOT update lyrics_last_track — the condition fires again next
+            // frame until the old task exits and requestLyrics() can safely spawn.
+            // This prevents TCB/stack reuse while the old task is alive, which would
+            // permanently leak ~32KB of TLS DMA buffers per rapid track change.
+            if (requestLyrics(d->currentArtist, d->currentTrack, d->durationSeconds)) {
+                lyrics_last_track = lyrics_key;
+            }
+        } else {
+            lyrics_last_track = lyrics_key;
+            clearLyrics();
+        }
+    }
+
+    // Album name (below album art)
+    static String ui_album_name = "";
+    if (d->currentAlbum != ui_album_name) {
+        lv_label_set_text(lbl_album, d->currentAlbum.c_str());
+        ui_album_name = d->currentAlbum;
+    }
+
+    // Device name in header
+    static String ui_device_name = "";
+    if (d->roomName != ui_device_name) {
+        String np = "Now Playing - " + d->roomName;
+        lv_label_set_text(lbl_device_name, np.c_str());
+        ui_device_name = d->roomName;
+    }
+
+    // Time display
+    String t = d->relTime;
+    if (t.startsWith("0:")) t = t.substring(2);
+    lv_label_set_text(lbl_time, t.c_str());
+
+    // Total duration
+    if (d->durationSeconds > 0) {
+        int dm = d->durationSeconds / 60;
+        int ds = d->durationSeconds % 60;
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%d:%02d", dm, ds);
+        lv_label_set_text(lbl_time_remaining, buf);
+    }
+
+    // Progress slider
+    if (!dragging_prog && d->durationSeconds > 0)
+        lv_slider_set_value(slider_progress, (d->relTimeSeconds * 100) / d->durationSeconds, LV_ANIM_OFF);
+
+    // Update synced lyrics display and status indicator
+    updateLyricsDisplay(d->relTimeSeconds);
+    updateLyricsStatus();  // Update status indicator from main thread
+
+    // Play/Pause button
+    if (d->isPlaying != ui_playing) {
+        lv_obj_t* lbl = lv_obj_get_child(btn_play, 0);
+        lv_label_set_text(lbl, d->isPlaying ? LV_SYMBOL_PAUSE : LV_SYMBOL_PLAY);
+
+        // Center the icon properly - play triangle needs offset to look centered
+        if (d->isPlaying) {
+            lv_obj_center(lbl);  // Pause is centered
+        } else {
+            lv_obj_align(lbl, LV_ALIGN_CENTER, 2, 0);  // Play needs 2px right offset
+        }
+
+        ui_playing = d->isPlaying;
+    }
+
+    // Volume slider update
+    if (!dragging_vol && d->volume != ui_vol && slider_vol) {
+        lv_slider_set_value(slider_vol, d->volume, LV_ANIM_OFF);
+        ui_vol = d->volume;
+    }
+
+    // Mute button
+    if (d->isMuted != ui_muted && btn_mute) {
+        lv_obj_t* lbl = lv_obj_get_child(btn_mute, 0);
+        lv_label_set_text(lbl, d->isMuted ? LV_SYMBOL_MUTE : LV_SYMBOL_VOLUME_MAX);
+        ui_muted = d->isMuted;
+    }
+
+    // Shuffle
+    if (d->shuffleMode != ui_shuffle) {
+        lv_obj_t* lbl = lv_obj_get_child(btn_shuffle, 0);
+        lv_obj_set_style_text_color(lbl, d->shuffleMode ? COL_ACCENT : COL_TEXT2, 0);
+        ui_shuffle = d->shuffleMode;
+    }
+
+    // Next track info - find next track in queue
+    // SKIP FOR RADIO MODE - radio stations don't have a queue/next track
+    updateNextTrackUI(d);
+
+    // Repeat
+    if (d->repeatMode != ui_repeat) {
+        lv_obj_t* lbl = lv_obj_get_child(btn_repeat, 0);
+        if (d->repeatMode == "ONE") {
+            lv_label_set_text(lbl, "1");
+            lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
+        } else if (d->repeatMode == "ALL") {
+            lv_label_set_text(lbl, LV_SYMBOL_LOOP);
+            lv_obj_set_style_text_color(lbl, COL_ACCENT, 0);
+        } else {
+            lv_label_set_text(lbl, LV_SYMBOL_LOOP);
+            lv_obj_set_style_text_color(lbl, COL_TEXT2, 0);
+        }
+        ui_repeat = d->repeatMode;
+    }
+
+    // Album art - only request if URL changed to prevent download loops
+    // NOTE: last_art_url is GLOBAL (extern in ui_common.h), don't shadow it!
+    updateAlbumArtRequest(d);
+    displayCompletedArt();
 
     // Radio mode UI adaptation - must be at the END of updateUI()
     updateRadioModeUI();
@@ -1274,6 +1893,13 @@ void processUpdates() {
     static uint32_t lastUpdate = 0;
     UIUpdate_t upd;
     bool need = false;
-    while (xQueueReceive(sonos.getUIUpdateQueue(), &upd, 0)) need = true;
+    bool queue_updated = false;
+    while (xQueueReceive(sonos.getUIUpdateQueue(), &upd, 0)) {
+        need = true;
+        if (upd.type == UPDATE_QUEUE) queue_updated = true;
+    }
     if (need && (millis() - lastUpdate > 200)) { updateUI(); lastUpdate = millis(); }
+    else displayCompletedArt();  // Run even without Sonos events (e.g. art ready while polling suppressed)
+    // Auto-refresh queue list if the queue screen is visible when new data arrives
+    if (queue_updated && lv_screen_active() == scr_queue) refreshQueueList();
 }

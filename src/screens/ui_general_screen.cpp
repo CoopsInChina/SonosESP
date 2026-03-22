@@ -14,8 +14,8 @@ void createGeneralScreen() {
     scr_general = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_general, lv_color_hex(0x121212), 0);
 
-    // Create sidebar and get content area (General is index 6)
-    lv_obj_t* content = createSettingsSidebar(scr_general, 6);
+    // Create sidebar and get content area (General is index 0)
+    lv_obj_t* content = createSettingsSidebar(scr_general, 0);
     lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
     lv_obj_set_scrollbar_mode(content, LV_SCROLLBAR_MODE_AUTO);
@@ -46,7 +46,7 @@ void createGeneralScreen() {
     lv_obj_set_style_radius(sw_lyrics, 13, LV_PART_MAIN);
     lv_obj_set_style_bg_color(sw_lyrics, lv_color_hex(0x333333), LV_PART_MAIN);
     // Indicator (colored fill when checked) - no padding so it fills the track
-    lv_obj_set_style_bg_color(sw_lyrics, COL_ACCENT, (lv_style_selector_t)(LV_PART_INDICATOR | LV_STATE_CHECKED));
+    lv_obj_set_style_bg_color(sw_lyrics, COL_ACCENT, (lv_style_selector_t)((uint32_t)LV_PART_INDICATOR | (uint32_t)LV_STATE_CHECKED));
     lv_obj_set_style_radius(sw_lyrics, 13, LV_PART_INDICATOR);
     lv_obj_set_style_pad_all(sw_lyrics, 0, LV_PART_INDICATOR);
     // Knob (circle)
