@@ -258,7 +258,10 @@ void setup() {
         
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("\n[WIFI] Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
-            
+            //Initialise NTP
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
+            tzset();
         } else {
             Serial.println("\n[WIFI] Attempt failed. Retrying...");
             retryCount++;

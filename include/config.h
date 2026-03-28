@@ -178,6 +178,7 @@
 #define NVS_KEY_LYRICS          "lyrics"
 #define NVS_KEY_OTA_PENDING     "ota_pending"    // Auto-reboot OTA flag
 #define NVS_KEY_OTA_URL         "ota_url"        // Saved firmware URL for auto-reboot OTA
+#define NVS_KEY_CLOCK_PHOTO_SOURCE "clockPhotoSrc"
 
 // =============================================================================
 // UI COLORS (hex values)

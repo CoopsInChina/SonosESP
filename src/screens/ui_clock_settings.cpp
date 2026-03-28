@@ -147,7 +147,7 @@ void createClockSettingsScreen() {
     // ── Photo background ─────────────────────────────────────────────────────
     addSectionLabel(content, "Photo background:");
     addDescLabel(content, "Random photos from Flickr via loremflickr.com (requires WiFi)");
-
+1
     lv_obj_t* sw_picsum = addSwitch(content, clock_picsum_enabled);
     lv_obj_add_event_cb(sw_picsum, [](lv_event_t* e) {
         lv_obj_t* sw = (lv_obj_t*)lv_event_get_target(e);

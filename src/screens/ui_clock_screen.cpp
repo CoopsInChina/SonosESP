@@ -205,7 +205,7 @@ static void clock_tick_cb(lv_timer_t* /*timer*/) {
     }
 
     struct tm timeinfo;
-    if (!getLocalTime(&timeinfo, 100)) {
+    if (!getLocalTime(&timeinfo, 5000)) {
         // NTP not synced yet — show dashes
         lv_label_set_text(clock_time_lbl, "--:--");
         lv_label_set_text(clock_date_lbl, "Waiting for NTP...");
