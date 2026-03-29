@@ -15,7 +15,7 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
 void createWiFiScreen() {
     scr_wifi = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_wifi, lv_color_hex(0x121212), 0);
-    lv_obj_set_size(scr_wifi, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(scr_wifi, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Create sidebar and get content area (WiFi is index 5)
     lv_obj_t* content = createSettingsSidebar(scr_wifi, 5);
@@ -23,7 +23,7 @@ void createWiFiScreen() {
     
     int content_width = SCALE(620);
     int content_pad = SCALE(24);
-    lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(content, content_width, DISPLAY_HEIGHT);
 
     // Title + Scan button row
     lv_obj_t* title_row = lv_obj_create(content);

@@ -13,6 +13,7 @@
 #include "touch_driver.h"
 #include "sonos_controller.h"
 #include "esp_heap_caps.h"
+#include "config.h"
 
 // Default WiFi credentials (empty = force WiFi setup via UI)
 #define DEFAULT_WIFI_SSID ""
@@ -20,7 +21,7 @@
 
 // Firmware version
 #define FIRMWARE_VERSION "1.4.0"
-#define GITHUB_REPO "OpenSurface/SonosESP"
+#define GITHUB_REPO "CoopsInChina/SonosESP"
 #define GITHUB_API_URL "https://api.github.com/repos/" GITHUB_REPO "/releases/latest"
 
 // Album art configuration
@@ -31,17 +32,6 @@
 // Network configuration
 #define NETWORK_MUTEX_TIMEOUT_MS 5000    // Timeout for acquiring network mutex (SOAP)
 #define NETWORK_MUTEX_TIMEOUT_ART_MS 10000 // Longer timeout for album art downloads
-
-
-// Scaling Inputs 
-#define SCREEN_WIDTH_ORIGINAL 800
-#define SCREEN_HEIGHT_ORIGINAL 480
-#define SCREEN_WIDTH_TARGET 1024
-#define SCREEN_HEIGHT_TARGET 600
-
-// Scaling factors
-#define SCALE_X (SCREEN_WIDTH_TARGET / (float)SCREEN_WIDTH_ORIGINAL)    // 1.28
-#define SCALE_Y (SCREEN_HEIGHT_TARGET / (float)SCREEN_HEIGHT_ORIGINAL)  // 1.25
 
 // Helper macro to scale values
 #define SCALE(value) ((int)((value) * SCALE_X))  // Use X scaling for most elements

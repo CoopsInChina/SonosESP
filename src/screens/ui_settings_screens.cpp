@@ -100,7 +100,7 @@ void refreshQueueList() {
 void createQueueScreen() {
     scr_queue = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_queue, lv_color_hex(0x1A1A1A), 0);
-    lv_obj_set_size(scr_queue, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(scr_queue, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Professional header
     lv_obj_t* header = lv_obj_create(scr_queue);
@@ -214,14 +214,14 @@ void createSettingsScreen() {
 void createSourcesScreen() {
     scr_sources = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_sources, lv_color_hex(0x121212), 0);
-    lv_obj_set_size(scr_sources, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(scr_sources, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Create sidebar and get content area (Sources is index 3)
     lv_obj_t* content = createSettingsSidebar(scr_sources, 3);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(620);
-    lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(content, content_width, DISPLAY_HEIGHT);
 
     // Title
     lv_obj_t* lbl_title = lv_label_create(content);
@@ -329,14 +329,14 @@ void createBrowseScreen() {
 
     scr_browse = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_browse, lv_color_hex(0x121212), 0);
-    lv_obj_set_size(scr_browse, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(scr_browse, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Create sidebar and get content area (Sources is index 3)
     lv_obj_t* content = createSettingsSidebar(scr_browse, 3);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(620);
-    lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(content, content_width, DISPLAY_HEIGHT);
 
     // Title
     lv_obj_t* lbl_title = lv_label_create(content);

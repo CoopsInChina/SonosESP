@@ -15,14 +15,14 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx);
 void createOTAScreen() {
     scr_ota = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_ota, lv_color_hex(0x121212), 0);
-    lv_obj_set_size(scr_ota, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(scr_ota, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Create sidebar and get content area (Update is index 7 — Clock added at 6)
     lv_obj_t* content = createSettingsSidebar(scr_ota, 7);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(620);
-    lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(content, content_width, DISPLAY_HEIGHT);
 
     // Title
     lv_obj_t* lbl_title = lv_label_create(content);

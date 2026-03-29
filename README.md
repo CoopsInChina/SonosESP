@@ -10,19 +10,15 @@
 [![GitHub Release](https://img.shields.io/github/v/release/OpenSurface/SonosESP?style=flat-square&logo=github&label=Latest%20Release)](https://github.com/OpenSurface/SonosESP/releases/latest)
 [![GitHub Stars](https://img.shields.io/github/stars/OpenSurface/SonosESP?style=flat-square&logo=github&label=Stars)](https://github.com/OpenSurface/SonosESP/stargazers)
 
-[Features](#features) • [Hardware](#hardware) • [Installation](#installation) •  [Contributing](#contributing)
+[Features](#features) • [Hardware](#hardware) • [Installation](#installation) • [Contributing](#contributing)
 
 ## ☕ Support
-
-If you find this project helpful, consider supporting me on Ko-fi!
-
-[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?style=for-the-badge&logo=ko-fi)](https://ko-fi.com/pizzapasta)
 
 </div>
 
 ---
 
-##  Features
+## Features
 
 - **Full Playback Control** - Play, pause, skip, volume, shuffle, and repeat
 - **Queue Management** - Browse and manage your playback queue
@@ -32,15 +28,18 @@ If you find this project helpful, consider supporting me on Ko-fi!
 - **Music Browsing** - Navigate your Sonos library, playlists, and favorites
 - **Multi-Room** - Switch between Sonos zones with live playing indicators showing which rooms are active
 - **OTA Updates** - Firmware updates from GitHub with Stable and Nightly release channel selection, auto-retry on low memory
+- **Multi-Screen Support** - Supports both 4" 800×480 and 7" 1024×600 displays
+- **Weather Widget** - Live weather overlay on clock screensaver with temperature, humidity, wind speed, and conditions
+- **Blurred Album Art Background** - Full-screen blurred background generated from album art for immersive experience
 
 ![SonosESP Demo](assets/image1.gif)
 
-##  Hardware
+## Hardware
 
-This project requires the **GUITION JC4880P433C** development board:
+SonosESP now supports two compatible development boards:
 
+### 4" GUITION JC4880P433C
 ![GUITION JC4880P433C](assets/image.png)
-
 
 | Component | Specification |
 |-----------|--------------|
@@ -52,12 +51,25 @@ This project requires the **GUITION JC4880P433C** development board:
 | **PSRAM** | OPI PSRAM |
 | **Interface** | USB-C |
 
-> **Note:** This firmware is specifically designed for the GUITION JC4880P433C board. It will not work on other ESP32 boards without significant modifications.
+### 7" GUITION JC1060P470C
+![GUITION JC1060P470C](assets/image2.webp)
 
-## Installation
+| Component | Specification |
+|-----------|--------------|
+| **MCU** | ESP32-P4 (400 MHz dual-core) |
+| **WiFi Module** | ESP32-C6 (via ESP-Hosted) |
+| **Display** | 1024×600 RGB LCD with JD9165 driver |
+| **Touch** | GT911 capacitive touch (I2C) |
+| **Flash** | 16 MB |
+| **PSRAM** | OPI PSRAM |
+| **Interface** | USB-C |
+
+> **Note:** The firmware includes conditional compilation for both screen sizes. Select the correct build environment in PlatformIO (`esp32_4inch` or `esp32_7inch`) for your hardware.
+
+
+### Installation
 
 ### Web Installer (Recommended)
-
 1. Visit the [Web Installer](https://opensurface.github.io/SonosESP/)
 2. Connect your ESP32-P4 via USB-C
 3. Click "Install Firmware" and select the COM port
@@ -66,9 +78,29 @@ This project requires the **GUITION JC4880P433C** development board:
 
 > Requires Chrome, Edge, or Opera browser with Web Serial support
 
+### Manual Build with PlatformIO
+For developers or custom configurations:
+bash
+
+Clone the repository
+
+git clone https://github.com/CoopsInChina/SonosESP.git
+
+cd SonosESP
+
+Build for 4" screen
+
+pio run -e esp32_4inch
+
+Build for 7" screen
+
+pio run -e esp32_7inch
+
+Upload to device
+
+pio run -e esp32_4inch -t upload
 
 ## OTA Updates (After Initial Install)
-
 The device supports automatic Over-The-Air (OTA) firmware updates from GitHub releases:
 
 1. Connect to WiFi via Settings
@@ -77,16 +109,15 @@ The device supports automatic Over-The-Air (OTA) firmware updates from GitHub re
 4. If an update is available, tap "Install Update"
 5. Device will automatically download and install from GitHub releases
 
-##  First-Time Setup
-
+## First-Time Setup
 1. **Power on** - Device will show WiFi setup if not configured
 2. **WiFi Setup** - Tap "Scan" to find networks, select yours, enter password
 3. **Sonos Discovery** - Navigate to Settings → Speakers and tap "Scan"
 4. **Start Playing** - Select a device and start controlling your music!
 
+## Architecture
 
 ### Key Components
-
 - **FreeRTOS Tasks** - Separate tasks for UI, album art, lyrics, and Sonos polling
 - **Thread Safety** - Mutex protection for shared resources
 - **Memory Management** - PSRAM for album art and lyrics, heap monitoring
@@ -94,11 +125,11 @@ The device supports automatic Over-The-Air (OTA) firmware updates from GitHub re
 - **UI Framework** - LVGL 9.4.0 with custom theme
 - **Image Processing** - ESP32-P4 hardware JPEG decoder + software PNG decoder, custom bilinear scaling with fixed-point math
 - **Lyrics System** - Time-synced LRC parsing with HTTPS fetching, auto-hide, and retry logic
-- **Clock Screensaver** - Inactivity-triggered fullscreen clock with random Unsplash backgrounds
+- **Clock Screensaver** - Inactivity-triggered fullscreen clock with random Unsplash backgrounds and weather widget
 - **OTA Updates** - Stable and Nightly channels, 3-attempt retry loop with live countdown UI
+- **Multi-Screen Support** - Conditional compilation for different display sizes and touch calibrations
 
 ## Configuration
-
 WiFi credentials are stored persistently in NVS (Non-Volatile Storage). Once configured via the UI, they survive reboots and power cycles.
 
 ### Firmware Updates
@@ -107,13 +138,17 @@ WiFi credentials are stored persistently in NVS (Non-Volatile Storage). Once con
 - Progress indication during download
 - Safe rollback on failure
 
+## Known Issues
+See the [GitHub Issues](https://github.com/OpenSurface/SonosESP/issues) for current open issues, including:
+
+- [#17] Support for 1024×600 displays (JC1060P470C board) - **Implemented**
+- [#35] Cannot initiate play from Sonos Favorites or Sonos Playlists
+- [#3] Feature request - hardware volume control
 
 ## Contributing
-
 Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## Contributors
-
 Thanks to these wonderful people who have contributed to this project:
 
 <a href="https://github.com/OpenSurface/SonosESP/graphs/contributors">
@@ -123,25 +158,24 @@ Thanks to these wonderful people who have contributed to this project:
 Special thanks to:
 - **[@BaileyLawson](https://github.com/BaileyLawson)** - First external contributor!
 - **[@johnhenrick3-cpu](https://github.com/johnhenrick3-cpu)** - Outstanding community tester!
-
+- **[@pizza-init](https://github.com/pizza-init)** - Lead maintainer and feature developer
+- **[@CoopsInChina](https://github.com/CoopsInChina)** - Community contributor
 
 ## License
-
 This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
 
 ## Acknowledgments
-
 - Built with [LVGL](https://lvgl.io/) - Amazing embedded graphics library
 - [PlatformIO](https://platformio.org/) - Best embedded development platform
 - [LRCLIB](https://lrclib.net/) - Free synced lyrics API
 - [Unsplash](https://unsplash.com/) - Beautiful random background photos for the clock screensaver
 - Sonos UPnP/SOAP API documentation and community
-
+- Open-Meteo for free weather API
 
 ---
 
 <div align="center">
 
-**Built with ❤️ and vibes** • [Report Bug](https://github.com/OpenSurface/SonosESP/issues) • [Request Feature](https://github.com/OpenSurface/SonosESP/issues)
+**Massive Credit to the original project** • [Opensurface](https://github.com/OpenSurface/SonosESP/) 
 
 </div>

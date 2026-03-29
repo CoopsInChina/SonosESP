@@ -254,14 +254,14 @@ void refreshDeviceList() {
 void createDevicesScreen() {
     scr_devices = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_devices, lv_color_hex(0x121212), 0);
-    lv_obj_set_size(scr_devices, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(scr_devices, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Create sidebar and get content area (Speakers is index 1)
     lv_obj_t* content = createSettingsSidebar(scr_devices, 1);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(620);
-    lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(content, content_width, DISPLAY_HEIGHT);
 
     // Title + Scan button row
     lv_obj_t* title_row = lv_obj_create(content);

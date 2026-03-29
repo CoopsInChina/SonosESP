@@ -303,14 +303,14 @@ void refreshGroupsList() {
 void createGroupsScreen() {
     scr_groups = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_groups, lv_color_hex(0x121212), 0);
-    lv_obj_set_size(scr_groups, SCREEN_WIDTH_TARGET, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(scr_groups, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
     // Create sidebar and get content area (Groups is index 2)
     lv_obj_t* content = createSettingsSidebar(scr_groups, 2);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(620);
-    lv_obj_set_size(content, content_width, SCREEN_HEIGHT_TARGET);
+    lv_obj_set_size(content, content_width, DISPLAY_HEIGHT);
 
     // Title + Refresh button row
     lv_obj_t* title_row = lv_obj_create(content);

@@ -14,13 +14,10 @@
 
 
 #
-#define DISPLAY_MODEL "JC1060P470C"
 #define DISPLAY_BUF_SIZE (DISPLAY_WIDTH * DISPLAY_HEIGHT) 
 
 
-// ST7701 LCD Controller pins
-//#define LCD_RST     5  // Reset GPIO for ST7701
-#define LCD_RST     23  // Reset GPIO for jd9165
+
 
 
 // Note: MIPI DSI interface uses dedicated hardware pins on ESP32-P4

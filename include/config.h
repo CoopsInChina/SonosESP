@@ -57,11 +57,70 @@
 #define MIN_BRIGHTNESS          5       // Minimum brightness allowed
 #define MAX_BRIGHTNESS          100     // Maximum brightness
 
+
+// Screen size detection
+#ifndef SCREEN_SIZE
+#define SCREEN_SIZE 4  // Default to 4"
+#endif
+
+#if SCREEN_SIZE == 7
+    // 7" Screen Settings
 // Display dimensions (LVGL renders in landscape, driver rotates to portrait panel)
-#define DISPLAY_WIDTH           1024     // LVGL width (landscape)
-#define DISPLAY_HEIGHT          600     // LVGL height (landscape)
-#define PANEL_WIDTH             480     // Physical panel width (portrait)
-#define PANEL_HEIGHT            800     // Physical panel height (portrait)
+    #define DISPLAY_WIDTH           1024     // LVGL width (landscape)
+    #define DISPLAY_HEIGHT          600     // LVGL height (landscape)
+    #define PANEL_WIDTH             480     // Physical panel width (portrait)
+    #define PANEL_HEIGHT            800     // Physical panel height (portrait)
+    #define SCALE_X                 1.28       // Scale for 7" Screen
+
+    
+    // Touch calibration for 7"
+    #define TOUCH_PANEL_WIDTH  1024
+    #define TOUCH_PANEL_HEIGHT 600
+    
+    // Driver selection
+    #define LCD_RST     23  // Reset GPIO for jd9165
+    #define DISPLAY_MODEL "JD9165 - 7 Inch 600 x 1024"
+    
+    // GT911 Touch Controller pins for ESP32-P4 JD9165
+    #define TOUCH_GT911_SDA  7
+    #define TOUCH_GT911_SCL  8
+    #define TOUCH_GT911_INT  11   
+    #define TOUCH_GT911_RST  22   
+
+
+
+#elif SCREEN_SIZE == 4
+    // 4" Screen Settings
+    #define DISPLAY_WIDTH           800     // LVGL width (landscape)
+    #define DISPLAY_HEIGHT          480     // LVGL height (landscape)
+    #define PANEL_WIDTH             480     // Physical panel width (portrait)
+    #define PANEL_HEIGHT            800     // Physical panel height (portrait)
+    #define SCALE_X                 1       // Scale for 4" Screen
+    
+    // Touch calibration for 4"
+    #define TOUCH_PANEL_WIDTH  800
+    #define TOUCH_PANEL_HEIGHT 480
+    
+    // Driver selection
+    #define LCD_RST     5  // Reset GPIO for ST7701
+    #define DISPLAY_MODEL "ST7701 - 4 Inch 480 x 800"
+
+    // GT911 Touch Controller pins for ESP32-P4 ST7701
+    #define TOUCH_GT911_SDA  7
+    #define TOUCH_GT911_SCL  8
+    #define TOUCH_GT911_INT  -1   // Not used
+    #define TOUCH_GT911_RST  -1   // Not used
+
+
+    
+#else
+    #error "Unsupported SCREEN_SIZE. Use 4 or 7."
+#endif
+
+
+
+
+
 
 // =============================================================================
 // ALBUM ART
