@@ -1,75 +1,85 @@
 #include "touch_driver.h"
+#include "ui_common.h"
 #include <Wire.h>
 #include <TAMC_GT911.h>
+#include "config.h"
 
-// Touch sensor is in portrait orientation (480×800)
-#define TOUCH_MAP_X1 480
-#define TOUCH_MAP_X2 0
-#define TOUCH_MAP_Y1 800
-#define TOUCH_MAP_Y2 0
+// Touch controller instance
+TAMC_GT911 ts = TAMC_GT911(TOUCH_GT911_SDA, TOUCH_GT911_SCL, 
+                           TOUCH_GT911_INT, TOUCH_GT911_RST,
+                           TOUCH_PANEL_WIDTH, TOUCH_PANEL_HEIGHT);
 
-TAMC_GT911 ts = TAMC_GT911(TOUCH_GT911_SDA, TOUCH_GT911_SCL, TOUCH_GT911_INT, TOUCH_GT911_RST,
-                           max(TOUCH_MAP_X1, TOUCH_MAP_X2),
-                           max(TOUCH_MAP_Y1, TOUCH_MAP_Y2));
-
-static lv_indev_t *indev = NULL;
+static lv_indev_t *indev = nullptr;
 
 bool touch_init(void) {
-    Serial.println("[Touch] Initializing GT911...");
-
+    Serial.printf("[Touch] Initializing for %d\" screen...\n", SCREEN_SIZE);
+    
     Wire.begin(TOUCH_GT911_SDA, TOUCH_GT911_SCL);
     ts.begin();
-    ts.setRotation(ROTATION_NORMAL);  // Normal orientation - LVGL handles rotation
-
-    Serial.println("[Touch] GT911 initialized!");
-
-    // LVGL v9 input device initialization
+    
+    // Set rotation based on screen
+    #if SCREEN_SIZE == 7
+        // 7" screen rotation
+        ts.setRotation(ROTATION_INVERTED);
+        Serial.println("[Touch] Using 7\" rotation (INVERTED)");
+    #elif SCREEN_SIZE == 4
+        // 4" screen rotation  
+        ts.setRotation(ROTATION_INVERTED);
+        Serial.println("[Touch] Using 4\" rotation (INVERTED)");
+    #endif
+    
+    // LVGL input device
     indev = lv_indev_create();
     if (!indev) {
-        Serial.println("[Touch] ERROR: Failed to create input device");
+        Serial.println("[Touch] ERROR: Failed to create LVGL input device");
         return false;
     }
-
+    
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(indev, touch_read);
-
+    
+    Serial.println("[Touch] Touch initialized successfully!");
     return true;
 }
 
-// External callback for screen wake
-extern void resetScreenTimeout();
-
 void touch_read(lv_indev_t *indev_drv, lv_indev_data_t *data) {
     static bool was_touched = false;
+    
     ts.read();
-
-    if (ts.isTouched) {
-        // Touch sensor reports physical coordinates in portrait orientation
-        // We need to apply 90° rotation to match display rotation
-        // Physical panel: 480x800 portrait -> LVGL sees: 800x480 landscape
-        // Display rotation: (x, y) portrait -> (y, height - 1 - x) landscape
-
-        // Get raw touch coordinates (physical panel portrait coordinates)
-        int16_t touch_x = map(ts.points[0].x, TOUCH_MAP_X1, TOUCH_MAP_X2, 0, 479);
-        int16_t touch_y = map(ts.points[0].y, TOUCH_MAP_Y1, TOUCH_MAP_Y2, 0, 799);
-
-        // Clamp raw coordinates
-        if (touch_x < 0) touch_x = 0;
-        if (touch_x > 479) touch_x = 479;
-        if (touch_y < 0) touch_y = 0;
-        if (touch_y > 799) touch_y = 799;
-
-        // Apply 90° rotation to match display: portrait (touch_x, touch_y) -> landscape (x, y)
-        // Using same rotation as display: (x, y) -> (y, height - 1 - x)
-        // So touch at portrait (touch_x, touch_y) appears at landscape (touch_y, 479 - touch_x)
-        data->point.x = touch_y;
-        data->point.y = 479 - touch_x;
+    
+    if (ts.isTouched && ts.touches > 0) {
+        int16_t raw_x = ts.points[0].x;
+        int16_t raw_y = ts.points[0].y;
+        
+        #if SCREEN_SIZE == 7
+            // ===== 7" SCREEN TOUCH PROCESSING =====
+            // 7" doesn't need rotation (1024x600 native)
+            data->point.x = map(raw_x, 0, TOUCH_PANEL_WIDTH - 1, 0, DISPLAY_WIDTH - 1);
+            data->point.y = map(raw_y, 0, TOUCH_PANEL_HEIGHT - 1, 0, DISPLAY_HEIGHT - 1);
+            
+        #elif SCREEN_SIZE == 4
+            // ===== 4" SCREEN TOUCH PROCESSING =====
+            // 4" needs 90° rotation (480x800 → 800x480)
+            // Apply 90° clockwise rotation
+            int16_t landscape_x = raw_y;           // 0-799
+            int16_t landscape_y = 479 - raw_x;     // 479-0
+            
+            // Clamp
+            landscape_x = constrain(landscape_x, 0, 799);
+            landscape_y = constrain(landscape_y, 0, 479);
+            
+            data->point.x = landscape_x;
+            data->point.y = landscape_y;
+        #endif
+        
         data->state = LV_INDEV_STATE_PRESSED;
-
-        // Reset screen timeout on EVERY touch
+        
         if (!was_touched) {
             resetScreenTimeout();
             was_touched = true;
+            
+            Serial.printf("[Touch] %d\": X=%d, Y=%d\n", 
+                         SCREEN_SIZE, data->point.x, data->point.y);
         }
     } else {
         data->state = LV_INDEV_STATE_RELEASED;

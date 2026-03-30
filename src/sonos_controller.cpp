@@ -342,6 +342,9 @@ String SonosController::sendSOAP(const char* service, const char* action, const 
     // Update timestamp before releasing mutex (for SDIO cooldown tracking)
     last_network_end_ms = millis();
 
+    // Update timestamp before releasing mutex (for SDIO cooldown tracking)
+    last_network_end_ms = millis();
+
     // Release network mutex after HTTP operation completes
     xSemaphoreGive(network_mutex);
 

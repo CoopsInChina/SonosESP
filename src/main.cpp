@@ -10,6 +10,7 @@
 #include "clock_screen.h"
 #include <esp_flash.h>
 #include <esp_task_wdt.h>
+
 // Sonos logo
 LV_IMG_DECLARE(Sonos_idnu60bqes_1);
 
@@ -104,7 +105,8 @@ void setup() {
 
     //Initialise WiFi Connection
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(false);
+    WiFi.setSleep(false);  // keep C6 radio always active — no modem sleep on mains-powered device
+    
 
     // === Memory map logged once at boot (post-WiFi, pre-LVGL) ===
     // Used to diagnose DMA depletion: compare to runtime [ART/*/MEM] logs.
@@ -166,6 +168,7 @@ void setup() {
     setBrightness(brightness_level);
     Serial.printf("[DISPLAY] Initial brightness: %d%%\n", brightness_level);
 
+
     // Show boot screen with Sonos logo
     lv_obj_t* boot_scr = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(boot_scr, lv_color_hex(0x000000), 0);
@@ -222,13 +225,13 @@ void setup() {
     createMainScreen();
     updateBootProgress(15);
 
-    createDevicesScreen();
+    createSettingsScreen();
     updateBootProgress(20);
 
     createQueueScreen();
     updateBootProgress(22);
-
-    createSettingsScreen();
+  
+    createDevicesScreen();
     updateBootProgress(25);
 
     createDisplaySettingsScreen();
@@ -258,10 +261,13 @@ void setup() {
         
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("\n[WIFI] Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
-            //Initialise NTP
+            // Start NTP sync (SNTP daemon — no HTTPS, tiny UDP packets)
             configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            // Apply user-selected timezone via POSIX TZ string
             setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
             tzset();
+            Serial.printf("[NTP] Sync started, TZ=%s\n", CLOCK_ZONES[clock_tz_idx].name);
+            
         } else {
             Serial.println("\n[WIFI] Attempt failed. Retrying...");
             retryCount++;
@@ -274,6 +280,7 @@ void setup() {
         Serial.println("[WIFI] All connection attempts failed.");
         }
     
+
     updateBootProgress(60);
 
     createWiFiScreen();
@@ -281,6 +288,60 @@ void setup() {
 
     createOTAScreen();
     updateBootProgress(65);
+
+    // =========================================================================
+    // BOOT OTA FAST PATH — before any background tasks start
+    // =========================================================================
+    // If ev_install_update() saved a URL to NVS and restarted, run the OTA
+    // download RIGHT HERE, before art/Sonos/lyrics tasks are created.
+    //
+    // Why this matters (DMA budget):
+    //   With tasks running: ~105KB DMA free → TLS uses ~71KB → ~34KB post-TLS
+    //     → SDIO RX pool + AES alignment + Update.begin() all fight over 34KB → crash
+    //   At this boot point: ~125KB DMA free → TLS uses ~71KB → ~54KB post-TLS
+    //     → plenty of headroom for SDIO (~16KB) + AES + Update.begin() (~6KB)
+    //
+    // PSRAM is irrelevant: flash writes and TLS buffers use DMA SRAM only.
+    // wifiPrefs is already open (read-write) from setup() — no new handle needed.
+    //
+    // If OTA is pending but the initial WiFi connect timed out, wait up to 30 extra seconds.
+    // Some routers/channels take 30–40s to assign an IP — the 20s initial window can be too short.
+    // We must NOT call triggerPendingOTA() without WiFi — it would silently fail and clear the URL.
+    if (wifiPrefs.getBool(NVS_KEY_OTA_PENDING, false) && WiFi.status() != WL_CONNECTED) {
+        Serial.println("[OTA] Boot OTA pending — waiting for WiFi...");
+        lv_obj_t* lbl_ota_wifi = lv_label_create(boot_scr);
+        lv_label_set_text(lbl_ota_wifi, "Waiting for WiFi (OTA pending)...");
+        lv_obj_set_style_text_color(lbl_ota_wifi, lv_color_hex(0xD4A84B), 0);
+        lv_obj_set_style_text_font(lbl_ota_wifi, &lv_font_montserrat_16, 0);
+        lv_obj_align(lbl_ota_wifi, LV_ALIGN_CENTER, 0, 50);
+        lv_refr_now(NULL);
+        int ota_wifi_tries = 0;
+        while (WiFi.status() != WL_CONNECTED && ota_wifi_tries++ < 60) {  // up to 30s extra
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("[OTA] WiFi connected — IP: %s\n", WiFi.localIP().toString().c_str());
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
+            tzset();
+        } else {
+            Serial.println("[OTA] WiFi still not connected after extra wait — skipping boot OTA");
+            wifiPrefs.putBool(NVS_KEY_OTA_PENDING, false);  // clear flag to avoid infinite reboot loop
+        }
+        lv_obj_del(lbl_ota_wifi);
+    }
+    if (WiFi.status() == WL_CONNECTED && wifiPrefs.getBool(NVS_KEY_OTA_PENDING, false)) {
+        wifiPrefs.putBool(NVS_KEY_OTA_PENDING, false);  // clear immediately — prevent reboot loops
+        Serial.printf("[OTA] Boot OTA: %d bytes DMA free (pre-task)\n",
+                      heap_caps_get_free_size(MALLOC_CAP_DMA));
+        esp_task_wdt_add(NULL);  // subscribe loopTask — performOTAUpdate() calls esp_task_wdt_reset()
+                                 // which spams "task not found" errors if the calling task isn't subscribed
+        triggerPendingOTA();  // loads saved URL → performOTAUpdate() → ESP.restart() on success
+        // If we reach here, all download retries failed (otaRecovery() was called).
+        // Restart to return to normal operation; NVS_KEY_OTA_PENDING is already false.
+        vTaskDelay(pdMS_TO_TICKS(5000));  // let user read the error message
+        ESP.restart();
+    }
 
     // =========================================================================
     // BOOT OTA FAST PATH — before any background tasks start
@@ -350,18 +411,17 @@ void setup() {
     updateBootProgress(68);
 
     createGroupsScreen();
-    updateBootProgress(70);
     createGeneralScreen();
     createClockScreen();
     createClockSettingsScreen();
-    updateBootProgress(80);
+    updateBootProgress(85);
 
     art_mutex = xSemaphoreCreateMutex();
     createArtTask();  // PSRAM stack — frees 20KB internal SRAM for SDIO/WiFi DMA
-    updateBootProgress(85);
+    updateBootProgress(90);
 
     sonos.begin();
-    updateBootProgress(90);
+    updateBootProgress(95);
 
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[SONOS] WiFi not connected at boot - deferring discovery");
@@ -491,3 +551,5 @@ void loop() {
     // loopTask hard-coded 8KB stack cannot be changed via build flags.
     vTaskDelay(pdMS_TO_TICKS(100));
 }
+
+

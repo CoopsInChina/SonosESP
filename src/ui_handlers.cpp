@@ -297,11 +297,15 @@ void ev_wifi_scan(lv_event_t* e) {
         else                 icon_color = lv_color_hex(0xFF6B6B);
 
         lv_obj_t* btn = lv_btn_create(list_wifi);
-        lv_obj_set_size(btn, lv_pct(100), 50);
-        lv_obj_set_user_data(btn, (void*)(intptr_t)ui);
+        int btn_width = SCALE(340);
+        int btn_height = SCALE(50);
+        lv_obj_set_size(btn, btn_width, btn_height);
+        lv_obj_set_user_data(btn, (void*)(intptr_t)i);
         lv_obj_set_style_bg_color(btn, COL_CARD, 0);
-        lv_obj_set_style_bg_color(btn, COL_BTN, LV_STATE_PRESSED);
-        lv_obj_set_style_radius(btn, 10, 0);
+        lv_obj_set_style_bg_color(btn, COL_BTN_PRESSED, LV_STATE_PRESSED);
+        
+        int btn_radius = SCALE(10);
+        lv_obj_set_style_radius(btn, btn_radius, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_add_event_cb(btn, [](lv_event_t* e) {
             int idx = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
@@ -316,16 +320,24 @@ void ev_wifi_scan(lv_event_t* e) {
 
         lv_obj_t* icon = lv_label_create(btn);
         lv_label_set_text(icon, LV_SYMBOL_WIFI);
-        lv_obj_set_style_text_color(icon, icon_color, 0);
-        lv_obj_align(icon, LV_ALIGN_LEFT_MID, 10, 0);
+        // Signal strength by color: green=strong, gold=medium, red=weak
+        if (rssi > -50) lv_obj_set_style_text_color(icon, lv_color_hex(0x4ECB71), 0);
+        else if (rssi > -70) lv_obj_set_style_text_color(icon, COL_ACCENT, 0);
+        else lv_obj_set_style_text_color(icon, lv_color_hex(0xFF6B6B), 0);
+        
+        int icon_x = SCALE(10);
+        lv_obj_align(icon, LV_ALIGN_LEFT_MID, icon_x, 0);
 
-        lv_obj_t* ssid_lbl = lv_label_create(btn);
-        lv_label_set_text(ssid_lbl, wifiNetworks[ui].c_str());
-        lv_obj_set_style_text_color(ssid_lbl, COL_TEXT, 0);
-        lv_obj_set_style_text_font(ssid_lbl, &lv_font_montserrat_14, 0);
-        lv_obj_set_width(ssid_lbl, lv_pct(80));
-        lv_label_set_long_mode(ssid_lbl, LV_LABEL_LONG_DOT);
-        lv_obj_align(ssid_lbl, LV_ALIGN_LEFT_MID, 36, 0);
+        lv_obj_t* ssid = lv_label_create(btn);
+        lv_label_set_text(ssid, wifiNetworks[i].c_str());
+        lv_obj_set_style_text_color(ssid, COL_TEXT, 0);
+        
+        int ssid_width = SCALE(260);
+        lv_obj_set_width(ssid, ssid_width);
+        lv_label_set_long_mode(ssid, LV_LABEL_LONG_DOT);
+        
+        int ssid_x = SCALE(40);
+        lv_obj_align(ssid, LV_ALIGN_LEFT_MID, ssid_x, 0);
     }
     WiFi.scanDelete();
 }

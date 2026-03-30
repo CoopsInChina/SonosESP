@@ -57,11 +57,71 @@
 #define MIN_BRIGHTNESS          5       // Minimum brightness allowed
 #define MAX_BRIGHTNESS          100     // Maximum brightness
 
+
+// Screen size detection
+#ifndef SCREEN_SIZE
+#define SCREEN_SIZE 4  // Default to 4"
+#endif
+
+#if SCREEN_SIZE == 7
+    // 7" Screen Settings
 // Display dimensions (LVGL renders in landscape, driver rotates to portrait panel)
-#define DISPLAY_WIDTH           800     // LVGL width (landscape)
-#define DISPLAY_HEIGHT          480     // LVGL height (landscape)
-#define PANEL_WIDTH             480     // Physical panel width (portrait)
-#define PANEL_HEIGHT            800     // Physical panel height (portrait)
+    #define DISPLAY_WIDTH           1024     // LVGL width (landscape)
+    #define DISPLAY_HEIGHT          600     // LVGL height (landscape)
+    #define PANEL_WIDTH             480     // Physical panel width (portrait)
+    #define PANEL_HEIGHT            800     // Physical panel height (portrait)
+    #define CLOCK_BG_WIDTH          1024
+    #define CLOCK_BG_HEIGHT         600
+    #define CLOCK_BG_MAX_DL_SIZE (1024 * 1024) // May require optimising
+    #define SCALE_X                 1.28       // Scale for 7" Screen
+
+    
+    // Touch calibration for 7"
+    #define TOUCH_PANEL_WIDTH  1024
+    #define TOUCH_PANEL_HEIGHT 600
+    
+    // Driver selection
+    #define LCD_RST     23  // Reset GPIO for jd9165
+    #define DISPLAY_MODEL "JD9165 - 7 Inch 600 x 1024"
+    
+    // GT911 Touch Controller pins for ESP32-P4 JD9165
+    #define TOUCH_GT911_SDA  7
+    #define TOUCH_GT911_SCL  8
+    #define TOUCH_GT911_INT  11   
+    #define TOUCH_GT911_RST  22   
+
+
+
+#elif SCREEN_SIZE == 4
+    // 4" Screen Settings
+    #define DISPLAY_WIDTH           800     // LVGL width (landscape)
+    #define DISPLAY_HEIGHT          480     // LVGL height (landscape)
+    #define PANEL_WIDTH             480     // Physical panel width (portrait)
+    #define PANEL_HEIGHT            800     // Physical panel height (portrait)
+    #define CLOCK_BG_WIDTH          800
+    #define CLOCK_BG_HEIGHT         480
+    #define CLOCK_BG_MAX_DL_SIZE  (512 * 1024)
+    #define SCALE_X                 1       // Scale for 4" Screen
+    
+    // Touch calibration for 4"
+    #define TOUCH_PANEL_WIDTH  800
+    #define TOUCH_PANEL_HEIGHT 480
+    
+    // Driver selection
+    #define LCD_RST     5  // Reset GPIO for ST7701
+    #define DISPLAY_MODEL "ST7701 - 4 Inch 480 x 800"
+
+    // GT911 Touch Controller pins for ESP32-P4 ST7701
+    #define TOUCH_GT911_SDA  7
+    #define TOUCH_GT911_SCL  8
+    #define TOUCH_GT911_INT  -1   // Not used
+    #define TOUCH_GT911_RST  -1   // Not used
+
+
+    
+#else
+    #error "Unsupported SCREEN_SIZE. Use 4 or 7."
+#endif
 
 // =============================================================================
 // ALBUM ART
@@ -210,10 +270,6 @@
 #define CLOCK_DEFAULT_WEATHER_CITY 0  // 0 = Auto-detect from IP
 #define CLOCK_WX_REFRESH_MIN      15  // Re-fetch weather every 15 min (independent of photo rate)
 #define CLOCK_DEFAULT_WEATHER_FAHR 0  // 0 = Celsius, 1 = Fahrenheit
-
-#define CLOCK_BG_MAX_DL_SIZE  (512 * 1024)  // Max background JPEG download buffer (512KB; Flickr baseline ~100-250KB)
-#define CLOCK_BG_WIDTH        800           // Clock background pixel width
-#define CLOCK_BG_HEIGHT       480           // Clock background pixel height
 #define CLOCK_BG_TASK_STACK   8192          // clockBgTask stack size
 #define CLOCK_ENTER_TIMEOUT_MS 3000         // Max wait for art/lyrics tasks to exit
 #define CLOCK_EXIT_COOLDOWN_MS 30000        // Prevent re-trigger for 30s after exit
@@ -293,5 +349,11 @@
 // =============================================================================
 #define WATCHDOG_TIMEOUT_SEC    30          // Watchdog timeout (device reboots if stuck)
 #define HEAP_LOG_INTERVAL_MS    60000       // Log heap status every 60 seconds
+
+// =============================================================================
+// CONTENT PADDING
+// =============================================================================
+#define CONTENT_PAD       24          // Horizontal padding for content areas
+#define CONTENT_PAD_EXTRA 50         // Create space for scrollbar by adding extra padding to the right
 
 #endif // CONFIG_H

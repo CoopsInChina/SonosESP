@@ -13,6 +13,7 @@
 #include "touch_driver.h"
 #include "sonos_controller.h"
 #include "esp_heap_caps.h"
+#include "config.h"
 
 // Default WiFi credentials (empty = force WiFi setup via UI)
 #define DEFAULT_WIFI_SSID ""
@@ -20,17 +21,20 @@
 
 // Firmware version
 #define FIRMWARE_VERSION "1.6.3"
-#define GITHUB_REPO "OpenSurface/SonosESP"
+#define GITHUB_REPO "CoopsInChina/SonosESP"
 #define GITHUB_API_URL "https://api.github.com/repos/" GITHUB_REPO "/releases/latest"
 
 // Album art configuration
-#define ART_SIZE 420
+#define ART_SIZE SCALE(420)        // 420 → ~538 pixels (1.28x scale)
 #define MAX_ART_SIZE 280000          // 280KB max - allows Spotify 640x640 images
 #define ART_CHUNK_SIZE 4096          // 4KB chunks for HTTP downloads
 
 // Network configuration
 #define NETWORK_MUTEX_TIMEOUT_MS 5000    // Timeout for acquiring network mutex (SOAP)
 #define NETWORK_MUTEX_TIMEOUT_ART_MS 10000 // Longer timeout for album art downloads
+
+// Helper macro to scale values
+#define SCALE(value) ((int)((value) * SCALE_X))  // Use X scaling for most elements
 
 // Sonos logo declaration
 LV_IMG_DECLARE(Sonos_idnu60bqes_1);

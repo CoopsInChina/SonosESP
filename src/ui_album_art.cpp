@@ -212,6 +212,7 @@ static void color_anim_cb(void* var, int32_t t) {
     if (btn_queue) lv_obj_set_style_bg_color(btn_queue, bright, LV_STATE_PRESSED);
 }
 
+
 // Save final color as new baseline when animation completes
 static void color_anim_done_cb(lv_anim_t* a) {
     current_bg_color = target_bg_color;
@@ -231,6 +232,7 @@ void setBackgroundColor(uint32_t hex_color) {
     lv_anim_set_completed_cb(&anim, color_anim_done_cb);
     lv_anim_start(&anim);
 }
+
 
 // Sample pixels for dominant color extraction
 void sampleDominantColor(uint16_t* buffer, int width, int height) {
@@ -855,7 +857,8 @@ void albumArtTask(void* param) {
     // Guard against PSRAM leak on OTA recovery: task may be killed/recreated while globals
     // already hold valid pointers. Only allocate if not yet allocated.
     if (!art_buffer)
-        art_buffer     = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
+        size_t art_buffer_size = SCALE(420) * SCALE(420) * 2;  // 538×538 RGB565
+    art_buffer     = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
     if (!art_temp_buffer)
         art_temp_buffer = (uint16_t*)heap_caps_malloc(ART_SIZE * ART_SIZE * 2, MALLOC_CAP_SPIRAM);
     if (!art_buffer || !art_temp_buffer) { vTaskDelete(NULL); return; }
@@ -1489,7 +1492,8 @@ void albumArtTask(void* param) {
                             // Track incomplete downloads as failures to prevent infinite retry
                             if (strcmp(url, last_failed_url) == 0) {
                                 consecutive_failures++;
-                            } else {
+                            } 
+                            else {
                                 strncpy(last_failed_url, url, sizeof(last_failed_url) - 1);
                                 last_failed_url[sizeof(last_failed_url) - 1] = '\0';
                                 consecutive_failures = 1;

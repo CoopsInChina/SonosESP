@@ -245,21 +245,12 @@ enum ClockState {
 };
 
 // ============================================================================
-// Clock State Machine
-// ============================================================================
-enum ClockPhotoSource {
-    CLOCK_PHOTO_NONE = 0,
-    CLOCK_PHOTO_LOREMFLICKR = 1,
-    CLOCK_PHOTO_LOCAL = 2
-};
-
-// ============================================================================
 // Clock Settings (loaded from NVS on boot)
 // ============================================================================
 extern int  clock_mode;           // CLOCK_MODE_* enum value
 extern int  clock_timeout_min;    // Minutes of inactivity before clock appears
 extern int  clock_tz_idx;         // Index into CLOCK_ZONES[]
-extern int  clock_photo_source;   // Enable bacground and determine if thats a LoremFlickr photo or preinstalled photo
+extern bool clock_picsum_enabled; // true = download random photo background
 extern int  clock_refresh_min;    // Minutes between background photo refreshes
 extern int  clock_bg_kw_idx;      // Index into CLOCK_BG_KEYWORDS[]
 extern bool clock_12h;            // true = 12h AM/PM format, false = 24h

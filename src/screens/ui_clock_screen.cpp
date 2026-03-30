@@ -414,8 +414,8 @@ void clockBgTask(void* /*param*/) {
         // Two-step: GET loremflickr.com → parse Location redirect → fetch actual photo.
         // loremflickr serves from its own cache (/cache/resized/...) via HTTP.
         // "Random" (no keyword) hits Flickr API directly = 500 since Flickr blocked them.
-        // Fix: for Random mode pick a random keyword from the list so cache is always hit.
-        // picsum.photos NOT used: serves progressive JPEG, JPEGDEC only decodes baseline.
+        // Fix: for Random mode pick a random keyword from the list (skip index 0)
+        // so loremflickr always serves from its keyword cache, never hits Flickr API
         uint8_t* dl_buf = nullptr;
         int dl_total = 0;
 
@@ -642,15 +642,18 @@ void createClockScreen() {
     lv_obj_set_style_text_color(clock_date_lbl, lv_color_hex(0xAAAAAA), 0);
     lv_obj_align(clock_date_lbl, LV_ALIGN_CENTER, 0, 90);
 
-    // ── Weather overlay — hidden until first fetch ───────────────────────────
+    // ── Weather overlay — hidden until first fetch (scaled positions) ─────────
     
-    
-    
-
-    // ── Top-left area (transparent — no card, no shadow) ──────────────────────
+    // ── Top-left weather panel (scaled) ──────────────────────────────────────
     clock_wx_tl_panel = lv_obj_create(scr_clock);
-    lv_obj_set_pos(clock_wx_tl_panel, 10, 10);
-    lv_obj_set_size(clock_wx_tl_panel, 390, 160);
+    
+    int wx_panel_x = SCALE(10);
+    int wx_panel_y = SCALE(10);
+    int wx_panel_width = SCALE(390);
+    int wx_panel_height = SCALE(160);
+    lv_obj_set_pos(clock_wx_tl_panel, wx_panel_x, wx_panel_y);
+    lv_obj_set_size(clock_wx_tl_panel, wx_panel_width, wx_panel_height);
+    
     lv_obj_set_style_bg_opa(clock_wx_tl_panel, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(clock_wx_tl_panel, 0, 0);
     lv_obj_set_style_pad_all(clock_wx_tl_panel, 0, 0);
@@ -658,42 +661,70 @@ void createClockScreen() {
     lv_obj_clear_flag(clock_wx_tl_panel, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(clock_wx_tl_panel, LV_OBJ_FLAG_HIDDEN);
 
+    // City label
     clock_wx_city_lbl = lv_label_create(clock_wx_tl_panel);
     lv_label_set_text(clock_wx_city_lbl, "---");
+    
+    int wx_city_x = SCALE(10);
+    int wx_city_y = SCALE(5);
+    lv_obj_set_pos(clock_wx_city_lbl, wx_city_x, wx_city_y);
+    
     lv_obj_set_style_text_font(clock_wx_city_lbl, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(clock_wx_city_lbl, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_set_pos(clock_wx_city_lbl, 10, 5);
 
+    // Temperature label
     clock_wx_temp_lbl = lv_label_create(clock_wx_tl_panel);
     lv_label_set_text(clock_wx_temp_lbl, "--°C");
+    
+    int wx_temp_x = SCALE(10);
+    int wx_temp_y = SCALE(32);
+    lv_obj_set_pos(clock_wx_temp_lbl, wx_temp_x, wx_temp_y);
+    
     lv_obj_set_style_text_font(clock_wx_temp_lbl, &lv_font_montserrat_48, 0);
     lv_obj_set_style_text_color(clock_wx_temp_lbl, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_set_pos(clock_wx_temp_lbl, 10, 32);
 
+    // Condition label
     clock_wx_cond_lbl = lv_label_create(clock_wx_tl_panel);
     lv_label_set_text(clock_wx_cond_lbl, "");
+    
+    int wx_cond_x = SCALE(10);
+    int wx_cond_y = SCALE(95);
+    lv_obj_set_pos(clock_wx_cond_lbl, wx_cond_x, wx_cond_y);
+    
     lv_obj_set_style_text_font(clock_wx_cond_lbl, &lv_font_montserrat_18, 0);
     lv_obj_set_style_text_color(clock_wx_cond_lbl, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_set_pos(clock_wx_cond_lbl, 10, 95);
 
+    // Detail label
     clock_wx_detail_lbl = lv_label_create(clock_wx_tl_panel);
     lv_label_set_text(clock_wx_detail_lbl, "");
+    
+    int wx_detail_x = SCALE(10);
+    int wx_detail_y = SCALE(118);
+    lv_obj_set_pos(clock_wx_detail_lbl, wx_detail_x, wx_detail_y);
+    
     lv_obj_set_style_text_font(clock_wx_detail_lbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(clock_wx_detail_lbl, lv_color_hex(0x888888), 0);
-    lv_obj_set_pos(clock_wx_detail_lbl, 10, 118);
 
-    // Today icon — 80px, close to the right of the temp number
+    // Today icon
     clock_wx_icon = lv_label_create(clock_wx_tl_panel);
     lv_label_set_text(clock_wx_icon, WI_DAY_SUNNY);
+    
+    int wx_icon_x = SCALE(155);
+    int wx_icon_y = SCALE(10);
+    lv_obj_set_pos(clock_wx_icon, wx_icon_x, wx_icon_y);
+    
     lv_obj_set_style_text_font(clock_wx_icon, &lv_font_weathericons_80, 0);
     lv_obj_set_style_text_color(clock_wx_icon, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_set_pos(clock_wx_icon, 155, 10);
     lv_obj_clear_flag(clock_wx_icon, LV_OBJ_FLAG_CLICKABLE);
 
-    // ── Bottom strip: 6-hour hourly forecast (no background, no separator) ─────
+    // ── Bottom strip: 6-hour hourly forecast (scaled) ──────────────────────
     clock_wx_bottom = lv_obj_create(scr_clock);
-    lv_obj_set_pos(clock_wx_bottom, 0, 375);
-    lv_obj_set_size(clock_wx_bottom, 800, 105);
+    
+    int bottom_y = SCALE(375);
+    int bottom_height = SCALE(105);
+    lv_obj_set_pos(clock_wx_bottom, 0, bottom_y);
+    lv_obj_set_size(clock_wx_bottom, DISPLAY_WIDTH, bottom_height);
+    
     lv_obj_set_style_bg_opa(clock_wx_bottom, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(clock_wx_bottom, 0, 0);
     lv_obj_set_style_pad_all(clock_wx_bottom, 0, 0);
@@ -701,24 +732,33 @@ void createClockScreen() {
     lv_obj_clear_flag(clock_wx_bottom, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_add_flag(clock_wx_bottom, LV_OBJ_FLAG_HIDDEN);
 
-    // 6 equal columns (133px each, last extends to 800)
-    for (int i = 0; i < 6; i++) {
-        int col_x = i * 133;
-        int col_w = (i < 5) ? 133 : (800 - 5 * 133);  // last column gets remainder
+    // 6 equal columns (scaled width)
+    int column_count = 6;
+    int column_spacing = DISPLAY_WIDTH / column_count;
+    
+    for (int i = 0; i < column_count; i++) {
+        int col_x = i * column_spacing;
+        int col_w = (i < 5) ? column_spacing : (DISPLAY_WIDTH - 5 * column_spacing);
 
-        // Day name (Mon / Tue …)
+        // Day name/time
         clock_wx_fc_day[i] = lv_label_create(clock_wx_bottom);
         lv_obj_set_width(clock_wx_fc_day[i], col_w);
-        lv_obj_set_pos(clock_wx_fc_day[i], col_x, 7);
+        
+        int day_label_y = SCALE(7);
+        lv_obj_set_pos(clock_wx_fc_day[i], col_x, day_label_y);
+        
         lv_obj_set_style_text_align(clock_wx_fc_day[i], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_font(clock_wx_fc_day[i], &lv_font_montserrat_14, 0);
         lv_obj_set_style_text_color(clock_wx_fc_day[i], lv_color_hex(0x999999), 0);
         lv_label_set_text(clock_wx_fc_day[i], "---");
 
-        // Condition icon (32px Weather Icons glyph)
+        // Condition icon
         clock_wx_fc_icon[i] = lv_label_create(clock_wx_bottom);
         lv_obj_set_width(clock_wx_fc_icon[i], col_w);
-        lv_obj_set_pos(clock_wx_fc_icon[i], col_x, 24);
+        
+        int icon_y = SCALE(24);
+        lv_obj_set_pos(clock_wx_fc_icon[i], col_x, icon_y);
+        
         lv_obj_set_style_text_align(clock_wx_fc_icon[i], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_font(clock_wx_fc_icon[i], &lv_font_weathericons_32, 0);
         lv_obj_set_style_text_color(clock_wx_fc_icon[i], lv_color_hex(0xAAAAAA), 0);
@@ -727,7 +767,10 @@ void createClockScreen() {
         // Temperature
         clock_wx_fc_temp[i] = lv_label_create(clock_wx_bottom);
         lv_obj_set_width(clock_wx_fc_temp[i], col_w);
-        lv_obj_set_pos(clock_wx_fc_temp[i], col_x, 70);
+        
+        int temp_y = SCALE(70);
+        lv_obj_set_pos(clock_wx_fc_temp[i], col_x, temp_y);
+        
         lv_obj_set_style_text_align(clock_wx_fc_temp[i], LV_TEXT_ALIGN_CENTER, 0);
         lv_obj_set_style_text_font(clock_wx_fc_temp[i], &lv_font_montserrat_16, 0);
         lv_obj_set_style_text_color(clock_wx_fc_temp[i], lv_color_hex(0xAAAAAA), 0);
@@ -1000,11 +1043,8 @@ void checkClockTrigger() {
                 heap_caps_free(clock_bg_buffer);
                 clock_bg_buffer = nullptr;
             }
-            // Zero out descriptor so it no longer references freed memory
-            memset(&clock_bg_dsc, 0, sizeof(clock_bg_dsc));
 
             clock_state = CLOCK_IDLE;
-            Serial.println("[CLOCK] Exit complete");
             break;
         }
     }

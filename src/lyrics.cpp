@@ -507,61 +507,82 @@ void clearLyrics() {
 }
 
 void createLyricsOverlay(lv_obj_t* parent) {
-    // Gradient overlay at bottom of album art — transparent top, semi-opaque black bottom
+    // Gradient overlay at bottom of album art - responsive sizing
+    // On 4": 420x180, positioned bottom-center with -30px offset
+    // On 7": Scale proportionally for 1024x600 screen
+    
     lyrics_container = lv_obj_create(parent);
-    lv_obj_set_size(lyrics_container, 420, 180);
-    // Centered in 450px panel (x=15), bottom aligned with art bottom (y=270..450)
-    lv_obj_align(lyrics_container, LV_ALIGN_BOTTOM_MID, 0, -30);
+    
+    // Responsive overlay dimensions
+    int overlay_width = SCALE(420);
+    int overlay_height = SCALE(180);
+    lv_obj_set_size(lyrics_container, overlay_width, overlay_height);
+    
+    // Centered in 450px panel (x=15 on 4"), bottom aligned with art bottom
+    // Use scaled offsets
+    int y_offset = SCALE(-30);
+    lv_obj_align(lyrics_container, LV_ALIGN_BOTTOM_MID, 0, y_offset);
+    
     // Vertical gradient: transparent at top, dark semi-opaque at bottom
     lv_obj_set_style_bg_opa(lyrics_container, LV_OPA_COVER, 0);
     lv_obj_set_style_bg_color(lyrics_container, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_grad_color(lyrics_container, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_grad_dir(lyrics_container, LV_GRAD_DIR_VER, 0);
-    lv_obj_set_style_bg_main_opa(lyrics_container, LV_OPA_TRANSP, 0);   // top: transparent
-    lv_obj_set_style_bg_grad_opa(lyrics_container, 245, 0);              // bottom: ~96% opaque
+    lv_obj_set_style_bg_main_opa(lyrics_container, LV_OPA_TRANSP, 0);  // top: transparent
+    lv_obj_set_style_bg_grad_opa(lyrics_container, 245, 0);            // bottom: ~96% opaque
+    
     lv_obj_set_style_border_width(lyrics_container, 0, 0);
     lv_obj_set_style_outline_width(lyrics_container, 0, 0);
     lv_obj_set_style_shadow_width(lyrics_container, 0, 0);
-    lv_obj_set_style_radius(lyrics_container, 24, 0);     // match album art corner radius
+    
+    int overlay_radius = SCALE(24);  // Match album art corner radius
+    lv_obj_set_style_radius(lyrics_container, overlay_radius, 0);
     lv_obj_set_style_clip_corner(lyrics_container, true, 0);
-    lv_obj_set_style_pad_top(lyrics_container, 24, 0);    // extra top pad — fades into art
-    lv_obj_set_style_pad_bottom(lyrics_container, 12, 0);
-    lv_obj_set_style_pad_left(lyrics_container, 12, 0);
-    lv_obj_set_style_pad_right(lyrics_container, 12, 0);
+    
+    // Scaled padding
+    lv_obj_set_style_pad_top(lyrics_container, SCALE(24), 0);     // extra top pad - fades into art
+    lv_obj_set_style_pad_bottom(lyrics_container, SCALE(12), 0);
+    lv_obj_set_style_pad_left(lyrics_container, SCALE(12), 0);
+    lv_obj_set_style_pad_right(lyrics_container, SCALE(12), 0);
+    
     lv_obj_clear_flag(lyrics_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_scrollbar_mode(lyrics_container, LV_SCROLLBAR_MODE_OFF);
-
+    
     // Flex column layout, centered
     lv_obj_set_flex_flow(lyrics_container, LV_FLEX_FLOW_COLUMN);
-    lv_obj_set_flex_align(lyrics_container, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-
-    // Previous line — dimmed
+    lv_obj_set_flex_align(lyrics_container, LV_FLEX_ALIGN_CENTER, 
+                          LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+    
+    // Previous line - dimmed
     lbl_lyric_prev = lv_label_create(lyrics_container);
     lv_label_set_text(lbl_lyric_prev, "");
-    lv_obj_set_width(lbl_lyric_prev, 396);
+    
+    int label_width = overlay_width - (SCALE(12) * 2);  // Container width minus horizontal padding
+    lv_obj_set_width(lbl_lyric_prev, label_width);
+    
     lv_obj_set_style_text_font(lbl_lyric_prev, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(lbl_lyric_prev, lv_color_hex(0xAAAAAA), 0);
     lv_obj_set_style_text_align(lbl_lyric_prev, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(lbl_lyric_prev, LV_LABEL_LONG_SCROLL_CIRCULAR);
-
-    // Current line — bright, larger
+    
+    // Current line - bright, larger
     lbl_lyric_current = lv_label_create(lyrics_container);
     lv_label_set_text(lbl_lyric_current, "");
-    lv_obj_set_width(lbl_lyric_current, 396);
+    lv_obj_set_width(lbl_lyric_current, label_width);
     lv_obj_set_style_text_font(lbl_lyric_current, &lv_font_montserrat_20, 0);
     lv_obj_set_style_text_color(lbl_lyric_current, lv_color_hex(0xFFFFFF), 0);
     lv_obj_set_style_text_align(lbl_lyric_current, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(lbl_lyric_current, LV_LABEL_LONG_SCROLL_CIRCULAR);
-
-    // Next line — dimmed
+    
+    // Next line - dimmed
     lbl_lyric_next = lv_label_create(lyrics_container);
     lv_label_set_text(lbl_lyric_next, "");
-    lv_obj_set_width(lbl_lyric_next, 396);
+    lv_obj_set_width(lbl_lyric_next, label_width);
     lv_obj_set_style_text_font(lbl_lyric_next, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(lbl_lyric_next, lv_color_hex(0xAAAAAA), 0);
     lv_obj_set_style_text_align(lbl_lyric_next, LV_TEXT_ALIGN_CENTER, 0);
     lv_label_set_long_mode(lbl_lyric_next, LV_LABEL_LONG_SCROLL_CIRCULAR);
-
+    
     // Start hidden
     lv_obj_add_flag(lyrics_container, LV_OBJ_FLAG_HIDDEN);
 }
