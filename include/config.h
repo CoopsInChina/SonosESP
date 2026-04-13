@@ -284,6 +284,9 @@
 #define NVS_KEY_CLOCK_WEATHER_EN   "clk_wx_en"
 #define NVS_KEY_CLOCK_WEATHER_CITY "clk_wx_city"
 #define NVS_KEY_CLOCK_WEATHER_FAHR "clk_wx_fahr"
+#define NVS_KEY_CLOCK_LOCAL_PHOTO  "clk_local_photo"  // 0=online, 1/2/3=preinstalled photo index
+
+#define CLOCK_DEFAULT_LOCAL_PHOTO  0  // 0 = online (loremflickr), 1–3 = preinstalled photo
 
 // =============================================================================
 // QUEUE / PLAYLIST

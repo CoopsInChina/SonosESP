@@ -196,6 +196,7 @@ int  clock_mode           = CLOCK_DEFAULT_MODE;
 int  clock_timeout_min    = CLOCK_DEFAULT_TIMEOUT;
 int  clock_tz_idx         = CLOCK_DEFAULT_TZ_IDX;
 bool clock_picsum_enabled = (bool)CLOCK_DEFAULT_PICSUM;
+int  clock_local_photo    = CLOCK_DEFAULT_LOCAL_PHOTO;
 int  clock_refresh_min    = CLOCK_DEFAULT_REFRESH;
 int  clock_bg_kw_idx      = CLOCK_DEFAULT_KW_IDX;
 bool clock_12h            = (bool)CLOCK_DEFAULT_12H;
