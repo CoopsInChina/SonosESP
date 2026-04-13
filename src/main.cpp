@@ -8,6 +8,7 @@
 #include "config.h"
 #include "lyrics.h"
 #include "clock_screen.h"
+#include "SerialCommands.h"
 #include <esp_flash.h>
 #include <esp_task_wdt.h>
 
@@ -16,12 +17,15 @@ LV_IMG_DECLARE(Sonos_idnu60bqes_1);
 
 static bool sonos_started = false;  // true once Sonos tasks are running
 static TaskHandle_t mainAppTaskHandle = nullptr;
+static SerialCommands* serialCmd = nullptr;
 static void mainAppTask(void* param);  // forward declaration — defined after loop()
 
 void setup() {
     Serial.begin(SERIAL_BAUD_RATE);
     delay(500);
     Serial.println("\n=== SONOS CONTROLLER ===");
+    serialCmd = new SerialCommands(sonos);
+    serialCmd->begin();
     Serial.printf("Free heap: %d, PSRAM: %d\n", esp_get_free_heap_size(), heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 
     // Detect flash chip - auto-suspend only works with specific chips
@@ -549,6 +553,7 @@ static void mainAppTask(void* param) {
 void loop() {
     // Idle — all UI/LVGL work is done in mainAppTask (32KB stack).
     // loopTask hard-coded 8KB stack cannot be changed via build flags.
+    if (serialCmd) serialCmd->handleInput();
     vTaskDelay(pdMS_TO_TICKS(100));
 }
 
