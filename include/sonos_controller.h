@@ -226,6 +226,13 @@ public:
     // Task management for OTA
     void suspendTasks();  // Delete polling/network tasks for OTA (frees WiFi buffers immediately)
     void resumeTasks();   // Recreate polling/network tasks after OTA (only on failure)
+
+    // Spotify playback helpers
+    int  getSpotifyServiceId();                                        // Parse sid from ListAvailableServices
+    int  getSpotifyAccountSn();                                        // Probe GetSessionId for linked sn
+    bool playSpotifyTrack(const String& uri, const String& name);      // Play via SetAVTransportURI
+    bool playSpotifyTrackViaQueue(const String& uri, const String& name); // Play via queue (fallback)
+    void debugCurrentPlayback();                                       // Dump track/state to Serial
 };
 
 #endif // SONOS_CONTROLLER_H

@@ -1959,3 +1959,209 @@ bool SonosController::isDeviceInGroup(int deviceIndex, int coordinatorIndex) {
 
     return (device->groupCoordinatorUUID == coordinator->rinconID);
 }
+
+// ============================================================================
+// Spotify Playback Helpers
+// ============================================================================
+
+int SonosController::getSpotifyServiceId() {
+    String services = listMusicServices();
+    if (services.length() == 0) return -1;
+
+    // Find "Spotify" service name and extract its Id attribute
+    int namePos = services.indexOf(">Spotify<");
+    if (namePos < 0) namePos = services.indexOf("Spotify");
+    if (namePos < 0) return -1;
+
+    // Walk backwards to find the enclosing <Service ... Id="N" ...> tag
+    int tagStart = services.lastIndexOf("<Service", namePos);
+    if (tagStart < 0) return -1;
+
+    int idPos = services.indexOf("Id=\"", tagStart);
+    if (idPos < 0 || idPos > namePos) return -1;
+
+    idPos += 4;
+    int idEnd = services.indexOf('"', idPos);
+    if (idEnd < 0) return -1;
+
+    return services.substring(idPos, idEnd).toInt();
+}
+
+int SonosController::getSpotifyAccountSn() {
+    SonosDevice* dev = getCurrentDevice();
+    if (!dev) return -1;
+
+    // Try sn values 1-5 via GetSessionId to find which is linked
+    for (int sn = 1; sn <= 5; sn++) {
+        char args[128];
+        snprintf(args, sizeof(args),
+            "<ServiceId>12</ServiceId><SessionId/><CustomData/>"
+            "<AccountSn>%d</AccountSn>", sn);
+        String resp = sendSOAP("MusicServices", "GetSessionId", args);
+        if (resp.length() > 0 && resp.indexOf("Fault") < 0 && resp.indexOf("UPnPError") < 0) {
+            return sn;
+        }
+    }
+    return -1;
+}
+
+bool SonosController::playSpotifyTrack(const String& uri, const String& name) {
+    SonosDevice* dev = getCurrentDevice();
+    if (!dev || !dev->connected) return false;
+
+    // Extract track ID from "spotify:track:XXXXX"
+    String trackId = uri;
+    if (uri.startsWith("spotify:track:")) trackId = uri.substring(14);
+
+    int sid = getSpotifyServiceId();
+    if (sid <= 0) sid = 12;
+
+    // Try sn values; sn=5 is the most common confirmed value
+    int snCandidates[] = {5, 1, 2, 3, 4, 0};
+    for (int i = 0; snCandidates[i] != 0; i++) {
+        int sn = snCandidates[i];
+
+        char sonosUri[256];
+        snprintf(sonosUri, sizeof(sonosUri),
+            "x-sonos-spotify:spotify%%3atrack%%3a%s?sid=%d&amp;flags=32&amp;sn=%d",
+            trackId.c_str(), sid, sn);
+
+        char itemId[128];
+        snprintf(itemId, sizeof(itemId), "00030020spotify%%3atrack%%3a%s", trackId.c_str());
+
+        char sidStr[16];
+        snprintf(sidStr, sizeof(sidStr), "%d", sid);
+
+        String rawMeta =
+            String("<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
+                   "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" "
+                   "xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" "
+                   "xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">"
+                   "<item id=\"") + itemId + "\" restricted=\"true\">"
+            "<dc:title>" + name + "</dc:title>"
+            "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
+            "<desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">"
+            "SA_RINCON" + sidStr + "_X_#Svc" + sidStr + "-0-Token"
+            "</desc>"
+            "</item>"
+            "</DIDL-Lite>";
+
+        rawMeta.replace("&", "&amp;");
+        rawMeta.replace("<", "&lt;");
+        rawMeta.replace(">", "&gt;");
+        rawMeta.replace("\"", "&quot;");
+
+        static char soapArgs[2048];
+        snprintf(soapArgs, sizeof(soapArgs),
+            "<InstanceID>0</InstanceID>"
+            "<CurrentURI>%s</CurrentURI>"
+            "<CurrentURIMetaData>%s</CurrentURIMetaData>",
+            sonosUri, rawMeta.c_str());
+
+        String resp = sendSOAP("AVTransport", "SetAVTransportURI", soapArgs);
+        if (resp.length() > 0 && resp.indexOf("Fault") < 0 && resp.indexOf("UPnPError") < 0) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            String playResp = sendSOAP("AVTransport", "Play",
+                "<InstanceID>0</InstanceID><Speed>1</Speed>");
+            if (playResp.length() > 0 && playResp.indexOf("Fault") < 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool SonosController::playSpotifyTrackViaQueue(const String& uri, const String& name) {
+    SonosDevice* dev = getCurrentDevice();
+    if (!dev || !dev->connected) return false;
+
+    String trackId = uri;
+    if (uri.startsWith("spotify:track:")) trackId = uri.substring(14);
+
+    int sid = getSpotifyServiceId();
+    if (sid <= 0) sid = 12;
+
+    char sidStr[16];
+    snprintf(sidStr, sizeof(sidStr), "%d", sid);
+
+    int snCandidates[] = {5, 1, 2, 3, 4, 0};
+    for (int i = 0; snCandidates[i] != 0; i++) {
+        int sn = snCandidates[i];
+
+        sendSOAP("AVTransport", "RemoveAllTracksFromQueue", "<InstanceID>0</InstanceID>");
+        vTaskDelay(pdMS_TO_TICKS(300));
+
+        char enqueuedURI[256];
+        snprintf(enqueuedURI, sizeof(enqueuedURI),
+            "x-sonos-spotify:spotify%%3atrack%%3a%s?sid=%d&amp;flags=32&amp;sn=%d",
+            trackId.c_str(), sid, sn);
+
+        char itemId[128];
+        snprintf(itemId, sizeof(itemId), "00030020spotify%%3atrack%%3a%s", trackId.c_str());
+
+        String enqueuedMeta =
+            String("<DIDL-Lite xmlns:dc=\"http://purl.org/dc/elements/1.1/\" "
+                   "xmlns:upnp=\"urn:schemas-upnp-org:metadata-1-0/upnp/\" "
+                   "xmlns:r=\"urn:schemas-rinconnetworks-com:metadata-1-0/\" "
+                   "xmlns=\"urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/\">"
+                   "<item id=\"") + itemId + "\" restricted=\"true\">"
+            "<dc:title>" + name + "</dc:title>"
+            "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
+            "<desc id=\"cdudn\" nameSpace=\"urn:schemas-rinconnetworks-com:metadata-1-0/\">"
+            "SA_RINCON" + sidStr + "_X_#Svc" + sidStr + "-0-Token"
+            "</desc>"
+            "</item>"
+            "</DIDL-Lite>";
+
+        enqueuedMeta.replace("&", "&amp;");
+        enqueuedMeta.replace("<", "&lt;");
+        enqueuedMeta.replace(">", "&gt;");
+        enqueuedMeta.replace("\"", "&quot;");
+
+        static char addArgs[2048];
+        snprintf(addArgs, sizeof(addArgs),
+            "<InstanceID>0</InstanceID>"
+            "<EnqueuedURI>%s</EnqueuedURI>"
+            "<EnqueuedURIMetaData>%s</EnqueuedURIMetaData>"
+            "<DesiredFirstTrackNumberEnqueued>1</DesiredFirstTrackNumberEnqueued>"
+            "<EnqueueAsNext>0</EnqueueAsNext>",
+            enqueuedURI, enqueuedMeta.c_str());
+
+        String addResp = sendSOAP("AVTransport", "AddURIToQueue", addArgs);
+        if (addResp.length() > 0 && addResp.indexOf("Fault") < 0) {
+            // Switch transport to queue mode
+            char queueURI[128];
+            snprintf(queueURI, sizeof(queueURI), "x-rincon-queue:%s#0", dev->rinconID.c_str());
+            static char queueArgs[256];
+            snprintf(queueArgs, sizeof(queueArgs),
+                "<InstanceID>0</InstanceID>"
+                "<CurrentURI>%s</CurrentURI>"
+                "<CurrentURIMetaData></CurrentURIMetaData>",
+                queueURI);
+            sendSOAP("AVTransport", "SetAVTransportURI", queueArgs);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            String playResp = sendSOAP("AVTransport", "Play",
+                "<InstanceID>0</InstanceID><Speed>1</Speed>");
+            if (playResp.length() > 0 && playResp.indexOf("Fault") < 0) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void SonosController::debugCurrentPlayback() {
+    SonosDevice* dev = getCurrentDevice();
+    if (!dev) { Serial.println("[DEBUG] No device"); return; }
+
+    updateTrackInfo();
+    updatePlaybackState();
+
+    Serial.printf("[DEBUG] Device  : %s (%s)\n", dev->roomName.c_str(), dev->ip.toString().c_str());
+    Serial.printf("[DEBUG] Playing : %s\n", dev->isPlaying ? "YES" : "NO");
+    Serial.printf("[DEBUG] Track   : %s\n", dev->currentTrack.c_str());
+    Serial.printf("[DEBUG] Artist  : %s\n", dev->currentArtist.c_str());
+    Serial.printf("[DEBUG] Album   : %s\n", dev->currentAlbum.c_str());
+    Serial.printf("[DEBUG] URI     : %s\n", dev->currentURI.c_str());
+    Serial.printf("[DEBUG] Vol     : %d  Mute: %s\n", dev->volume, dev->isMuted ? "Y" : "N");
+}
