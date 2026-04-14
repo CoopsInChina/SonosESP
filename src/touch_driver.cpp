@@ -56,7 +56,9 @@ void touch_read(lv_indev_t *indev_drv, lv_indev_data_t *data) {
             // 7" doesn't need rotation (1024x600 native)
             data->point.x = map(raw_x, 0, TOUCH_PANEL_WIDTH - 1, 0, DISPLAY_WIDTH - 1);
             data->point.y = map(raw_y, 0, TOUCH_PANEL_HEIGHT - 1, 0, DISPLAY_HEIGHT - 1);
-            
+            data->point.x = constrain(data->point.x, 0, DISPLAY_WIDTH - 1);
+            data->point.y = constrain(data->point.y, 0, DISPLAY_HEIGHT - 1);
+
         #elif SCREEN_SIZE == 4
             // ===== 4" SCREEN TOUCH PROCESSING =====
             // 4" needs 90° rotation (480x800 → 800x480)
