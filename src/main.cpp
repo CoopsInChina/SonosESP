@@ -458,6 +458,24 @@ void setup() {
 
 // WiFi auto-reconnection check (runs every WIFI_CHECK_INTERVAL_MS when disconnected)
 static unsigned long lastWifiCheck = 0;
+static bool sonosInitTaskLaunched = false;  // Guards one-shot deferred init task
+
+static void deferredSonosInitTask(void*) {
+    // Runs on a background task so mainAppTask (LVGL/touch) is never blocked.
+    // tryLoadCachedDevice() does an HTTP reachability check (up to 5 s) which
+    // must not execute on the LVGL thread.
+    Serial.println("[SONOS] Deferred init task started");
+    bool loadedFromCache = sonos.tryLoadCachedDevice();
+    if (loadedFromCache) {
+        sonos.selectDevice(0);
+        sonos.startTasks();
+        sonos_started = true;
+        Serial.println("[SONOS] Deferred discovery succeeded from cache");
+    } else {
+        Serial.println("[SONOS] No cached device - use Devices screen to discover");
+    }
+    vTaskDelete(NULL);
+}
 
 void checkWiFiReconnect() {
     if (millis() - lastWifiCheck < WIFI_CHECK_INTERVAL_MS) return;
@@ -466,22 +484,16 @@ void checkWiFiReconnect() {
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[WIFI] Connection lost, attempting reconnect...");
         WiFi.reconnect();
-    } else if (!sonos_started) {
-        // WiFi connected but Sonos not yet started (WiFi was down at boot)
-        // (Re)start NTP sync now that we have connectivity
+    } else if (!sonos_started && !sonosInitTaskLaunched) {
+        // WiFi connected but Sonos not yet started (WiFi was down at boot).
+        // Restart NTP now that we have connectivity, then hand off to a
+        // background task so the 5 s HTTP check doesn't freeze LVGL/touch.
         configTime(0, 0, "pool.ntp.org", "time.nist.gov");
         setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
         tzset();
-        Serial.println("[SONOS] WiFi now connected - attempting deferred discovery from cache");
-        bool loadedFromCache = sonos.tryLoadCachedDevice();
-        if (loadedFromCache) {
-            sonos.selectDevice(0);
-            sonos.startTasks();
-            sonos_started = true;
-            Serial.println("[SONOS] Deferred discovery succeeded from cache");
-        } else {
-            Serial.println("[SONOS] No cached device - use Devices screen to discover");
-        }
+        sonosInitTaskLaunched = true;
+        xTaskCreatePinnedToCore(deferredSonosInitTask, "SonosInit",
+                                8192, NULL, 1, NULL, 0);
     }
 }
 
