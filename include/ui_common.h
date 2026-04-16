@@ -20,7 +20,7 @@
 #define DEFAULT_WIFI_PASSWORD ""
 
 // Firmware version
-#define FIRMWARE_VERSION "1.6.3_DS_RC1"
+#define FIRMWARE_VERSION "1.6.3_DS_RC2"
 #define GITHUB_REPO "CoopsInChina/SonosESP"
 #define GITHUB_API_URL "https://api.github.com/repos/" GITHUB_REPO "/releases/latest"
 
