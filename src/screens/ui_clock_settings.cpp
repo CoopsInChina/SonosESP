@@ -146,20 +146,57 @@ void createClockSettingsScreen() {
 
     // ── Photo background ─────────────────────────────────────────────────────
     addSectionLabel(content, "Photo background:");
-    addDescLabel(content, "Random photos from Flickr via loremflickr.com (requires WiFi)");
+    addDescLabel(content, "Show a photo behind the clock (online or preinstalled)");
 
     lv_obj_t* sw_picsum = addSwitch(content, clock_picsum_enabled);
-    lv_obj_add_event_cb(sw_picsum, [](lv_event_t* e) {
-        lv_obj_t* sw = (lv_obj_t*)lv_event_get_target(e);
-        clock_picsum_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
-        wifiPrefs.putBool(NVS_KEY_CLOCK_PICSUM, clock_picsum_enabled);
-    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // ── Photo source ─────────────────────────────────────────────────────────
+    addSectionLabel(content, "Photo source:");
+    addDescLabel(content, "Online requires WiFi. Preinstalled photos work offline.");
+
+    lv_obj_t* dd_src = lv_dropdown_create(content);
+    lv_dropdown_set_options(dd_src,
+        "Online loremflickr\n"
+        "Preinstalled Photo 1\n"
+        "Preinstalled Photo 2\n"
+        "Preinstalled Photo 3");
+    lv_dropdown_set_selected(dd_src, (uint16_t)clock_local_photo);
+    lv_obj_set_width(dd_src, lv_pct(100));
+    lv_obj_set_style_bg_color(dd_src, COL_CARD, 0);
+    lv_obj_set_style_text_color(dd_src, COL_TEXT, 0);
+    lv_obj_set_style_text_font(dd_src, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_border_color(dd_src, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_pad_top(dd_src, 6, 0);
+    lv_obj_set_style_pad_bottom(dd_src, 12, 0);
+    {
+        lv_obj_t* list = lv_dropdown_get_list(dd_src);
+        if (list) {
+            lv_obj_set_style_bg_color(list, lv_color_hex(0x222222), 0);
+            lv_obj_set_style_text_color(list, COL_TEXT, 0);
+            lv_obj_set_style_text_font(list, &lv_font_montserrat_14, 0);
+        }
+    }
 
     // ── Photo theme keyword ───────────────────────────────────────────────────
-    addSectionLabel(content, "Photo theme:");
-    addDescLabel(content, "Category of photos to show");
+    // Only relevant for online mode — hidden when a preinstalled photo is selected.
+    static lv_obj_t* lbl_kw_section;
+    static lv_obj_t* lbl_kw_desc;
+    static lv_obj_t* dd_kw;
+    static lv_obj_t* lbl_refresh_section;
+    static lv_obj_t* lbl_refresh_val;
+    static lv_obj_t* slider_refresh;
 
-    // Build newline-separated options string from the keyword list
+    lbl_kw_section = lv_label_create(content);
+    lv_label_set_text(lbl_kw_section, "Photo theme:");
+    lv_obj_set_style_text_font(lbl_kw_section, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lbl_kw_section, COL_TEXT, 0);
+    lv_obj_set_style_pad_top(lbl_kw_section, 12, 0);
+
+    lbl_kw_desc = lv_label_create(content);
+    lv_label_set_text(lbl_kw_desc, "Category of photos to show");
+    lv_obj_set_style_text_font(lbl_kw_desc, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_text_color(lbl_kw_desc, COL_TEXT2, 0);
+
     static char kw_opts[256];
     kw_opts[0] = '\0';
     for (int i = 0; i < CLOCK_BG_KW_COUNT; i++) {
@@ -168,7 +205,7 @@ void createClockSettingsScreen() {
             strncat(kw_opts, "\n", sizeof(kw_opts) - strlen(kw_opts) - 1);
     }
 
-    lv_obj_t* dd_kw = lv_dropdown_create(content);
+    dd_kw = lv_dropdown_create(content);
     lv_dropdown_set_options(dd_kw, kw_opts);
     lv_dropdown_set_selected(dd_kw, (uint16_t)clock_bg_kw_idx);
     lv_obj_set_width(dd_kw, lv_pct(100));
@@ -193,15 +230,18 @@ void createClockSettingsScreen() {
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
     // ── Photo refresh interval ───────────────────────────────────────────────
-    addSectionLabel(content, "Photo refresh interval:");
+    lbl_refresh_section = lv_label_create(content);
+    lv_label_set_text(lbl_refresh_section, "Photo refresh interval:");
+    lv_obj_set_style_text_font(lbl_refresh_section, &lv_font_montserrat_16, 0);
+    lv_obj_set_style_text_color(lbl_refresh_section, COL_TEXT, 0);
+    lv_obj_set_style_pad_top(lbl_refresh_section, 12, 0);
 
-    static lv_obj_t* lbl_refresh_val;
     lbl_refresh_val = lv_label_create(content);
     lv_label_set_text_fmt(lbl_refresh_val, "%d min", clock_refresh_min);
     lv_obj_set_style_text_color(lbl_refresh_val, COL_ACCENT, 0);
     lv_obj_set_style_text_font(lbl_refresh_val, &lv_font_montserrat_14, 0);
 
-    lv_obj_t* slider_refresh = lv_slider_create(content);
+    slider_refresh = lv_slider_create(content);
     lv_obj_set_width(slider_refresh, lv_pct(100));
     lv_obj_set_height(slider_refresh, 20);
     lv_slider_set_range(slider_refresh, 1, 60);
@@ -221,6 +261,42 @@ void createClockSettingsScreen() {
                               "%d min", clock_refresh_min);
         wifiPrefs.putInt(NVS_KEY_CLOCK_REFRESH, clock_refresh_min);
     }, LV_EVENT_VALUE_CHANGED, lbl_refresh_val);
+
+    // Helper lambda: show/hide online-only controls based on source selection
+    auto applyOnlineVisibility = [](bool online) {
+        auto fn = online ? lv_obj_clear_flag : lv_obj_add_flag;
+        fn(lbl_kw_section,      LV_OBJ_FLAG_HIDDEN);
+        fn(lbl_kw_desc,         LV_OBJ_FLAG_HIDDEN);
+        fn(dd_kw,               LV_OBJ_FLAG_HIDDEN);
+        fn(lbl_refresh_section, LV_OBJ_FLAG_HIDDEN);
+        fn(lbl_refresh_val,     LV_OBJ_FLAG_HIDDEN);
+        fn(slider_refresh,      LV_OBJ_FLAG_HIDDEN);
+    };
+
+    // Apply initial visibility
+    applyOnlineVisibility(clock_local_photo == 0);
+
+    // picsum toggle callback
+    lv_obj_add_event_cb(sw_picsum, [](lv_event_t* e) {
+        lv_obj_t* sw = (lv_obj_t*)lv_event_get_target(e);
+        clock_picsum_enabled = lv_obj_has_state(sw, LV_STATE_CHECKED);
+        wifiPrefs.putBool(NVS_KEY_CLOCK_PICSUM, clock_picsum_enabled);
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
+    // Source dropdown callback
+    lv_obj_add_event_cb(dd_src, [](lv_event_t* e) {
+        lv_obj_t* dd = (lv_obj_t*)lv_event_get_target(e);
+        clock_local_photo = (int)lv_dropdown_get_selected(dd);
+        wifiPrefs.putInt(NVS_KEY_CLOCK_LOCAL_PHOTO, clock_local_photo);
+        bool online = (clock_local_photo == 0);
+        auto fn = online ? lv_obj_clear_flag : lv_obj_add_flag;
+        fn(lbl_kw_section,      LV_OBJ_FLAG_HIDDEN);
+        fn(lbl_kw_desc,         LV_OBJ_FLAG_HIDDEN);
+        fn(dd_kw,               LV_OBJ_FLAG_HIDDEN);
+        fn(lbl_refresh_section, LV_OBJ_FLAG_HIDDEN);
+        fn(lbl_refresh_val,     LV_OBJ_FLAG_HIDDEN);
+        fn(slider_refresh,      LV_OBJ_FLAG_HIDDEN);
+    }, LV_EVENT_VALUE_CHANGED, NULL);
 
     // ── Timezone ─────────────────────────────────────────────────────────────
     addSectionLabel(content, "Timezone:");

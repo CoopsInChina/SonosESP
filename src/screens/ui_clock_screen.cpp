@@ -15,6 +15,7 @@
 #include "config.h"
 #include "ui_network_guard.h"
 #include "clock_screen.h"
+#include "screensaver_photos.h"
 
 LV_FONT_DECLARE(lv_font_montserrat_140);
 LV_FONT_DECLARE(lv_font_weathericons_80);
@@ -420,11 +421,26 @@ void clockBgTask(void* /*param*/) {
         int dl_total = 0;
 
         if (clock_picsum_enabled) {
-        dl_buf = (uint8_t*)heap_caps_malloc(
-            CLOCK_BG_MAX_DL_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            if (clock_local_photo >= 1 && clock_local_photo <= 3) {
+                // ── Preinstalled photo ────────────────────────────────────────
+                int idx = clock_local_photo - 1;  // 0-based
+                const uint8_t* src  = screensaver_photos[idx];
+                uint32_t       sz   = screensaver_photo_sizes[idx];
+                Serial.printf("[CLKBG] Local photo %d (%u bytes)\n", idx + 1, sz);
+                dl_buf = (uint8_t*)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (dl_buf) {
+                    memcpy(dl_buf, src, sz);
+                    dl_total = (int)sz;
+                }
+            } else {
+                // ── Online download (loremflickr) ─────────────────────────────
+                dl_buf = (uint8_t*)heap_caps_malloc(
+                    CLOCK_BG_MAX_DL_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            }
         }
 
-        if (dl_buf) {
+        if (dl_buf && dl_total == 0) {
+            // Online path — dl_buf is allocated but empty; run the download
             const char* kw = CLOCK_BG_KEYWORDS[clock_bg_kw_idx].kw;
 
             // "Random" = empty keyword → pick a random keyword from the list (skip index 0)

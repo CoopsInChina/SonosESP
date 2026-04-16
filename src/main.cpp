@@ -81,6 +81,8 @@ void setup() {
     clock_timeout_min    = wifiPrefs.getInt(NVS_KEY_CLOCK_TIMEOUT,  CLOCK_DEFAULT_TIMEOUT);
     clock_tz_idx         = wifiPrefs.getInt(NVS_KEY_CLOCK_TZ,       CLOCK_DEFAULT_TZ_IDX);
     clock_picsum_enabled = wifiPrefs.getBool(NVS_KEY_CLOCK_PICSUM,  (bool)CLOCK_DEFAULT_PICSUM);
+    clock_local_photo    = wifiPrefs.getInt(NVS_KEY_CLOCK_LOCAL_PHOTO, CLOCK_DEFAULT_LOCAL_PHOTO);
+    if (clock_local_photo < 0 || clock_local_photo > 3) clock_local_photo = 0;
     clock_refresh_min    = wifiPrefs.getInt(NVS_KEY_CLOCK_REFRESH,  CLOCK_DEFAULT_REFRESH);
     clock_bg_kw_idx      = wifiPrefs.getInt(NVS_KEY_CLOCK_KW,       CLOCK_DEFAULT_KW_IDX);
     clock_12h            = wifiPrefs.getBool(NVS_KEY_CLOCK_12H,     (bool)CLOCK_DEFAULT_12H);

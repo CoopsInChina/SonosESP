@@ -250,7 +250,8 @@ enum ClockState {
 extern int  clock_mode;           // CLOCK_MODE_* enum value
 extern int  clock_timeout_min;    // Minutes of inactivity before clock appears
 extern int  clock_tz_idx;         // Index into CLOCK_ZONES[]
-extern bool clock_picsum_enabled; // true = download random photo background
+extern bool clock_picsum_enabled; // true = show a photo background (online or local)
+extern int  clock_local_photo;    // 0 = online (loremflickr), 1–3 = preinstalled photo
 extern int  clock_refresh_min;    // Minutes between background photo refreshes
 extern int  clock_bg_kw_idx;      // Index into CLOCK_BG_KEYWORDS[]
 extern bool clock_12h;            // true = 12h AM/PM format, false = 24h
