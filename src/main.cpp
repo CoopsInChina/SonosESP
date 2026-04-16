@@ -262,7 +262,7 @@ void setup() {
         }
 
         unsigned long startAttemptTime = millis();
-        while (millis() - startAttemptTime < 5000 && WiFi.status() != WL_CONNECTED) {
+        while (millis() - startAttemptTime < 10000 && WiFi.status() != WL_CONNECTED) {
             delay(500);
             Serial.print(".");
         }
