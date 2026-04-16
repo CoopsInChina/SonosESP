@@ -192,6 +192,39 @@ static void applyWeatherToWidgets() {
 }
 
 // ============================================================================
+// applyClockLayout — repositions clock/date labels based on clock_display_format.
+// Called once at createClockScreen() and again each time the clock activates,
+// so settings changes take effect on the next clock session without a reboot.
+//   0 = Center: large 140px time centred on screen, date below
+//   1 = Corner: compact 48px time in top-right, date just below it
+// ============================================================================
+static void applyClockLayout() {
+    if (!clock_time_lbl || !clock_date_lbl) return;
+
+    if (clock_display_format == 1) {
+        // Corner mode — date and time in top-right, mirroring the weather panel layout:
+        //   Date  @ TOP_RIGHT y=SCALE(15)  — matches city label row   (montserrat_20, 0xAAAAAA)
+        //   Time  @ TOP_RIGHT y=SCALE(42)  — matches temperature row  (montserrat_48, 0xAAAAAA)
+        lv_obj_set_style_text_color(clock_time_lbl, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(clock_time_lbl, &lv_font_montserrat_48, 0);
+        lv_obj_align(clock_time_lbl, LV_ALIGN_TOP_RIGHT, SCALE(-12), SCALE(42));
+
+        lv_obj_set_style_text_color(clock_date_lbl, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(clock_date_lbl, &lv_font_montserrat_20, 0);
+        lv_obj_align(clock_date_lbl, LV_ALIGN_TOP_RIGHT, SCALE(-12), SCALE(15));
+    } else {
+        // Center mode (default) — large time centred, date below
+        lv_obj_set_style_text_color(clock_time_lbl, lv_color_hex(0xFFFFFF), 0);
+        lv_obj_set_style_text_font(clock_time_lbl, &lv_font_montserrat_140, 0);
+        lv_obj_align(clock_time_lbl, LV_ALIGN_CENTER, 0, SCALE(-30));
+
+        lv_obj_set_style_text_color(clock_date_lbl, lv_color_hex(0xAAAAAA), 0);
+        lv_obj_set_style_text_font(clock_date_lbl, &lv_font_montserrat_24, 0);
+        lv_obj_align(clock_date_lbl, LV_ALIGN_CENTER, 0, SCALE(90));
+    }
+}
+
+// ============================================================================
 // Clock tick — updates time, date, and weather labels (lv_timer, main thread only)
 // ============================================================================
 static lv_timer_t* clock_tick_timer = nullptr;
@@ -644,19 +677,18 @@ void createClockScreen() {
     lv_obj_clear_flag(overlay, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_clear_flag(overlay, LV_OBJ_FLAG_SCROLLABLE);
 
-    // Time label — HH:MM in native 120px Montserrat (crisp, no scaling)
+    // Time label — font and position set by applyClockLayout() below
     clock_time_lbl = lv_label_create(scr_clock);
     lv_label_set_text(clock_time_lbl, "--:--");
-    lv_obj_set_style_text_font(clock_time_lbl, &lv_font_montserrat_140, 0);
     lv_obj_set_style_text_color(clock_time_lbl, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(clock_time_lbl, LV_ALIGN_CENTER, 0, -30);
 
-    // Date label — "Thu, May 16" small and dim below the time
+    // Date label — colour fixed; font and position set by applyClockLayout() below
     clock_date_lbl = lv_label_create(scr_clock);
     lv_label_set_text(clock_date_lbl, "");
-    lv_obj_set_style_text_font(clock_date_lbl, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(clock_date_lbl, lv_color_hex(0xAAAAAA), 0);
-    lv_obj_align(clock_date_lbl, LV_ALIGN_CENTER, 0, 90);
+
+    // Apply layout based on current setting (Center or Corner)
+    applyClockLayout();
 
     // ── Weather overlay — hidden until first fetch (scaled positions) ─────────
     
@@ -982,6 +1014,10 @@ void checkClockTrigger() {
                         &clockBgTaskHandle, 0);
                 }
             }
+
+            // Apply clock layout (Center vs Corner) — picks up any setting change
+            // made since boot without needing a reboot
+            applyClockLayout();
 
             // Start 1-second clock tick
             clock_tick_timer = lv_timer_create(clock_tick_cb, 1000, NULL);

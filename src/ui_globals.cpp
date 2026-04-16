@@ -203,6 +203,7 @@ bool clock_12h            = (bool)CLOCK_DEFAULT_12H;
 bool clock_weather_enabled  = (bool)CLOCK_DEFAULT_WEATHER_EN;
 int  clock_weather_city_idx = CLOCK_DEFAULT_WEATHER_CITY;
 bool clock_wx_fahrenheit    = (bool)CLOCK_DEFAULT_WEATHER_FAHR;
+int  clock_display_format   = CLOCK_DEFAULT_DISP_FMT;
 int           clock_wx_temp     = 0;
 int           clock_wx_humidity = 0;
 int           clock_wx_wind     = 0;

@@ -93,6 +93,8 @@ void setup() {
     clock_weather_city_idx = wifiPrefs.getInt(NVS_KEY_CLOCK_WEATHER_CITY,  CLOCK_DEFAULT_WEATHER_CITY);
     if (clock_weather_city_idx < 0 || clock_weather_city_idx >= CLOCK_CITY_COUNT) clock_weather_city_idx = 0;
     clock_wx_fahrenheit    = wifiPrefs.getBool(NVS_KEY_CLOCK_WEATHER_FAHR, (bool)CLOCK_DEFAULT_WEATHER_FAHR);
+    clock_display_format   = wifiPrefs.getInt(NVS_KEY_CLOCK_DISP_FMT,    CLOCK_DEFAULT_DISP_FMT);
+    if (clock_display_format < 0 || clock_display_format > 1) clock_display_format = 0;
     Serial.printf("[CLOCK] mode=%d timeout=%dmin tz=%s picsum=%s refresh=%dmin kw=%s 12h=%s weather=%s city=%s\n",
                   clock_mode, clock_timeout_min,
                   CLOCK_ZONES[clock_tz_idx].name,
