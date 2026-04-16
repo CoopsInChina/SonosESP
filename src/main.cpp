@@ -264,7 +264,7 @@ void setup() {
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("\n[WIFI] Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
             // Start NTP sync (SNTP daemon — no HTTPS, tiny UDP packets)
-            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov", "cn.pool.ntp.org");
             // Apply user-selected timezone via POSIX TZ string
             setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
             tzset();
@@ -323,7 +323,7 @@ void setup() {
         }
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("[OTA] WiFi connected — IP: %s\n", WiFi.localIP().toString().c_str());
-            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov", "cn.pool.ntp.org");
             setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
             tzset();
         } else {
@@ -387,7 +387,7 @@ void setup() {
         }
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("[OTA] WiFi connected — IP: %s\n", WiFi.localIP().toString().c_str());
-            configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+            configTime(0, 0, "pool.ntp.org", "time.nist.gov", "cn.pool.ntp.org");
             setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
             tzset();
         } else {
@@ -490,7 +490,7 @@ void checkWiFiReconnect() {
         // WiFi connected but Sonos not yet started (WiFi was down at boot).
         // Restart NTP now that we have connectivity, then hand off to a
         // background task so the 5 s HTTP check doesn't freeze LVGL/touch.
-        configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+        configTime(0, 0, "pool.ntp.org", "time.nist.gov", "cn.pool.ntp.org");
         setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
         tzset();
         sonosInitTaskLaunched = true;
