@@ -25,10 +25,12 @@
 - **Album Art Display** - Hardware JPEG decoder + PNG support with bilinear scaling and automatic dominant color extraction
 - **Synced Lyrics Display** - Time-synced lyrics from LRCLIB overlaid on album art with smart auto-hide, scroll effects, and color matching
 - **Clock Screensaver** - Full-screen clock activates after inactivity with random ambient background images, tap to dismiss
+- **Photo Screensaver** - Preinstalled local photos as clock screensaver backgrounds, embedded at build time via Python script for offline use without network dependency
 - **Music Browsing** - Navigate your Sonos library, playlists, and favorites
 - **Multi-Room** - Switch between Sonos zones with live playing indicators showing which rooms are active
 - **OTA Updates** - Firmware updates from GitHub with Stable and Nightly release channel selection, auto-retry on low memory
 - **Multi-Screen Support** - Supports both 4" 800×480 and 7" 1024×600 displays
+- **Reliable Sonos Discovery** - Non-blocking deferred device discovery prevents UI freeze on startup; network mutex protection eliminates SDIO crash during concurrent WiFi operations
 - **Weather Widget** - Live weather overlay on clock screensaver with temperature, humidity, wind speed, and conditions
 - **Blurred Album Art Background** - Full-screen blurred background generated from album art for immersive experience
 
