@@ -14,6 +14,13 @@ int SonosController::discoverDevices() {
     Serial.printf("[SONOS] Starting discovery...\n");
     deviceCount = 0;
 
+    // Serialise against other WiFi ops (clock bg fetch, album art, lyrics, SOAP polling).
+    // Discovery holds UDP open for ~15 s; concurrent TX is what triggers the SDIO copy_buff assert.
+    if (network_mutex && xSemaphoreTake(network_mutex, pdMS_TO_TICKS(20000)) != pdTRUE) {
+        Serial.println("[SONOS] discoverDevices: could not acquire network_mutex — aborting");
+        return 0;
+    }
+
     udp.stop();
     vTaskDelay(pdMS_TO_TICKS(50));
 
@@ -21,6 +28,7 @@ int SonosController::discoverDevices() {
     // Bind a UDP socket to receive unicast SSDP responses (replies go to the sender's source port)
     if (!udp.begin(1900)) {
         Serial.printf("[SONOS] UDP begin failed on port 1900\n");
+        if (network_mutex) xSemaphoreGive(network_mutex);
         return 0;
     }
 
@@ -122,6 +130,7 @@ int SonosController::discoverDevices() {
 
     if (deviceCount == 0) {
         Serial.printf("[SONOS] No Sonos devices responded to discovery. Check network connectivity and ensure devices are powered on.\n");
+        if (network_mutex) xSemaphoreGive(network_mutex);
         return 0;
     }
 
@@ -246,6 +255,7 @@ int SonosController::discoverDevices() {
         prefs.putString("device_ip", devices[0].ip.toString());
     }
 
+    if (network_mutex) xSemaphoreGive(network_mutex);
     Serial.printf("[SONOS] Discovery complete: %d visible zone(s)\n", deviceCount);
     return deviceCount;
 }
@@ -425,7 +435,13 @@ bool SonosController::tryLoadCachedDevice() {
         return false;
     }
 
-    // Quick HTTP check to verify device is reachable (with short timeout)
+    // Quick HTTP check to verify device is reachable (with short timeout).
+    // Acquire network_mutex to serialise against clock bg fetch / album art task.
+    if (network_mutex && xSemaphoreTake(network_mutex, pdMS_TO_TICKS(10000)) != pdTRUE) {
+        Serial.println("[SONOS] tryLoadCachedDevice: could not acquire network_mutex");
+        return false;
+    }
+
     HTTPClient http;
     char url[128];
     snprintf(url, sizeof(url), "http://%s:1400/xml/device_description.xml", cachedIP.c_str());
@@ -436,6 +452,7 @@ bool SonosController::tryLoadCachedDevice() {
     Serial.printf("[SONOS] Verifying cached device is reachable at %s...\n", cachedIP.c_str());
     int code = http.GET();
     http.end();
+    if (network_mutex) xSemaphoreGive(network_mutex);
 
     if (code != 200) {
         Serial.println("========================================");
