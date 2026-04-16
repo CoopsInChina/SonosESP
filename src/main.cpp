@@ -108,7 +108,14 @@ void setup() {
     //Initialise WiFi Connection
     WiFi.mode(WIFI_STA);
     WiFi.setSleep(false);  // keep C6 radio always active — no modem sleep on mains-powered device
-    
+    // Begin connecting immediately so the C6 module association happens in the background
+    // while screens are initialised below (~2-3s). Without this, the first WiFi.begin()
+    // call races against C6 init and always times out; the second call then succeeds.
+    if (ssid.length() > 0) {
+        WiFi.begin(ssid.c_str(), pass.c_str());
+        Serial.printf("[WIFI] Early begin: connecting to '%s' in background\n", ssid.c_str());
+    }
+
 
     // === Memory map logged once at boot (post-WiFi, pre-LVGL) ===
     // Used to diagnose DMA depletion: compare to runtime [ART/*/MEM] logs.
@@ -239,48 +246,43 @@ void setup() {
     createDisplaySettingsScreen();
     updateBootProgress(30);
    
-    // Connect to WiFi
+    // Wait for WiFi — connection was already started above before screen init.
+    // On first iteration just poll; only call begin() again on genuine retries.
     int retryCount = 0;
-    int maxRetries = 6;
-    
+    int maxRetries = 3;
 
     while (retryCount < maxRetries && WiFi.status() != WL_CONNECTED) {
-        Serial.printf("[WIFI] Attempt %d/%d to connect to '%s'\n", retryCount+1, maxRetries, ssid.c_str());
-        WiFi.begin(ssid.c_str(), pass.c_str());
-        
+        if (retryCount == 0) {
+            Serial.printf("[WIFI] Waiting for connection to '%s'...\n", ssid.c_str());
+        } else {
+            Serial.printf("[WIFI] Retry %d/%d for '%s'\n", retryCount, maxRetries, ssid.c_str());
+            WiFi.disconnect();
+            delay(500);
+            WiFi.begin(ssid.c_str(), pass.c_str());
+        }
+
         unsigned long startAttemptTime = millis();
-        bool connected = false;
-        
-        // Wait for connection with a timeout (e.g., 10 seconds)
-        while (millis() - startAttemptTime < 10000) {
-            if (WiFi.status() == WL_CONNECTED) {
-                
-                break;
-            }
+        while (millis() - startAttemptTime < 5000 && WiFi.status() != WL_CONNECTED) {
             delay(500);
             Serial.print(".");
         }
-        
+
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("\n[WIFI] Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
-            // Start NTP sync (SNTP daemon — no HTTPS, tiny UDP packets)
             configTime(0, 0, "pool.ntp.org", "time.nist.gov", "cn.pool.ntp.org");
-            // Apply user-selected timezone via POSIX TZ string
             setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
             tzset();
             Serial.printf("[NTP] Sync started, TZ=%s\n", CLOCK_ZONES[clock_tz_idx].name);
-            
         } else {
             Serial.println("\n[WIFI] Attempt failed. Retrying...");
             retryCount++;
-            delay(1000); // Wait a second before retrying
-            updateBootProgress(30+(retryCount * 5)); // Shows system still alive while retrying
+            updateBootProgress(30 + (retryCount * 5));
         }
     }
-    
+
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[WIFI] All connection attempts failed.");
-        }
+    }
     
 
     updateBootProgress(60);
