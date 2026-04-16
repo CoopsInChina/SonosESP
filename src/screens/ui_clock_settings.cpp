@@ -298,6 +298,34 @@ void createClockSettingsScreen() {
         fn(slider_refresh,      LV_OBJ_FLAG_HIDDEN);
     }, LV_EVENT_VALUE_CHANGED, NULL);
 
+    // ── Clock Display Format ─────────────────────────────────────────────────
+    addSectionLabel(content, "Clock display format:");
+    addDescLabel(content, "Center: large clock fills screen  Corner: compact clock in top-right");
+
+    lv_obj_t* dd_disp_fmt = lv_dropdown_create(content);
+    lv_dropdown_set_options(dd_disp_fmt, "Center\nCorner");
+    lv_dropdown_set_selected(dd_disp_fmt, (uint16_t)clock_display_format);
+    lv_obj_set_width(dd_disp_fmt, lv_pct(100));
+    lv_obj_set_style_bg_color(dd_disp_fmt, COL_CARD, 0);
+    lv_obj_set_style_text_color(dd_disp_fmt, COL_TEXT, 0);
+    lv_obj_set_style_text_font(dd_disp_fmt, &lv_font_montserrat_14, 0);
+    lv_obj_set_style_border_color(dd_disp_fmt, lv_color_hex(0x444444), 0);
+    lv_obj_set_style_pad_top(dd_disp_fmt, 6, 0);
+    lv_obj_set_style_pad_bottom(dd_disp_fmt, 12, 0);
+    {
+        lv_obj_t* list = lv_dropdown_get_list(dd_disp_fmt);
+        if (list) {
+            lv_obj_set_style_bg_color(list, lv_color_hex(0x222222), 0);
+            lv_obj_set_style_text_color(list, COL_TEXT, 0);
+            lv_obj_set_style_text_font(list, &lv_font_montserrat_14, 0);
+        }
+    }
+    lv_obj_add_event_cb(dd_disp_fmt, [](lv_event_t* e) {
+        lv_obj_t* dd = (lv_obj_t*)lv_event_get_target(e);
+        clock_display_format = (int)lv_dropdown_get_selected(dd);
+        wifiPrefs.putInt(NVS_KEY_CLOCK_DISP_FMT, clock_display_format);
+    }, LV_EVENT_VALUE_CHANGED, NULL);
+
     // ── Timezone ─────────────────────────────────────────────────────────────
     addSectionLabel(content, "Timezone:");
     addDescLabel(content, "Select your local timezone");

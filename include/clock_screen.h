@@ -258,6 +258,7 @@ extern bool clock_12h;            // true = 12h AM/PM format, false = 24h
 extern bool clock_weather_enabled;   // true = show weather widget
 extern int  clock_weather_city_idx;  // Index into CLOCK_CITIES[]
 extern bool clock_wx_fahrenheit;     // true = display temps in °F
+extern int  clock_display_format;    // 0 = Center (full-screen), 1 = Corner (top-right compact)
 
 // Weather data — written by bg task, read by UI tick (flag guards LVGL calls)
 struct ClockWxHour { int wmo; int temp; int hour; };  // hour 0-23
