@@ -11,7 +11,6 @@
 
 [Features](#features) • [Hardware](#hardware) • [Installation](#installation) • [Contributing](#contributing)
 
-## ☕ Support
 
 </div>
 
