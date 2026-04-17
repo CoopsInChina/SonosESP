@@ -12,6 +12,13 @@ RELEASE_INSTRUCTIONS.md
 CODE_REVIEW_ACTION_PLAN.md
 FLOWS.md
 
+# Private screensaver photos — never commit
+assets/PrivateAssets/
+
+# Auto-generated screensaver source — rebuilt from assets at build time
+include/screensaver_photos.h
+src/screensaver_photos.cpp
+
 # Build artifacts
 *.bin
 *.elf

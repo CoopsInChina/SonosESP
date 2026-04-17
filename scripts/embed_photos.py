@@ -24,8 +24,17 @@ for flag in env.get("BUILD_FLAGS", []):
 
 print(f"[embed_photos] SCREEN_SIZE={screen_size} — embedding screensaver JPEGs")
 
-proj_dir   = env["PROJECT_DIR"]
-photo_dir  = os.path.join(proj_dir, f"assets/{screen_size}inchScreensavers")
+proj_dir      = env["PROJECT_DIR"]
+private_dir   = os.path.join(proj_dir, f"assets/PrivateAssets/{screen_size}inchScreensavers")
+public_dir    = os.path.join(proj_dir, f"assets/{screen_size}inchScreensavers")
+
+if os.path.isdir(private_dir):
+    photo_dir = private_dir
+    print(f"[embed_photos] Using PRIVATE photos from {private_dir}")
+else:
+    photo_dir = public_dir
+    print(f"[embed_photos] Using public photos from {public_dir}")
+
 out_h      = os.path.join(proj_dir, "include", "screensaver_photos.h")
 out_cpp    = os.path.join(proj_dir, "src", "screensaver_photos.cpp")
 
