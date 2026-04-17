@@ -6,9 +6,8 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-Ready-blue.svg)](https://platformio.org/)
-[![GitHub Downloads (all releases)](https://img.shields.io/github/downloads/OpenSurface/SonosESP/total?style=flat-square&logo=github&label=Downloads)](https://github.com/OpenSurface/SonosESP/releases)
-[![GitHub Release](https://img.shields.io/github/v/release/OpenSurface/SonosESP?style=flat-square&logo=github&label=Latest%20Release)](https://github.com/OpenSurface/SonosESP/releases/latest)
-[![GitHub Stars](https://img.shields.io/github/stars/OpenSurface/SonosESP?style=flat-square&logo=github&label=Stars)](https://github.com/OpenSurface/SonosESP/stargazers)
+[![GitHub Downloads (all releases)](https://img.shields.io/github/downloads/CoopsInChina/SonosESP/total?style=flat-square&logo=github&label=Downloads)](https://github.com/CoopsInChina/SonosESP/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/CoopsInChina/SonosESP?style=flat-square&logo=github&label=Latest%20Release)](https://github.com/CoopsInChina/SonosESP/releases/latest)
 
 [Features](#features) • [Hardware](#hardware) • [Installation](#installation) • [Contributing](#contributing)
 
@@ -25,7 +24,7 @@
 - **Album Art Display** - Hardware JPEG decoder + PNG support with bilinear scaling and automatic dominant color extraction
 - **Synced Lyrics Display** - Time-synced lyrics from LRCLIB overlaid on album art with smart auto-hide, scroll effects, and color matching
 - **Clock Screensaver** - Full-screen clock activates after inactivity with random ambient background images, tap to dismiss
-- **Photo Screensaver** - Preinstalled local photos as clock screensaver backgrounds, embedded at build time via Python script for offline use without network dependency
+- **Photo Screensaver** - Local photos as clock screensaver backgrounds, embedded at build time via Python script for offline use without network dependency
 - **Music Browsing** - Navigate your Sonos library, playlists, and favorites
 - **Multi-Room** - Switch between Sonos zones with live playing indicators showing which rooms are active
 - **OTA Updates** - Firmware updates from GitHub with Stable and Nightly release channel selection, auto-retry on low memory
@@ -38,7 +37,7 @@
 
 ## Hardware
 
-SonosESP now supports two compatible development boards:
+SonosESP supports two compatible development boards:
 
 ### 4" GUITION JC4880P433C
 ![GUITION JC4880P433C](assets/image.png)
@@ -69,38 +68,35 @@ SonosESP now supports two compatible development boards:
 > **Note:** The firmware includes conditional compilation for both screen sizes. Select the correct build environment in PlatformIO (`esp32_4inch` or `esp32_7inch`) for your hardware.
 
 
-### Installation
+## Installation
 
 ### Web Installer (Recommended)
-1. Visit the [Web Installer](https://opensurface.github.io/SonosESP/)
-2. Connect your ESP32-P4 via USB-C
-3. Click "Install Firmware" and select the COM port
-4. Wait for installation to complete
-5. Configure WiFi using the on-screen keyboard after reboot
+1. Visit the [Web Installer](https://CoopsInChina.github.io/SonosESP/)
+2. Select your screen size (4" or 7")
+3. Connect your ESP32-P4 via USB-C
+4. Click "Install Firmware" and select the COM port
+5. Wait for installation to complete
+6. Configure WiFi using the on-screen keyboard after reboot
 
 > Requires Chrome, Edge, or Opera browser with Web Serial support
 
 ### Manual Build with PlatformIO
 For developers or custom configurations:
-bash
 
-Clone the repository
-
-git clone https://github.com/CoopsInChina/SonosESP.git
-
+```bash
+# Clone the repository
+git clone -b release https://github.com/CoopsInChina/SonosESP.git
 cd SonosESP
 
-Build for 4" screen
-
+# Build for 4" screen
 pio run -e esp32_4inch
 
-Build for 7" screen
-
+# Build for 7" screen
 pio run -e esp32_7inch
 
-Upload to device
-
+# Upload to device
 pio run -e esp32_4inch -t upload
+```
 
 ## OTA Updates (After Initial Install)
 The device supports automatic Over-The-Air (OTA) firmware updates from GitHub releases:
@@ -109,13 +105,48 @@ The device supports automatic Over-The-Air (OTA) firmware updates from GitHub re
 2. Navigate to Settings → Firmware Update
 3. Tap "Check for Updates"
 4. If an update is available, tap "Install Update"
-5. Device will automatically download and install from GitHub releases
+5. Device will automatically download and install the correct firmware for your screen size
 
 ## First-Time Setup
 1. **Power on** - Device will show WiFi setup if not configured
 2. **WiFi Setup** - Tap "Scan" to find networks, select yours, enter password
 3. **Sonos Discovery** - Navigate to Settings → Speakers and tap "Scan"
 4. **Start Playing** - Select a device and start controlling your music!
+
+## Photo Screensaver — Custom Photos
+
+The screensaver background photos are embedded into the firmware at build time by `scripts/embed_photos.py`. The repository ships with generic placeholder images. You can replace them with your own photos.
+
+### Using your own photos
+
+Place three JPEG files named `Photo1.jpg`, `Photo2.jpg`, and `Photo3.jpg` into the appropriate directory for your screen size:
+
+```
+assets/
+  4inchScreensavers/   ← photos for 4" builds (800×480 recommended)
+  7inchScreensavers/   ← photos for 7" builds (1024×600 recommended)
+```
+
+Replace the existing files and rebuild. The script will embed them automatically.
+
+### Keeping photos private (local builds only)
+
+If you want to use personal photos locally without ever committing them to git, create a `PrivateAssets` folder inside `assets/`:
+
+```
+assets/
+  PrivateAssets/
+    4inchScreensavers/
+      Photo1.jpg
+      Photo2.jpg
+      Photo3.jpg
+    7inchScreensavers/
+      Photo1.jpg
+      Photo2.jpg
+      Photo3.jpg
+```
+
+The build script automatically detects `assets/PrivateAssets/` and uses those photos instead of the public ones. The `PrivateAssets/` folder is listed in `.gitignore` and will never be committed — CI and public builds always use the generic photos from `assets/{size}inchScreensavers/`.
 
 ## Architecture
 
@@ -127,7 +158,7 @@ The device supports automatic Over-The-Air (OTA) firmware updates from GitHub re
 - **UI Framework** - LVGL 9.4.0 with custom theme
 - **Image Processing** - ESP32-P4 hardware JPEG decoder + software PNG decoder, custom bilinear scaling with fixed-point math
 - **Lyrics System** - Time-synced LRC parsing with HTTPS fetching, auto-hide, and retry logic
-- **Clock Screensaver** - Inactivity-triggered fullscreen clock with random Unsplash backgrounds and weather widget
+- **Clock Screensaver** - Inactivity-triggered fullscreen clock with random background photos and weather widget
 - **OTA Updates** - Stable and Nightly channels, 3-attempt retry loop with live countdown UI
 - **Multi-Screen Support** - Conditional compilation for different display sizes and touch calibrations
 
@@ -136,32 +167,21 @@ WiFi credentials are stored persistently in NVS (Non-Volatile Storage). Once con
 
 ### Firmware Updates
 - Automatic OTA updates from GitHub releases
+- Separate firmware assets per screen size (`firmware-4inch.bin` / `firmware-7inch.bin`)
 - Version checking on demand
 - Progress indication during download
 - Safe rollback on failure
 
 ## Known Issues
-See the [GitHub Issues](https://github.com/OpenSurface/SonosESP/issues) for current open issues, including:
+See the [GitHub Issues](https://github.com/CoopsInChina/SonosESP/issues) for current open issues.
 
-- [#17] Support for 1024×600 displays (JC1060P470C board) - **Implemented**
-- [#35] Cannot initiate play from Sonos Favorites or Sonos Playlists
-- [#3] Feature request - hardware volume control
+## Thanks
 
-## Contributing
-Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+This project is a fork of [SonosESP](https://github.com/OpenSurface/SonosESP) by [Opensurface](https://github.com/OpenSurface). All credit for the original concept, architecture, and implementation goes to them and their contributors:
 
-## Contributors
-Thanks to these wonderful people who have contributed to this project:
-
-<a href="https://github.com/OpenSurface/SonosESP/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=OpenSurface/SonosESP" />
-</a>
-
-Special thanks to:
-- **[@BaileyLawson](https://github.com/BaileyLawson)** - First external contributor!
-- **[@johnhenrick3-cpu](https://github.com/johnhenrick3-cpu)** - Outstanding community tester!
 - **[@pizza-init](https://github.com/pizza-init)** - Lead maintainer and feature developer
-- **[@CoopsInChina](https://github.com/CoopsInChina)** - Community contributor
+- **[@BaileyLawson](https://github.com/BaileyLawson)** - First external contributor
+- **[@johnhenrick3-cpu](https://github.com/johnhenrick3-cpu)** - Outstanding community tester
 
 ## License
 This project is licensed under the MIT License - see [LICENSE](LICENSE) file for details.
@@ -174,10 +194,3 @@ This project is licensed under the MIT License - see [LICENSE](LICENSE) file for
 - Sonos UPnP/SOAP API documentation and community
 - Open-Meteo for free weather API
 
----
-
-<div align="center">
-
-**Massive Credit to the original project** • [Opensurface](https://github.com/OpenSurface/SonosESP/) 
-
-</div>
