@@ -183,9 +183,10 @@ This project is a fork of [SonosESP](https://github.com/OpenSurface/SonosESP) by
 - **[@johnhenrick3-cpu](https://github.com/johnhenrick3-cpu)** - Outstanding community tester
 
 Also, my inspiration for wanting to use this project in the first place came from this awesome project: 
-This fork is really a personal project and is intended to be a mix between the the OpenSurface SONOS ESP, with a bigger screen support and the NFC tap function of this awesome project [Vinyl Emulator](https://www.hackster.io/mark-hank/sonos-spotify-vinyl-emulator-3be63d) and [Vinyl Emulator](https://github.com/hankhank10/vinylemulator) 
+This fork is really a personal project and is intended to be a mix between the the OpenSurface SONOS ESP, with a bigger screen support and the NFC tap function of this awesome project 
+- **[@hankhank10](https://github.com/hankhank10)**'s Vinyl Emulator written for the Raspberry Pi.  which can be found here [Vinyl Emulator](https://github.com/hankhank10/vinylemulator), 
 
-The NFC tap function is 90% done, and will be released in the next week. 
+The NFC tap function within this project is 90% done, and will be released in the next week. 
 
 
 ## License
