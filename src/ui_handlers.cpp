@@ -665,13 +665,17 @@ static void checkForUpdates() {
             Serial.printf("[OTA] Latest %s version: v%s (prerelease: %s)\n",
                           channelName, latest_version.c_str(), isPrerelease ? "yes" : "no");
 
-            // Find firmware.bin asset
+            // Find screen-size-specific firmware asset
+#if SCREEN_SIZE == 7
+            const char* target_fw = "firmware-7inch.bin";
+#else
+            const char* target_fw = "firmware-4inch.bin";
+#endif
             JsonArray assets = releaseObj["assets"];
             for (JsonObject asset : assets) {
                 String name = asset["name"].as<String>();
-                if (name.indexOf("firmware.bin") >= 0) {
+                if (name == target_fw) {
                     download_url = asset["browser_download_url"].as<String>();
-                    // Use HTTPS directly - ESP32-P4 supports it with WiFiClientSecure
                     break;
                 }
             }

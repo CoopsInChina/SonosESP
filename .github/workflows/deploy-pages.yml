@@ -2,7 +2,7 @@ name: Deploy Web Installer
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, dev, release ]
   workflow_dispatch:
 
 permissions:
@@ -12,7 +12,7 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: true  # Cancel old runs to prevent duplicate artifacts
+  cancel-in-progress: true
 
 jobs:
   build-and-deploy:
@@ -22,85 +22,80 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
 
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        submodules: recursive
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
-    - name: Read version from version.json
-      id: get_version
-      run: |
-        VERSION=$(jq -r '.version' version.json)
-        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-        echo "Current version: $VERSION"
+      - name: Extract firmware version
+        id: get_version
+        run: |
+          VERSION=$(grep '#define FIRMWARE_VERSION' include/ui_common.h | sed 's/.*"\(.*\)".*/\1/')
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version: $VERSION"
 
-    - name: Check if nightly version
-      id: check_nightly
-      run: |
-        VERSION="${{ steps.get_version.outputs.VERSION }}"
-        if echo "$VERSION" | grep -q "nightly"; then
-          echo "IS_NIGHTLY=true" >> $GITHUB_OUTPUT
-          echo "⚠️ Nightly version detected ($VERSION)"
-          echo "Web installer deployment skipped for nightly builds"
-          echo "Use the nightly-release.yml workflow for nightly builds"
-        else
-          echo "IS_NIGHTLY=false" >> $GITHUB_OUTPUT
-          echo "✓ Stable version detected - proceeding with web installer deployment"
-        fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Set up Python
-      if: steps.check_nightly.outputs.IS_NIGHTLY != 'true'
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: ${{ runner.os }}-pio-v3-${{ hashFiles('**/platformio.ini') }}
+          restore-keys: ${{ runner.os }}-pio-v3-
 
-    - name: Cache PlatformIO
-      if: steps.check_nightly.outputs.IS_NIGHTLY != 'true'
-      uses: actions/cache@v4
-      with:
-        path: |
-          ~/.platformio
-        key: ${{ runner.os }}-pio-v3-${{ hashFiles('**/platformio.ini') }}
-        restore-keys: |
-          ${{ runner.os }}-pio-v3-
+      - name: Install PlatformIO + esptool
+        run: pip install platformio esptool
 
-    - name: Install PlatformIO
-      if: steps.check_nightly.outputs.IS_NIGHTLY != 'true'
-      run: |
-        python -m pip install --upgrade pip
-        pip install platformio
+      - name: Build 4-inch firmware
+        run: pio run -e esp32_4inch
 
-    - name: Clean build directory
-      if: steps.check_nightly.outputs.IS_NIGHTLY != 'true'
-      run: |
-        rm -rf .pio
-        echo "Build directory cleaned"
+      - name: Build 7-inch firmware
+        run: pio run -e esp32_7inch
 
-    - name: Build firmware
-      if: steps.check_nightly.outputs.IS_NIGHTLY != 'true'
-      run: pio run
+      - name: Assemble web-installer directory
+        run: |
+          mkdir -p web-installer
 
-    - name: Copy binaries to web-installer
-      if: steps.check_nightly.outputs.IS_NIGHTLY != 'true'
-      run: |
-        mkdir -p web-installer
-        cp .pio/build/esp32-p4/bootloader.bin web-installer/
-        cp .pio/build/esp32-p4/partitions.bin web-installer/
-        cp .pio/build/esp32-p4/firmware.bin web-installer/
-        ls -la web-installer/
+          # 4-inch firmware (merged for web installer, raw for OTA)
+          python -m esptool --chip esp32p4 merge_bin \
+            -o web-installer/firmware-4inch-merged.bin \
+            --flash_mode qio --flash_size 16MB \
+            0x0     .pio/build/esp32_4inch/bootloader.bin \
+            0x8000  .pio/build/esp32_4inch/partitions.bin \
+            0x10000 .pio/build/esp32_4inch/firmware.bin
 
-    - name: Setup Pages
-      if: steps.check_nightly.outputs.IS_NIGHTLY != 'true'
-      uses: actions/configure-pages@v4
+          # 7-inch firmware
+          python -m esptool --chip esp32p4 merge_bin \
+            -o web-installer/firmware-7inch-merged.bin \
+            --flash_mode qio --flash_size 16MB \
+            0x0     .pio/build/esp32_7inch/bootloader.bin \
+            0x8000  .pio/build/esp32_7inch/partitions.bin \
+            0x10000 .pio/build/esp32_7inch/firmware.bin
 
-    - name: Upload artifact
-      if: steps.check_nightly.outputs.IS_NIGHTLY != 'true'
-      uses: actions/upload-pages-artifact@v3
-      with:
-        path: './web-installer'
-        retention-days: 1  # Auto-cleanup after 1 day
+          # Individual binaries (shared bootloader/partitions, separate firmware)
+          cp .pio/build/esp32_4inch/bootloader.bin  web-installer/bootloader.bin
+          cp .pio/build/esp32_4inch/partitions.bin  web-installer/partitions.bin
+          cp .pio/build/esp32_4inch/firmware.bin    web-installer/firmware-4inch.bin
+          cp .pio/build/esp32_7inch/firmware.bin    web-installer/firmware-7inch.bin
 
-    - name: Deploy to GitHub Pages
-      if: steps.check_nightly.outputs.IS_NIGHTLY != 'true'
-      id: deployment
-      uses: actions/deploy-pages@v4
+          # Update manifest versions
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" web-installer/manifest-4inch.json
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${VERSION}\"/" web-installer/manifest-7inch.json
+
+          echo "Web installer contents:"
+          ls -lh web-installer/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './web-installer'
+          retention-days: 1
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,62 +1,39 @@
-name: Auto Release (Dual Screen)
+name: Dev Release (Dual Screen)
 
 on:
   push:
-    paths:
-      - 'include/ui_common.h'
-    branches:
-      - main
+    branches: [ dev ]
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: dev-release
+  cancel-in-progress: true
 
 jobs:
-  # ── Read version and check whether to proceed ────────────────────────────────
-  preflight:
+  # ── Read version once, share across jobs ────────────────────────────────────
+  version:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.get.outputs.version }}
-      skip: ${{ steps.check.outputs.skip }}
+      tag: ${{ steps.get.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-
       - name: Extract firmware version
         id: get
         run: |
           VERSION=$(grep '#define FIRMWARE_VERSION' include/ui_common.h | sed 's/.*"\(.*\)".*/\1/')
+          SHORT_SHA=${GITHUB_SHA::7}
+          TAG="v${VERSION}-nightly.${SHORT_SHA}"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
-          echo "Version: $VERSION"
+          echo "tag=$TAG"         >> $GITHUB_OUTPUT
+          echo "Version: $VERSION  Tag: $TAG"
 
-      - name: Check skip conditions
-        id: check
-        run: |
-          VERSION="${{ steps.get.outputs.version }}"
-          SKIP=false
-
-          # Skip RC / dev builds — only release clean version tags (e.g. 1.6.3)
-          if echo "$VERSION" | grep -qE '(RC|rc|dev|nightly|beta|alpha)'; then
-            echo "⚠️  Pre-release version ($VERSION) — skipping stable auto-release"
-            SKIP=true
-          fi
-
-          # Skip if this release tag already exists
-          if gh release view "v${VERSION}" > /dev/null 2>&1; then
-            echo "Release v${VERSION} already exists — skipping"
-            SKIP=true
-          fi
-
-          echo "skip=$SKIP" >> $GITHUB_OUTPUT
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # ── Build both screen sizes in parallel ──────────────────────────────────────
+  # ── Build both screen sizes in parallel ─────────────────────────────────────
   build:
-    needs: preflight
-    if: needs.preflight.outputs.skip == 'false'
+    needs: version
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -97,57 +74,62 @@ jobs:
             0x8000  .pio/build/${{ matrix.env }}/partitions.bin \
             0x10000 .pio/build/${{ matrix.env }}/firmware.bin
 
-      - name: Stage assets
+      - name: Stage release assets
         run: |
           cp .pio/build/${{ matrix.env }}/firmware.bin    firmware-${{ matrix.label }}.bin
           cp .pio/build/${{ matrix.env }}/bootloader.bin  bootloader-${{ matrix.label }}.bin
           cp .pio/build/${{ matrix.env }}/partitions.bin  partitions-${{ matrix.label }}.bin
-          zip firmware-${{ matrix.label }}.zip \
-            bootloader-${{ matrix.label }}.bin \
-            partitions-${{ matrix.label }}.bin \
-            firmware-${{ matrix.label }}.bin
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: firmware-${{ matrix.label }}
           path: |
             firmware-${{ matrix.label }}.bin
             firmware-${{ matrix.label }}-merged.bin
-            firmware-${{ matrix.label }}.zip
             bootloader-${{ matrix.label }}.bin
             partitions-${{ matrix.label }}.bin
           retention-days: 30
 
-  # ── Publish release ───────────────────────────────────────────────────────────
+  # ── Assemble and publish release ─────────────────────────────────────────────
   release:
-    needs: [preflight, build]
-    if: needs.preflight.outputs.skip == 'false'
+    needs: [version, build]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/download-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
           path: release-assets
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Delete previous dev release (rolling tag)
+        run: |
+          gh release delete dev-latest --yes 2>/dev/null || true
+          git push origin :refs/tags/dev-latest 2>/dev/null || true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Prerelease
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.preflight.outputs.version }}
-          name: v${{ needs.preflight.outputs.version }}
-          draft: false
-          prerelease: false
-          generate_release_notes: true
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: "Dev Build ${{ needs.version.outputs.version }} (${{ github.sha != '' && github.sha || 'manual' }})"
+          prerelease: true
           body: |
+            **Automated dev build** — built from `dev` branch @ `${{ github.sha }}`
+
+            > ⚠️ This is a development build. It may be unstable.
+
             ## Firmware Files
 
             | File | Screen | Use |
             |------|--------|-----|
-            | `firmware-4inch.bin` | 4" 800×480 (GUITION JC4880P433C) | OTA update from device |
-            | `firmware-7inch.bin` | 7" 1024×600 (GUITION JC1060P470C) | OTA update from device |
-            | `firmware-4inch-merged.bin` | 4" | Single-file flash (esptool / web installer) |
-            | `firmware-7inch-merged.bin` | 7" | Single-file flash (esptool / web installer) |
+            | `firmware-4inch.bin` | 4" 800×480 | OTA update from device |
+            | `firmware-7inch.bin` | 7" 1024×600 | OTA update from device |
+            | `firmware-4inch-merged.bin` | 4" | Full flash (esptool / web installer) |
+            | `firmware-7inch-merged.bin` | 7" | Full flash (esptool / web installer) |
 
             ## Flash with esptool
             ```bash
@@ -157,15 +139,14 @@ jobs:
             # 7-inch board
             python -m esptool --chip esp32p4 write_flash 0x0 firmware-7inch-merged.bin
             ```
-
-            ## Web Installer
-            Visit https://CoopsInChina.github.io/SonosESP/ to flash via browser.
           files: |
             release-assets/firmware-4inch.bin
             release-assets/firmware-7inch.bin
             release-assets/firmware-4inch-merged.bin
             release-assets/firmware-7inch-merged.bin
-            release-assets/firmware-4inch.zip
-            release-assets/firmware-7inch.zip
+            release-assets/bootloader-4inch.bin
+            release-assets/partitions-4inch.bin
+            release-assets/bootloader-7inch.bin
+            release-assets/partitions-7inch.bin
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

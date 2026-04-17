@@ -220,6 +220,67 @@
             text-align: center;
         }
 
+        /* Screen size selector */
+        .screen-selector {
+            margin-bottom: 0.5rem;
+        }
+
+        .screen-selector-label {
+            color: rgba(255, 255, 255, 0.6);
+            font-size: 0.9rem;
+            margin-bottom: 0.75rem;
+            text-align: center;
+        }
+
+        .screen-options {
+            display: flex;
+            gap: 0.75rem;
+            justify-content: center;
+        }
+
+        .screen-btn {
+            flex: 1;
+            max-width: 180px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 0.75rem 1rem;
+            background: rgba(255, 255, 255, 0.05);
+            border: 2px solid rgba(255, 255, 255, 0.15);
+            color: rgba(255, 255, 255, 0.6);
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.2s;
+            font-family: 'Inter', sans-serif;
+            gap: 0.2rem;
+        }
+
+        .screen-btn:hover {
+            border-color: rgba(255, 255, 255, 0.4);
+            color: rgba(255, 255, 255, 0.9);
+        }
+
+        .screen-btn.active {
+            border-color: #ffffff;
+            background: rgba(255, 255, 255, 0.1);
+            color: #ffffff;
+        }
+
+        .screen-btn .screen-size {
+            font-size: 1.4rem;
+            font-weight: 600;
+        }
+
+        .screen-btn .screen-model {
+            font-size: 0.7rem;
+            opacity: 0.7;
+        }
+
+        .screen-btn .screen-res {
+            font-size: 0.75rem;
+            opacity: 0.85;
+        }
+
         /* Console */
         .console-wrapper {
             background: rgba(255, 255, 255, 0.02);
@@ -329,7 +390,7 @@
         </div>
 
         <div class="notice">
-            <p><strong>Hardware Requirement:</strong> GUITION JC4880P433C (800x480 RGB, GT911 Touch, ESP32-P4 + ESP32-C6)</p>
+            <p><strong>Supported Hardware:</strong> GUITION JC4880P433C (4", 800×480) · GUITION JC1060P470C (7", 1024×600) — both use ESP32-P4 + ESP32-C6</p>
         </div>
 
         <div class="grid">
@@ -388,7 +449,22 @@
                     </div>
 
                     <div class="flash-section">
-                        <esp-web-install-button manifest="./manifest.json">
+                        <div class="screen-selector">
+                            <p class="screen-selector-label">Select your screen size:</p>
+                            <div class="screen-options">
+                                <button class="screen-btn active" id="btn-4inch" onclick="selectScreen('4inch')">
+                                    <span class="screen-size">4"</span>
+                                    <span class="screen-model">GUITION JC4880P433C</span>
+                                    <span class="screen-res">800 × 480</span>
+                                </button>
+                                <button class="screen-btn" id="btn-7inch" onclick="selectScreen('7inch')">
+                                    <span class="screen-size">7"</span>
+                                    <span class="screen-model">GUITION JC1060P470C</span>
+                                    <span class="screen-res">1024 × 600</span>
+                                </button>
+                            </div>
+                        </div>
+                        <esp-web-install-button id="install-btn" manifest="./manifest-4inch.json">
                             <button slot="activate">INSTALL FIRMWARE</button>
                         </esp-web-install-button>
                         <p class="browser-info">Requires Chrome, Edge, or Opera</p>
@@ -408,13 +484,19 @@
 
     <script>
         // Fetch manifest data and update UI
-        fetch('./manifest.json')
+        fetch('./manifest-4inch.json')
             .then(response => response.json())
             .then(data => {
-                document.getElementById('project-title').textContent = data.name;
                 document.getElementById('project-version').textContent = `v${data.version}`;
             })
             .catch(err => console.error('Failed to load manifest:', err));
+
+        // Screen selector
+        function selectScreen(size) {
+            document.querySelectorAll('.screen-btn').forEach(btn => btn.classList.remove('active'));
+            document.getElementById('btn-' + size).classList.add('active');
+            document.getElementById('install-btn').setAttribute('manifest', './manifest-' + size + '.json');
+        }
 
         // Console logging system
         const console_elem = document.getElementById('console');
