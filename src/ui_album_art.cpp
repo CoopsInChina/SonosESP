@@ -1225,9 +1225,12 @@ void albumArtTask(void* param) {
                             http.begin(url);
                         }
                     }
-                    // Local network: 3s timeout (LAN responds in <1s, 3s catches slow devices)
+                    // Local network: 5s timeout. Sonos fetches art from Spotify after a
+                    // track change and can take 4-5s to serve the first byte. 3s was too
+                    // tight — successful downloads were observed at 4449ms, meaning a cold
+                    // Sonos art server would fail the first attempt every time.
                     // Internet: 10s timeout (CDN/remote servers can be slow)
-                    http.setTimeout(isLocalNetwork ? 3000 : 10000);
+                    http.setTimeout(isLocalNetwork ? 5000 : 10000);
                     // Disable redirects: we downgrade https→http in prepareAlbumArtURL.
                     // If a server redirects back to https, we must NOT follow it (would create
                     // unexpected TLS session). Non-200 responses show placeholder instead.
@@ -1498,7 +1501,7 @@ void albumArtTask(void* param) {
                                 last_failed_url[sizeof(last_failed_url) - 1] = '\0';
                                 consecutive_failures = 1;
                             }
-                            if (consecutive_failures >= 5) {
+                            if (consecutive_failures >= 3) {
                                 Serial.printf("[ART] Incomplete %d times, giving up on this URL\n", consecutive_failures);
                                 if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                     last_art_url = url;
@@ -1539,8 +1542,31 @@ void albumArtTask(void* param) {
                                                               isJPEG, isPNG);
                             artLogMem("post-decode");  // DMA after decode — delta shows JPEG DMA cost
                             if (dec.ok) {
-                                displayArt(dec, url);
-                                heap_caps_free(dec.pixels);
+                                // Same-album optimisation: if the album name didn't change,
+                                // art_same_album_transition is set. Compare downloaded JPEG
+                                // size to the last displayed size — same size on same album
+                                // means same image (Sonos serves album art, not per-track art).
+                                // Skip the redraw to avoid a needless flash.
+                                bool skip_redraw = (art_same_album_transition
+                                                    && art_last_download_size > 0
+                                                    && (uint32_t)full_drain_target == art_last_download_size);
+                                art_same_album_transition = false;
+
+                                if (skip_redraw) {
+                                    Serial.printf("[ART] Same album art (%u bytes) — skipping redraw\n",
+                                                  (unsigned)full_drain_target);
+                                    // Still update last_art_url so the duplicate-URL guard
+                                    // prevents an immediate re-download on the next poll.
+                                    if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
+                                        last_art_url = url;
+                                        xSemaphoreGive(art_mutex);
+                                    }
+                                    heap_caps_free(dec.pixels);
+                                } else {
+                                    art_last_download_size = (uint32_t)full_drain_target;
+                                    displayArt(dec, url);
+                                    heap_caps_free(dec.pixels);
+                                }
                                 consecutive_failures = 0;
                                 last_failed_url[0] = '\0';
                             } else {
@@ -1616,6 +1642,9 @@ void albumArtTask(void* param) {
                             default: break;
                         }
                         Serial.printf("[ART] HTTP %d: %s\n", code, error_msg);
+                        // On HTTP failure during a same-album transition, clear the flag so
+                        // the next successful download (different URL) does a normal redraw.
+                        art_same_album_transition = false;
 
                         // Track consecutive failures to prevent infinite retry loop
                         if (strcmp(url, last_failed_url) == 0) {
@@ -1631,8 +1660,9 @@ void albumArtTask(void* param) {
                             vTaskDelay(pdMS_TO_TICKS(consecutive_failures * 200));
                         }
 
-                        // After 5 consecutive failures for same URL, mark as done to stop retrying
-                        if (consecutive_failures >= 5) {
+                        // After 3 consecutive failures for same URL, mark as done to stop retrying.
+                        // With a 5s local timeout, 3 attempts = ~15s max before giving up.
+                        if (consecutive_failures >= 3) {
                             Serial.printf("[ART] Failed %d times, giving up on this URL\n", consecutive_failures);
                             if (xSemaphoreTake(art_mutex, pdMS_TO_TICKS(100))) {
                                 last_art_url = url;  // Mark as done

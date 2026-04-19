@@ -98,6 +98,8 @@ extern uint16_t *art_temp_buffer;
 extern String last_art_url, pending_art_url;
 extern volatile bool art_ready;
 extern volatile bool art_show_placeholder;
+extern volatile bool art_same_album_transition;
+extern volatile uint32_t art_last_download_size;
 extern SemaphoreHandle_t art_mutex;
 extern uint32_t dominant_color;
 extern volatile bool color_ready;
