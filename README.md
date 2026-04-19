@@ -120,9 +120,27 @@ The device supports automatic Over-The-Air (OTA) firmware updates from GitHub re
 
 ## NFC Tags
 
+### Dependency: node-sonos-http-api
+
+NFC playback is powered by **[node-sonos-http-api](https://github.com/jishi/node-sonos-http-api)**, an excellent open-source local HTTP API for Sonos created by **[@jishi](https://github.com/jishi)**. Full credit to jishi for building and maintaining this project — it handles all the heavy lifting of translating simple HTTP requests into the Sonos UPnP/SOAP commands needed to queue and play streaming content.
+
+You need an instance of node-sonos-http-api running somewhere on your local network (a Raspberry Pi, a NAS, or any always-on Linux/macOS/Windows machine works well). Installation takes about 5 minutes:
+
+```bash
+# Requires Node.js
+git clone https://github.com/jishi/node-sonos-http-api.git
+cd node-sonos-http-api
+npm install --production
+node server.js
+```
+
+The server runs on port 5005 by default. SonosESP will find it automatically — no configuration needed on the device.
+
+> **Future release:** node-sonos-http-api will be integrated directly into SonosESP, removing the need for a separate server entirely.
+
 ### Prerequisites
 - PN532 NFC module wired to the ESP32-P4 I2C pins
-- [node-sonos-http-api](https://github.com/jishi/node-sonos-http-api) running on your local network (e.g. on a Raspberry Pi)
+- node-sonos-http-api running on your local network (see above)
 - Apple Music or Spotify linked to your Sonos system via the Sonos app
 
 On first boot with the NFC module connected, the device will automatically scan your local network for node-sonos-http-api (port 5005) and cache its address. The NFC screen under Settings shows discovery status.
