@@ -211,6 +211,57 @@ void setup() {
     lv_bar_set_range(boot_bar, 0, 100);
     lv_bar_set_value(boot_bar, 0, LV_ANIM_OFF);
 
+    // ── Boot stage indicators ─────────────────────────────────────────────────
+    // Four icon cards below the progress bar, styled like the settings sidebar.
+    // State colours: grey=idle  amber=in-progress  green=done  red=failed
+    // NFC and Server remain grey on the 4" build (those features are 7"-only).
+    static const char* kBootLabels[4]   = { "WiFi", "NFC", "Server", "Speakers" };
+    static const char* kBootSymbols[4]  = { LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH,
+                                            LV_SYMBOL_DRIVE, LV_SYMBOL_AUDIO };
+    static const int   kCardW  = 64;
+    static const int   kCardH  = 52;
+    static const int   kCardGap = 8;   // gap between cards
+    static const int   kCardY  = 112;  // y offset from screen centre
+    // Total width: 4×64 + 3×8 = 280px — fits within the 300px progress bar
+    static const int   kStartX = -(4 * kCardW + 3 * kCardGap) / 2 + kCardW / 2;
+
+    lv_obj_t* boot_icons[4];  // symbol labels — color changes to show state
+
+    for (int i = 0; i < 4; i++) {
+        int xOff = kStartX + i * (kCardW + kCardGap);
+
+        lv_obj_t* card = lv_obj_create(boot_scr);
+        lv_obj_set_size(card, kCardW, kCardH);
+        lv_obj_set_style_bg_color(card, lv_color_hex(0x222222), 0);
+        lv_obj_set_style_border_color(card, lv_color_hex(0x333333), 0);
+        lv_obj_set_style_border_width(card, 1, 0);
+        lv_obj_set_style_radius(card, 8, 0);
+        lv_obj_set_style_pad_all(card, 0, 0);
+        lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
+        lv_obj_align(card, LV_ALIGN_CENTER, xOff, kCardY);
+
+        boot_icons[i] = lv_label_create(card);
+        lv_label_set_text(boot_icons[i], kBootSymbols[i]);
+        lv_obj_set_style_text_color(boot_icons[i], lv_color_hex(0x444444), 0);
+        lv_obj_set_style_text_font(boot_icons[i], &lv_font_montserrat_18, 0);
+        lv_obj_align(boot_icons[i], LV_ALIGN_CENTER, 0, -7);
+
+        lv_obj_t* lbl = lv_label_create(card);
+        lv_label_set_text(lbl, kBootLabels[i]);
+        lv_obj_set_style_text_color(lbl, lv_color_hex(0x666666), 0);
+        lv_obj_set_style_text_font(lbl, &lv_font_montserrat_12, 0);
+        lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -5);
+    }
+
+    // Stage updater: 0=idle/grey  1=in-progress/amber  2=done/green  3=failed/red
+    auto setBootStage = [&](int stage, int state) {
+        static const uint32_t kCols[] = { 0x444444, 0xD4A84B, 0x4CAF50, 0xFF5555 };
+        lv_obj_set_style_text_color(boot_icons[stage], lv_color_hex(kCols[state]), 0);
+        lv_refr_now(NULL);
+        lv_tick_inc(10);
+        lv_timer_handler();
+    };
+
     // Version number in bottom right corner
     lv_obj_t* lbl_boot_version = lv_label_create(boot_scr);
     lv_label_set_text(lbl_boot_version, "v" FIRMWARE_VERSION);
@@ -257,6 +308,7 @@ void setup() {
    
     // Wait for WiFi — connection was already started above before screen init.
     // On first iteration just poll; only call begin() again on genuine retries.
+    setBootStage(0, 1);  // WiFi: in progress
     int retryCount = 0;
     int maxRetries = 3;
 
@@ -278,12 +330,15 @@ void setup() {
 
         if (WiFi.status() == WL_CONNECTED) {
             Serial.printf("\n[WIFI] Connected successfully! IP: %s\n", WiFi.localIP().toString().c_str());
+            setBootStage(0, 2);  // WiFi: done
             configTime(0, 0, "pool.ntp.org", "time.nist.gov", "cn.pool.ntp.org");
             setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
             tzset();
             Serial.printf("[NTP] Sync started, TZ=%s\n", CLOCK_ZONES[clock_tz_idx].name);
 #if SCREEN_SIZE == 7
-            sonosHttpServer.begin();  // verify cached server or flag for discovery
+            setBootStage(2, 1);  // Server: in progress
+            sonosHttpServer.begin();  // verify cached server or start background scan
+            setBootStage(2, sonosHttpServer.getState() == NodeSonosServer::State::FOUND ? 2 : 1);
 #endif
         } else {
             Serial.println("\n[WIFI] Attempt failed. Retrying...");
@@ -294,6 +349,7 @@ void setup() {
 
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[WIFI] All connection attempts failed.");
+        setBootStage(0, 3);  // WiFi: failed
     }
     
 
@@ -304,9 +360,10 @@ void setup() {
 
     createOTAScreen();
 #if SCREEN_SIZE == 7
-    if (!nfcManager.begin()) {
-        Serial.println("[NFC] Failed to initialize NFC — PN532 not found");
-    }
+    setBootStage(1, 1);  // NFC: in progress
+    bool nfcOk = nfcManager.begin();
+    if (!nfcOk) Serial.println("[NFC] Failed to initialize NFC — PN532 not found");
+    setBootStage(1, nfcOk ? 2 : 3);  // NFC: done or failed
     createNFCSettingsScreen();
 #endif
     updateBootProgress(65);
@@ -445,8 +502,10 @@ void setup() {
     sonos.begin();
     updateBootProgress(95);
 
+    setBootStage(3, 1);  // Speakers: in progress
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[SONOS] WiFi not connected at boot - deferring discovery");
+        setBootStage(3, 3);  // Speakers: failed (no WiFi)
     } else {
         // Try to load cached device first for fast boot (~2s vs ~15s)
         bool loadedFromCache = sonos.tryLoadCachedDevice();
@@ -454,10 +513,12 @@ void setup() {
             sonos.selectDevice(0);
             sonos.startTasks();
             sonos_started = true;
+            setBootStage(3, 2);  // Speakers: done
         } else {
             // Cache miss or unreachable - skip SSDP at boot (device may not be ready yet)
             // User can trigger discovery manually via Settings > Scan
             Serial.println("[SONOS] Cached device unreachable at boot - use Settings to scan");
+            setBootStage(3, 3);  // Speakers: failed (scan needed)
         }
     }
 
