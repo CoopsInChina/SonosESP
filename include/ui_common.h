@@ -69,6 +69,9 @@ extern bool screen_dimmed;
 // Screen objects
 extern lv_obj_t *scr_main, *scr_devices, *scr_queue, *scr_settings;
 extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_display, *scr_ota, *scr_groups, *scr_general;
+#if SCREEN_SIZE == 7
+extern lv_obj_t *scr_nfc;
+#endif
 extern lv_obj_t *scr_clock, *scr_clock_settings;
 
 // Main screen UI elements
@@ -98,6 +101,8 @@ extern uint16_t *art_temp_buffer;
 extern String last_art_url, pending_art_url;
 extern volatile bool art_ready;
 extern volatile bool art_show_placeholder;
+extern volatile bool art_same_album_transition;
+extern volatile uint32_t art_last_download_size;
 extern SemaphoreHandle_t art_mutex;
 extern uint32_t dominant_color;
 extern volatile bool color_ready;
@@ -164,6 +169,9 @@ void createSettingsScreen();
 void createDisplaySettingsScreen();
 void createWiFiScreen();
 void createOTAScreen();
+#if SCREEN_SIZE == 7
+void createNFCSettingsScreen();
+#endif
 void createSourcesScreen();
 void createBrowseScreen();
 void createGroupsScreen();

@@ -239,6 +239,11 @@
 #define NVS_KEY_OTA_PENDING     "ota_pending"    // Auto-reboot OTA flag
 #define NVS_KEY_OTA_URL         "ota_url"        // Saved firmware URL for auto-reboot OTA
 #define NVS_KEY_CLOCK_PHOTO_SOURCE "clockPhotoSrc"
+#define NVS_KEY_SONOS_HTTP_SERVER  "sonos_http_srv"  // cached node-sonos-http-api URL
+
+// node-sonos-http-api discovery
+#define SONOS_HTTP_PORT             5005
+#define SONOS_HTTP_PROBE_TIMEOUT_MS 100   // TCP connect timeout per host (LAN responses < 10ms)
 
 // =============================================================================
 // UI COLORS (hex values)

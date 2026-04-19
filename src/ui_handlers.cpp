@@ -1579,6 +1579,7 @@ static void updateNextTrackUI(SonosDevice* d) {
 static void updateAlbumArtRequest(SonosDevice* d) {
     static String last_track_uri = "";
     static String last_source_prefix = "";
+    static String last_album_name = "";
     static bool had_track = false;
 
     // Extract source prefix to detect actual source changes (not just track changes)
@@ -1611,12 +1612,19 @@ static void updateAlbumArtRequest(SonosDevice* d) {
         last_track_uri = d->currentURI;
 
         if (d->currentURI.length() > 0) {
+            bool same_album = (!actual_source_change
+                               && d->currentAlbum.length() > 0
+                               && d->currentAlbum == last_album_name);
+
             if (actual_source_change) {
                 Serial.printf("[ART] SOURCE CHANGE: %s -> %s\n", last_source_prefix.c_str(), current_source_prefix.c_str());
                 last_source_prefix = current_source_prefix;
+            } else if (same_album) {
+                Serial.printf("[ART] Track changed (same album: %s) — keeping art visible\n", d->currentAlbum.c_str());
             } else {
                 Serial.printf("[ART] Track changed (same source: %s)\n", current_source_prefix.c_str());
             }
+
             // CRITICAL: Abort any in-progress album art download immediately
             // Applies to ALL track changes (not just source changes) so the art task
             // doesn't wait for a 10-second HTTP timeout before processing the new track
@@ -1631,19 +1639,27 @@ static void updateAlbumArtRequest(SonosDevice* d) {
                                        // sees pending=old_url != last_art_url="" and starts
                                        // downloading wrong art, wasting SDIO traffic and setting
                                        // last_art_download_end_ms (adding 1s cooldown for new art).
-                art_ready = false;  // Discard any just-completed download — prevents old art
-                                    // flashing for the new track if displayCompletedArt() fires
-                                    // before the new art task iteration starts.
+                if (!same_album) {
+                    art_ready = false;  // Discard any just-completed download — prevents old art
+                                        // flashing for the new track if displayCompletedArt() fires
+                                        // before the new art task iteration starts.
+                }
                 xSemaphoreGive(art_mutex);
             }
-            // Clear LRU cache: prevents cached art from the OLD track flashing for
-            // the NEW track if the art task picks up the new URL within the same
-            // updateUI frame (cache hit would bypass the placeholder entirely).
-            clearAlbumArtCache();
-            // Show placeholder immediately (main thread = LVGL-safe)
-            if (img_album)       lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
-            if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+
+            art_same_album_transition = same_album;
+
+            if (!same_album) {
+                // Clear LRU cache: prevents cached art from the OLD track flashing for
+                // the NEW track if the art task picks up the new URL within the same
+                // updateUI frame (cache hit would bypass the placeholder entirely).
+                clearAlbumArtCache();
+                // Show placeholder immediately (main thread = LVGL-safe)
+                if (img_album)       lv_obj_add_flag(img_album, LV_OBJ_FLAG_HIDDEN);
+                if (art_placeholder) lv_obj_remove_flag(art_placeholder, LV_OBJ_FLAG_HIDDEN);
+            }
         }
+        last_album_name = d->currentAlbum;
     }
 
     // Show placeholder when device transitions to "Not Playing" (no active track)
