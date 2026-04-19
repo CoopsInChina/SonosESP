@@ -8,6 +8,10 @@
 #include "config.h"
 #include "lyrics.h"
 #include "clock_screen.h"
+#if SCREEN_SIZE == 7
+#include "pn532_nfc_manager.h"
+#include "node_sonos_server.h"
+#endif
 #include <esp_flash.h>
 #include <esp_task_wdt.h>
 
@@ -17,6 +21,9 @@ LV_IMG_DECLARE(Sonos_idnu60bqes_1);
 static bool sonos_started = false;  // true once Sonos tasks are running
 static TaskHandle_t mainAppTaskHandle = nullptr;
 static void mainAppTask(void* param);  // forward declaration — defined after loop()
+#if SCREEN_SIZE == 7
+PN532_NFCManager nfcManager;
+#endif
 
 void setup() {
     Serial.begin(SERIAL_BAUD_RATE);
@@ -275,6 +282,9 @@ void setup() {
             setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
             tzset();
             Serial.printf("[NTP] Sync started, TZ=%s\n", CLOCK_ZONES[clock_tz_idx].name);
+#if SCREEN_SIZE == 7
+            sonosHttpServer.begin();  // verify cached server or flag for discovery
+#endif
         } else {
             Serial.println("\n[WIFI] Attempt failed. Retrying...");
             retryCount++;
@@ -293,6 +303,12 @@ void setup() {
     updateBootProgress(62);
 
     createOTAScreen();
+#if SCREEN_SIZE == 7
+    if (!nfcManager.begin()) {
+        Serial.println("[NFC] Failed to initialize NFC — PN532 not found");
+    }
+    createNFCSettingsScreen();
+#endif
     updateBootProgress(65);
 
     // =========================================================================
@@ -500,6 +516,9 @@ void checkWiFiReconnect() {
         sonosInitTaskLaunched = true;
         xTaskCreatePinnedToCore(deferredSonosInitTask, "SonosInit",
                                 8192, NULL, 1, NULL, 0);
+#if SCREEN_SIZE == 7
+        sonosHttpServer.begin();  // WiFi came up after boot — check/discover server
+#endif
     }
 }
 
@@ -557,6 +576,9 @@ static void mainAppTask(void* param) {
             checkAutoDim();
             checkClockTrigger();
             checkWiFiReconnect();
+#if SCREEN_SIZE == 7
+            nfcManager.update();
+#endif
             logHeapStatus();  // Periodic memory monitoring
         }
 

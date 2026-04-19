@@ -65,12 +65,19 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
     lv_obj_set_style_text_font(ico_x, &lv_font_montserrat_14, 0);
     lv_obj_center(ico_x);
 
-    // Menu items (Order: General, Speakers, Groups, Sources, Display, WiFi, Clock, Update)
-    const char* icons[] = {LV_SYMBOL_SETTINGS, LV_SYMBOL_AUDIO, LV_SYMBOL_SHUFFLE, LV_SYMBOL_LIST, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_WIFI, LV_SYMBOL_BELL, LV_SYMBOL_DOWNLOAD};
+    // Menu items — 7" adds NFC at index 7, Update shifts to index 8
+#if SCREEN_SIZE == 7
+    const char* icons[]  = {LV_SYMBOL_SETTINGS, LV_SYMBOL_AUDIO, LV_SYMBOL_SHUFFLE, LV_SYMBOL_LIST, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_WIFI, LV_SYMBOL_BELL, LV_SYMBOL_USB, LV_SYMBOL_DOWNLOAD};
+    const char* labels[] = {"General", "Speakers", "Groups", "Sources", "Display", "WiFi", "Clock", "NFC", "Update"};
+    const int menuCount  = 9;
+#else
+    const char* icons[]  = {LV_SYMBOL_SETTINGS, LV_SYMBOL_AUDIO, LV_SYMBOL_SHUFFLE, LV_SYMBOL_LIST, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_WIFI, LV_SYMBOL_BELL, LV_SYMBOL_DOWNLOAD};
     const char* labels[] = {"General", "Speakers", "Groups", "Sources", "Display", "WiFi", "Clock", "Update"};
+    const int menuCount  = 8;
+#endif
 
     int y = SCALE(55);
-    for (int i = 0; i < 8; i++) {
+    for (int i = 0; i < menuCount; i++) {
         lv_obj_t* btn = lv_btn_create(sidebar);
         int btn_width = SCALE(164);
         int btn_height = SCALE(42);
@@ -115,7 +122,12 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
                 case 4: lv_screen_load(scr_display);        break;
                 case 5: lv_screen_load(scr_wifi);           break;
                 case 6: lv_screen_load(scr_clock_settings); break;
+#if SCREEN_SIZE == 7
+                case 7: lv_screen_load(scr_nfc);            break;
+                case 8: lv_screen_load(scr_ota);            break;
+#else
                 case 7: lv_screen_load(scr_ota);            break;
+#endif
             }
         }, LV_EVENT_CLICKED, (void*)(intptr_t)i);
 

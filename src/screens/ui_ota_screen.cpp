@@ -17,8 +17,12 @@ void createOTAScreen() {
     lv_obj_set_style_bg_color(scr_ota, lv_color_hex(0x121212), 0);
     lv_obj_set_size(scr_ota, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
-    // Create sidebar and get content area (Update is index 7 — Clock added at 6)
+    // 7" has NFC at index 7, so Update is index 8; 4" has no NFC, Update is index 7
+#if SCREEN_SIZE == 7
+    lv_obj_t* content = createSettingsSidebar(scr_ota, 8);
+#else
     lv_obj_t* content = createSettingsSidebar(scr_ota, 7);
+#endif
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     
     int content_width = SCALE(620);

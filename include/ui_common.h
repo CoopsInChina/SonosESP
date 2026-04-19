@@ -69,6 +69,9 @@ extern bool screen_dimmed;
 // Screen objects
 extern lv_obj_t *scr_main, *scr_devices, *scr_queue, *scr_settings;
 extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_display, *scr_ota, *scr_groups, *scr_general;
+#if SCREEN_SIZE == 7
+extern lv_obj_t *scr_nfc;
+#endif
 extern lv_obj_t *scr_clock, *scr_clock_settings;
 
 // Main screen UI elements
@@ -166,6 +169,9 @@ void createSettingsScreen();
 void createDisplaySettingsScreen();
 void createWiFiScreen();
 void createOTAScreen();
+#if SCREEN_SIZE == 7
+void createNFCSettingsScreen();
+#endif
 void createSourcesScreen();
 void createBrowseScreen();
 void createGroupsScreen();
