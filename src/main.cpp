@@ -213,17 +213,18 @@ void setup() {
 
     // ── Boot stage indicators ─────────────────────────────────────────────────
     // Four icon cards below the progress bar, styled like the settings sidebar.
+    // Order matches boot sequence: WiFi → Server → NFC → Speakers
     // State colours: grey=idle  amber=in-progress  green=done  red=failed
-    // NFC and Server remain grey on the 4" build (those features are 7"-only).
-    static const char* kBootLabels[4]   = { "WiFi", "NFC", "Server", "Speakers" };
-    static const char* kBootSymbols[4]  = { LV_SYMBOL_WIFI, LV_SYMBOL_BLUETOOTH,
-                                            LV_SYMBOL_DRIVE, LV_SYMBOL_AUDIO };
-    static const int   kCardW  = 64;
-    static const int   kCardH  = 52;
-    static const int   kCardGap = 8;   // gap between cards
-    static const int   kCardY  = 112;  // y offset from screen centre
-    // Total width: 4×64 + 3×8 = 280px — fits within the 300px progress bar
-    static const int   kStartX = -(4 * kCardW + 3 * kCardGap) / 2 + kCardW / 2;
+    // Server and NFC remain grey on the 4" build (those features are 7"-only).
+    static const char* kBootLabels[4]   = { "WiFi", "Server", "NFC", "Speakers" };
+    static const char* kBootSymbols[4]  = { LV_SYMBOL_WIFI, LV_SYMBOL_DRIVE,
+                                            LV_SYMBOL_BLUETOOTH, LV_SYMBOL_AUDIO };
+    static const int   kCardW   = 64;
+    static const int   kCardH   = 52;
+    static const int   kCardGap = 16;  // gap between cards
+    static const int   kCardY   = 124; // y offset — 20px below the progress bar bottom
+    // Total width: 4×64 + 3×16 = 304px
+    static const int   kStartX  = -(4 * kCardW + 3 * kCardGap) / 2 + kCardW / 2;
 
     lv_obj_t* boot_icons[4];  // symbol labels — color changes to show state
 
@@ -232,10 +233,8 @@ void setup() {
 
         lv_obj_t* card = lv_obj_create(boot_scr);
         lv_obj_set_size(card, kCardW, kCardH);
-        lv_obj_set_style_bg_color(card, lv_color_hex(0x222222), 0);
-        lv_obj_set_style_border_color(card, lv_color_hex(0x333333), 0);
-        lv_obj_set_style_border_width(card, 1, 0);
-        lv_obj_set_style_radius(card, 8, 0);
+        lv_obj_set_style_bg_opa(card, LV_OPA_TRANSP, 0);  // no background
+        lv_obj_set_style_border_width(card, 0, 0);
         lv_obj_set_style_pad_all(card, 0, 0);
         lv_obj_set_scrollbar_mode(card, LV_SCROLLBAR_MODE_OFF);
         lv_obj_align(card, LV_ALIGN_CENTER, xOff, kCardY);
@@ -336,9 +335,9 @@ void setup() {
             tzset();
             Serial.printf("[NTP] Sync started, TZ=%s\n", CLOCK_ZONES[clock_tz_idx].name);
 #if SCREEN_SIZE == 7
-            setBootStage(2, 1);  // Server: in progress
+            setBootStage(1, 1);  // Server: in progress
             sonosHttpServer.begin();  // verify cached server or start background scan
-            setBootStage(2, sonosHttpServer.getState() == NodeSonosServer::State::FOUND ? 2 : 1);
+            setBootStage(1, sonosHttpServer.getState() == NodeSonosServer::State::FOUND ? 2 : 1);
 #endif
         } else {
             Serial.println("\n[WIFI] Attempt failed. Retrying...");
@@ -360,10 +359,10 @@ void setup() {
 
     createOTAScreen();
 #if SCREEN_SIZE == 7
-    setBootStage(1, 1);  // NFC: in progress
+    setBootStage(2, 1);  // NFC: in progress
     bool nfcOk = nfcManager.begin();
     if (!nfcOk) Serial.println("[NFC] Failed to initialize NFC — PN532 not found");
-    setBootStage(1, nfcOk ? 2 : 3);  // NFC: done or failed
+    setBootStage(2, nfcOk ? 2 : 3);  // NFC: done or failed
     createNFCSettingsScreen();
 #endif
     updateBootProgress(65);
