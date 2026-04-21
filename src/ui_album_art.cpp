@@ -1150,9 +1150,13 @@ void albumArtTask(void* param) {
                     // SOAP #N completes → mutex released → art acquires mutex (net=0ms) → only
                     // 23ms passes before http.GET() → FIN-ACK still in transit → GET response
                     // arrives simultaneously → pkt_rxbuff overflow → :928.
-                    // 50ms covers WiFi RTT with margin and is well below DMA clock-gate threshold.
+                    // 50ms was also observed to crash: SOAP ended 2ms before mutex acquire →
+                    // 48ms wait → TCP pre-connect → FIN-ACK + SYN-ACK arrive together →
+                    // pkt_rxbuff overflow → :928. Increased to 150ms: covers worst-case FIN-ACK
+                    // residue (LAN congestion, NOTIFY bursts) while staying within the ≤200ms
+                    // inside-mutex window before DMA clock-gate risk applies.
                     {
-                        const unsigned long kInnerNetCooldownMs = 50;
+                        const unsigned long kInnerNetCooldownMs = 150;
                         if (last_network_end_ms > 0) {
                             unsigned long elapsed = millis() - last_network_end_ms;
                             if (elapsed < kInnerNetCooldownMs) {
