@@ -212,23 +212,30 @@ void setup() {
     lv_bar_set_value(boot_bar, 0, LV_ANIM_OFF);
 
     // ── Boot stage indicators ─────────────────────────────────────────────────
-    // Four icon cards below the progress bar, styled like the settings sidebar.
-    // Order matches boot sequence: WiFi → Server → NFC → Speakers
+    // Icon cards below the progress bar, styled like the settings sidebar.
+    // Order matches boot sequence: WiFi → Server → [NFC (7" only)] → Speakers
     // State colours: grey=idle  amber=in-progress  green=done  red=failed
-    // Server and NFC remain grey on the 4" build (those features are 7"-only).
-    static const char* kBootLabels[4]   = { "WiFi", "Server", "NFC", "Speakers" };
-    static const char* kBootSymbols[4]  = { LV_SYMBOL_WIFI, LV_SYMBOL_DRIVE,
-                                            LV_SYMBOL_BLUETOOTH, LV_SYMBOL_AUDIO };
+#if SCREEN_SIZE == 7
+    static const int   kCardCount  = 4;
+    static const int   kSpeakersIdx = 3;
+    static const char* kBootLabels[4]  = { "WiFi", "Server", "NFC", "Speakers" };
+    static const char* kBootSymbols[4] = { LV_SYMBOL_WIFI, LV_SYMBOL_DRIVE,
+                                           LV_SYMBOL_BLUETOOTH, LV_SYMBOL_AUDIO };
+#else
+    static const int   kCardCount  = 3;
+    static const int   kSpeakersIdx = 2;
+    static const char* kBootLabels[3]  = { "WiFi", "Server", "Speakers" };
+    static const char* kBootSymbols[3] = { LV_SYMBOL_WIFI, LV_SYMBOL_DRIVE, LV_SYMBOL_AUDIO };
+#endif
     static const int   kCardW   = 64;
     static const int   kCardH   = 52;
     static const int   kCardGap = 16;  // gap between cards
     static const int   kCardY   = 124; // y offset — 20px below the progress bar bottom
-    // Total width: 4×64 + 3×16 = 304px
-    static const int   kStartX  = -(4 * kCardW + 3 * kCardGap) / 2 + kCardW / 2;
+    const int          kStartX  = -(kCardCount * kCardW + (kCardCount - 1) * kCardGap) / 2 + kCardW / 2;
 
-    lv_obj_t* boot_icons[4];  // symbol labels — color changes to show state
+    lv_obj_t* boot_icons[4] = {};  // symbol labels — color changes to show state
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < kCardCount; i++) {
         int xOff = kStartX + i * (kCardW + kCardGap);
 
         lv_obj_t* card = lv_obj_create(boot_scr);
@@ -499,10 +506,10 @@ void setup() {
     sonos.begin();
     updateBootProgress(95);
 
-    setBootStage(3, 1);  // Speakers: in progress
+    setBootStage(kSpeakersIdx, 1);  // Speakers: in progress
     if (WiFi.status() != WL_CONNECTED) {
         Serial.println("[SONOS] WiFi not connected at boot - deferring discovery");
-        setBootStage(3, 3);  // Speakers: failed (no WiFi)
+        setBootStage(kSpeakersIdx, 3);  // Speakers: failed (no WiFi)
     } else {
         // Try to load cached device first for fast boot (~2s vs ~15s)
         bool loadedFromCache = sonos.tryLoadCachedDevice();
@@ -510,12 +517,12 @@ void setup() {
             sonos.selectDevice(0);
             sonos.startTasks();
             sonos_started = true;
-            setBootStage(3, 2);  // Speakers: done
+            setBootStage(kSpeakersIdx, 2);  // Speakers: done
         } else {
             // Cache miss or unreachable - skip SSDP at boot (device may not be ready yet)
             // User can trigger discovery manually via Settings > Scan
             Serial.println("[SONOS] Cached device unreachable at boot - use Settings to scan");
-            setBootStage(3, 3);  // Speakers: failed (scan needed)
+            setBootStage(kSpeakersIdx, 3);  // Speakers: failed (scan needed)
         }
     }
 
