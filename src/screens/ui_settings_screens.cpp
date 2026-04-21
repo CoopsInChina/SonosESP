@@ -229,30 +229,30 @@ void createSettingsScreen() {
 }
 
 // ============================================================================
-// Sources Screen
+// Favourites Screen (formerly Sources)
 // ============================================================================
 void createSourcesScreen() {
     scr_sources = lv_obj_create(NULL);
     lv_obj_set_style_bg_color(scr_sources, lv_color_hex(0x121212), 0);
     lv_obj_set_size(scr_sources, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
-    // Create sidebar and get content area (Sources is index 3)
+    // Create sidebar and get content area (Favourites is index 3)
     lv_obj_t* content = createSettingsSidebar(scr_sources, 3);
     lv_obj_clear_flag(content, LV_OBJ_FLAG_SCROLLABLE);
-    
+
     int content_width = SCALE(620);
     lv_obj_set_size(content, content_width, DISPLAY_HEIGHT);
 
     // Title
     lv_obj_t* lbl_title = lv_label_create(content);
-    lv_label_set_text(lbl_title, "Sources");
+    lv_label_set_text(lbl_title, "Favourites");
     lv_obj_set_style_text_font(lbl_title, &lv_font_montserrat_24, 0);
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
     lv_obj_set_pos(lbl_title, 0, 0);
 
     // Scrollable list
     lv_obj_t* list = lv_obj_create(content);
-     int list_width = SCALE(620-CONTENT_PAD_EXTRA);
+    int list_width = SCALE(620-CONTENT_PAD_EXTRA);
     int list_y = SCALE(50);
     int list_height = SCALE(380);
     lv_obj_set_pos(list, 0, list_y);
@@ -262,64 +262,70 @@ void createSourcesScreen() {
     lv_obj_set_style_pad_all(list, 0, 0);
     lv_obj_set_flex_flow(list, LV_FLEX_FLOW_COLUMN);
     lv_obj_set_flex_align(list, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
-    
+
     int row_pad = SCALE(8);
     lv_obj_set_style_pad_row(list, row_pad, 0);
 
-    // Music source items
-    struct MusicSource {
+    struct MenuItem {
         const char* name;
         const char* icon;
+        bool is_quickplay;
         const char* objectID;
     };
 
-    MusicSource sources[] = {
-        {"Sonos Playlists", LV_SYMBOL_LIST, "SQ:"}
+    MenuItem items[] = {
+        {"Quick Play",      LV_SYMBOL_IMAGE,  true,  ""},
+        {"Sonos Playlists", LV_SYMBOL_LIST,   false, "SQ:"}
     };
 
-    for (int i = 0; i < 1; i++) {
+    for (int i = 0; i < 2; i++) {
         lv_obj_t* btn = lv_btn_create(list);
         int btn_height = SCALE(50);
         lv_obj_set_size(btn, list_width, btn_height);
-        
+
         int btn_radius = SCALE(12);
         lv_obj_set_style_radius(btn, btn_radius, 0);
         lv_obj_set_style_shadow_width(btn, 0, 0);
         lv_obj_set_style_bg_color(btn, COL_CARD, 0);
         lv_obj_set_style_bg_color(btn, COL_BTN_PRESSED, LV_STATE_PRESSED);
-        
+
         int btn_pad = SCALE(15);
         lv_obj_set_style_pad_all(btn, btn_pad, 0);
-        lv_obj_set_user_data(btn, (void*)sources[i].objectID);
 
         lv_obj_t* icon = lv_label_create(btn);
-        lv_label_set_text(icon, sources[i].icon);
+        lv_label_set_text(icon, items[i].icon);
         lv_obj_set_style_text_color(icon, COL_ACCENT, 0);
         lv_obj_set_style_text_font(icon, &lv_font_montserrat_20, 0);
-        
         int icon_x = SCALE(5);
         lv_obj_align(icon, LV_ALIGN_LEFT_MID, icon_x, 0);
 
         lv_obj_t* name = lv_label_create(btn);
-        lv_label_set_text(name, sources[i].name);
+        lv_label_set_text(name, items[i].name);
         lv_obj_set_style_text_color(name, COL_TEXT, 0);
         lv_obj_set_style_text_font(name, &lv_font_montserrat_18, 0);
-        
         int name_x = SCALE(40);
         lv_obj_align(name, LV_ALIGN_LEFT_MID, name_x, 0);
 
-        lv_obj_add_event_cb(btn, [](lv_event_t* e) {
-            lv_obj_t* btn_target = (lv_obj_t*)lv_event_get_target(e);
-            const char* objID = (const char*)lv_obj_get_user_data(btn_target);
-            lv_obj_t* label = lv_obj_get_child(btn_target, 1);
-            const char* title = lv_label_get_text(label);
+        if (items[i].is_quickplay) {
+            lv_obj_add_event_cb(btn, [](lv_event_t* e) {
+                createQuickPlayScreen();
+                lv_screen_load(scr_quickplay);
+            }, LV_EVENT_CLICKED, NULL);
+        } else {
+            lv_obj_set_user_data(btn, (void*)items[i].objectID);
+            lv_obj_add_event_cb(btn, [](lv_event_t* e) {
+                lv_obj_t* btn_target = (lv_obj_t*)lv_event_get_target(e);
+                const char* objID = (const char*)lv_obj_get_user_data(btn_target);
+                lv_obj_t* label = lv_obj_get_child(btn_target, 1);
+                const char* title = lv_label_get_text(label);
 
-            current_browse_id = String(objID);
-            current_browse_title = String(title);
+                current_browse_id = String(objID);
+                current_browse_title = String(title);
 
-            createBrowseScreen();
-            lv_screen_load(scr_browse);
-        }, LV_EVENT_CLICKED, NULL);
+                createBrowseScreen();
+                lv_screen_load(scr_browse);
+            }, LV_EVENT_CLICKED, NULL);
+        }
     }
 }
 

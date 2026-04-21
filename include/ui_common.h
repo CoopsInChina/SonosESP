@@ -68,7 +68,7 @@ extern bool screen_dimmed;
 
 // Screen objects
 extern lv_obj_t *scr_main, *scr_devices, *scr_queue, *scr_settings;
-extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_display, *scr_ota, *scr_groups, *scr_general;
+extern lv_obj_t *scr_wifi, *scr_sources, *scr_browse, *scr_quickplay, *scr_display, *scr_ota, *scr_groups, *scr_general;
 #if SCREEN_SIZE == 7
 extern lv_obj_t *scr_nfc;
 #endif
@@ -173,6 +173,7 @@ void createOTAScreen();
 void createNFCSettingsScreen();
 #endif
 void createSourcesScreen();
+void createQuickPlayScreen();
 void createBrowseScreen();
 void createGroupsScreen();
 void createGeneralScreen();
@@ -220,6 +221,7 @@ void setBrightness(int level);
 void resetScreenTimeout();
 void checkAutoDim();
 void requestAlbumArt(const String &url);
+bool decodeTileJpeg(const uint8_t* flash_data, size_t len, int tile_w, int tile_h, lv_img_dsc_t* out_dsc, uint16_t** out_buf);
 void clearAlbumArtCache();  // Invalidate LRU cache on track change
 void updateUI();
 void processUpdates();

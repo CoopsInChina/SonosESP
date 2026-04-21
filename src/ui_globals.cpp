@@ -44,6 +44,7 @@ lv_obj_t *scr_settings = nullptr;
 lv_obj_t *scr_wifi = nullptr;
 lv_obj_t *scr_sources = nullptr;
 lv_obj_t *scr_browse = nullptr;
+lv_obj_t *scr_quickplay = nullptr;
 lv_obj_t *scr_display = nullptr;
 lv_obj_t *scr_ota = nullptr;
 lv_obj_t *scr_groups = nullptr;

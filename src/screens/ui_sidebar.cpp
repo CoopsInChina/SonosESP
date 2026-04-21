@@ -68,11 +68,11 @@ lv_obj_t* createSettingsSidebar(lv_obj_t* screen, int activeIdx) {
     // Menu items — 7" adds NFC at index 7, Update shifts to index 8
 #if SCREEN_SIZE == 7
     const char* icons[]  = {LV_SYMBOL_SETTINGS, LV_SYMBOL_AUDIO, LV_SYMBOL_SHUFFLE, LV_SYMBOL_LIST, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_WIFI, LV_SYMBOL_BELL, LV_SYMBOL_USB, LV_SYMBOL_DOWNLOAD};
-    const char* labels[] = {"General", "Speakers", "Groups", "Sources", "Display", "WiFi", "Clock", "NFC", "Update"};
+    const char* labels[] = {"General", "Speakers", "Groups", "Favourites", "Display", "WiFi", "Clock", "NFC", "Update"};
     const int menuCount  = 9;
 #else
     const char* icons[]  = {LV_SYMBOL_SETTINGS, LV_SYMBOL_AUDIO, LV_SYMBOL_SHUFFLE, LV_SYMBOL_LIST, LV_SYMBOL_EYE_OPEN, LV_SYMBOL_WIFI, LV_SYMBOL_BELL, LV_SYMBOL_DOWNLOAD};
-    const char* labels[] = {"General", "Speakers", "Groups", "Sources", "Display", "WiFi", "Clock", "Update"};
+    const char* labels[] = {"General", "Speakers", "Groups", "Favourites", "Display", "WiFi", "Clock", "Update"};
     const int menuCount  = 8;
 #endif
 

@@ -14,6 +14,7 @@ FLOWS.md
 
 # Private screensaver photos — never commit
 assets/PrivateAssets/
+assets/PrivateFavourites/
 
 # Auto-generated screensaver source — rebuilt from assets at build time
 include/screensaver_photos.h
