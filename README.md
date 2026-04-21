@@ -22,6 +22,7 @@
 - **Queue Management** - Browse and manage your playback queue
 - **Album Art Display** - Hardware JPEG decoder + PNG support with bilinear scaling and automatic dominant color extraction
 - **Synced Lyrics Display** - Time-synced lyrics from LRCLIB overlaid on album art with smart auto-hide, scroll effects, and color matching
+- **Quick Play (Favourites)** - 4×3 grid of favourite albums/playlists with cover art; tap a tile to instantly start playing
 - **NFC Tag Playback** - Tap an NTAG NFC tag to instantly clear the queue and play a Spotify or Apple Music album or playlist on any Sonos room
 - **Clock Screensaver** - Full-screen clock activates after inactivity with random ambient background images, tap to dismiss
 - **Photo Screensaver** - Local photos as clock screensaver backgrounds, embedded at build time via Python script for offline use without network dependency
@@ -117,6 +118,62 @@ The device supports automatic Over-The-Air (OTA) firmware updates from GitHub re
 2. **WiFi Setup** - Tap "Scan" to find networks, select yours, enter password
 3. **Sonos Discovery** - Navigate to Settings → Speakers and tap "Scan"
 4. **Start Playing** - Select a device and start controlling your music!
+
+## Quick Play (Favourites)
+
+Quick Play gives you a 4×3 grid of tiles on the **Favourites** screen, each tile showing album art for a saved album or playlist. Tap a tile to clear the current queue and start playing that content immediately — no browsing required.
+
+### Dependency: node-sonos-http-api
+
+Quick Play (and NFC playback on the 7" screen) both require **[node-sonos-http-api](https://github.com/jishi/node-sonos-http-api)** running somewhere on your local network. See the node-sonos-http-api section under NFC Tags below for setup instructions. SonosESP will find it automatically at boot.
+
+### Configuring your favourites
+
+Favourites are baked into the firmware at build time. The 12 slots are configured in a plain-text file and square JPEG images.
+
+#### Step 1 — Create a private favourites directory
+
+```
+assets/PrivateFavourites/
+```
+
+This directory is in `.gitignore` so your personal favourites are never committed. The `assets/DefaultFavourites/` directory ships with placeholder stubs and shows the expected structure.
+
+#### Step 2 — Add your cover images
+
+Place 12 JPEG files named `fav1.jpg` through `fav12.jpg` in `assets/PrivateFavourites/`. Square images work best; **300×300 pixels** is the recommended size (larger images increase firmware size and decode time). The build script will scale them to fit the tile grid automatically.
+
+#### Step 3 — Edit `favourites.txt`
+
+Create `assets/PrivateFavourites/favourites.txt` with one URI per line (12 lines):
+
+```
+spotify:album:2dfTV7CktUEBkZCHiB7VQB
+spotify:playlist:32O0SSXDNWDrMievPkV0Im
+applemusic:album:1443155637
+applemusic:playlist:pl.abcdef123
+spotify:album:...
+...
+```
+
+#### URI format
+
+| Content | URI format | Example |
+|---------|-----------|---------|
+| Spotify album | `spotify:album:<ID>` | `spotify:album:2dfTV7CktUEBkZCHiB7VQB` |
+| Spotify playlist | `spotify:playlist:<ID>` | `spotify:playlist:32O0SSXDNWDrMievPkV0Im` |
+| Apple Music album | `applemusic:album:<ID>` | `applemusic:album:1443155637` |
+| Apple Music playlist | `applemusic:playlist:<ID>` | `applemusic:playlist:pl.abcdef123` |
+
+Finding the ID is the same as for NFC tags — see the NFC section below.
+
+#### Step 4 — Build
+
+The build script `scripts/embed_favourites.py` runs automatically as a PlatformIO pre-build step. It reads `assets/PrivateFavourites/` if it exists, falling back to `assets/DefaultFavourites/`. It generates `include/favourites_data.h` and `src/favourites_data.cpp` which are compiled into the firmware.
+
+If fewer than 12 slots are needed, leave the extra `favourites.txt` lines blank and the corresponding `fav*.jpg` files absent — blank slots show a music note placeholder.
+
+---
 
 ## NFC Tags
 

@@ -1754,3 +1754,57 @@ void requestAlbumArt(const String& url) {
     // storm-gate wait. Setting it here blocks polling → SDIO idle → DMA clock-gate.
     last_track_change_ms = millis();
 }
+
+// ── Public tile decoder ────────────────────────────────────────────────────────
+// Decodes a JPEG from flash (const ROM data) into a PSRAM RGB565 buffer scaled to
+// tile_w × tile_h, and fills out_dsc ready for lv_img_set_src().
+// Caller must heap_caps_free(*out_buf) when the tile is no longer needed.
+// Returns false on any failure; out_buf is set to nullptr on failure.
+bool decodeTileJpeg(const uint8_t* flash_data, size_t len,
+                    int tile_w, int tile_h,
+                    lv_img_dsc_t* out_dsc, uint16_t** out_buf) {
+    *out_buf = nullptr;
+
+    // COM stripping modifies in-place, so copy to a writable PSRAM buffer first
+    uint8_t* work = (uint8_t*)heap_caps_malloc(len, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!work) {
+        Serial.printf("[TILE] heap alloc %u bytes failed\n", (unsigned)len);
+        return false;
+    }
+    memcpy(work, flash_data, len);
+
+    DecodeResult dec = decodeToRGB565(work, len, /*isJPEG=*/true, /*isPNG=*/false);
+    heap_caps_free(work);
+
+    if (!dec.ok || !dec.pixels) {
+        Serial.printf("[TILE] JPEG decode failed (ok=%d pixels=%p)\n", dec.ok, dec.pixels);
+        return false;
+    }
+
+    size_t tile_bytes = (size_t)tile_w * tile_h * 2;
+    uint16_t* tile_buf = (uint16_t*)heap_caps_malloc(tile_bytes, MALLOC_CAP_SPIRAM);
+    if (!tile_buf) {
+        heap_caps_free(dec.pixels);
+        Serial.printf("[TILE] tile buf alloc %u bytes failed\n", (unsigned)tile_bytes);
+        return false;
+    }
+
+    // Nearest-neighbour scale from decoded dimensions to tile dimensions
+    for (int ty = 0; ty < tile_h; ty++) {
+        for (int tx = 0; tx < tile_w; tx++) {
+            int sx = tx * dec.w / tile_w;
+            int sy = ty * dec.h / tile_h;
+            tile_buf[ty * tile_w + tx] = dec.pixels[sy * dec.stride + sx];
+        }
+    }
+    heap_caps_free(dec.pixels);
+
+    memset(out_dsc, 0, sizeof(*out_dsc));
+    out_dsc->header.cf = LV_COLOR_FORMAT_RGB565;
+    out_dsc->header.w  = tile_w;
+    out_dsc->header.h  = tile_h;
+    out_dsc->data_size = tile_bytes;
+    out_dsc->data      = (const uint8_t*)tile_buf;
+    *out_buf = tile_buf;
+    return true;
+}

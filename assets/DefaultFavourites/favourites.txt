@@ -1,0 +1,18 @@
+# Quick Play Favourites — one URI per line, format: service:type:id
+# Copy this file to assets/PrivateFavourites/favourites.txt and add your own URIs.
+# Examples:
+#   spotify:album:2dfTV7CktUEBkZCHiB7VQB
+#   spotify:playlist:32O0SSXDNWDrMievPkV0Im
+#   applemusic:album:1443155637
+spotify:playlist:2rAn7Z1tWPPb1sf4sLRrbi?si=hpFZym91QSG-53kNOmx75w&pi=yqcgILjES1qul
+spotify:playlist:37i9dQZF1DWSkMjlBZAZ07?si=OPog_eJEQW-DumZPLOeyWw
+spotify:playlist:1aTS1JzlBoh9mVbMW4kJtG?si=8OuhOOE3Qu6WfnYCo-2fHg
+spotify:playlist:37i9dQZF1DXdPec7aLTmlC?si=WUAy6w-CQ1KC0AALhnOkuQ&pi=rZWd6XvSR96Cu
+spotify:playlist:3j9QMFKf1eZhE4WjXGpdTp?si=4Ao1TWy6QlmDCnevyuGeIA
+spotify:playlist:37i9dQZF1EQpj7X7UK8OOF?si=IMjNxhZyRfe24qgigiP0aQ%0A
+spotify:playlist:4SammBQx8lE5eS2zn1sPrT?si=6_PiX9HSRCmm_lKrCKSGv
+spotify:playlist:30notokhITJejx6n13lbWB?si=M5nyXnr5SY6qwHm5xSAjJA%0A
+spotify:playlist:37i9dQZF1DWY4lFlS4Pnso?si=6VDzsgVUTQGeZJmgUIC2UA%0
+spotify:playlist:37i9dQZF1DX4sWSpwq3LiO
+spotify:playlist:37i9dQZF1DX0XUsuxWHRQd
+spotify:playlist:37i9dQZF1DXcBWIGoYBM5M

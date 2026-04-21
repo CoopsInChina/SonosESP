@@ -491,6 +491,7 @@ void setup() {
     }
 
     createSourcesScreen();
+    createQuickPlayScreen();
     updateBootProgress(68);
 
     createGroupsScreen();
