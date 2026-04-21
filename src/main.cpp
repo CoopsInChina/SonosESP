@@ -8,9 +8,9 @@
 #include "config.h"
 #include "lyrics.h"
 #include "clock_screen.h"
+#include "node_sonos_server.h"
 #if SCREEN_SIZE == 7
 #include "pn532_nfc_manager.h"
-#include "node_sonos_server.h"
 #endif
 #include <esp_flash.h>
 #include <esp_task_wdt.h>
@@ -282,9 +282,7 @@ void setup() {
             setenv("TZ", CLOCK_ZONES[clock_tz_idx].posix, 1);
             tzset();
             Serial.printf("[NTP] Sync started, TZ=%s\n", CLOCK_ZONES[clock_tz_idx].name);
-#if SCREEN_SIZE == 7
-            sonosHttpServer.begin();  // verify cached server or flag for discovery
-#endif
+            sonosHttpServer.begin();  // verify cached server or start background scan
         } else {
             Serial.println("\n[WIFI] Attempt failed. Retrying...");
             retryCount++;
@@ -516,9 +514,7 @@ void checkWiFiReconnect() {
         sonosInitTaskLaunched = true;
         xTaskCreatePinnedToCore(deferredSonosInitTask, "SonosInit",
                                 8192, NULL, 1, NULL, 0);
-#if SCREEN_SIZE == 7
         sonosHttpServer.begin();  // WiFi came up after boot — check/discover server
-#endif
     }
 }
 
