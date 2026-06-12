@@ -90,9 +90,9 @@ jobs:
 
       - name: Create merged binary
         run: |
-          python -m esptool --chip esp32p4 merge_bin \
+          python -m esptool --chip esp32p4 merge-bin \
             -o firmware-${{ matrix.label }}-merged.bin \
-            --flash_mode qio --flash_size 16MB \
+            --flash-mode qio --flash-size 16MB \
             0x0     .pio/build/${{ matrix.env }}/bootloader.bin \
             0x8000  .pio/build/${{ matrix.env }}/partitions.bin \
             0x10000 .pio/build/${{ matrix.env }}/firmware.bin

@@ -53,22 +53,29 @@ jobs:
       - name: Build 7-inch firmware
         run: pio run -e esp32_7inch
 
+      - name: List build artifacts
+        run: |
+          echo "=== 4-inch build output ==="
+          find .pio/build/esp32_4inch -name "*.bin" | sort
+          echo "=== 7-inch build output ==="
+          find .pio/build/esp32_7inch -name "*.bin" | sort
+
       - name: Assemble web-installer directory
         run: |
           mkdir -p web-installer
 
           # 4-inch firmware (merged for web installer, raw for OTA)
-          python -m esptool --chip esp32p4 merge_bin \
+          python -m esptool --chip esp32p4 merge-bin \
             -o web-installer/firmware-4inch-merged.bin \
-            --flash_mode qio --flash_size 16MB \
+            --flash-mode qio --flash-size 16MB \
             0x0     .pio/build/esp32_4inch/bootloader.bin \
             0x8000  .pio/build/esp32_4inch/partitions.bin \
             0x10000 .pio/build/esp32_4inch/firmware.bin
 
           # 7-inch firmware
-          python -m esptool --chip esp32p4 merge_bin \
+          python -m esptool --chip esp32p4 merge-bin \
             -o web-installer/firmware-7inch-merged.bin \
-            --flash_mode qio --flash_size 16MB \
+            --flash-mode qio --flash-size 16MB \
             0x0     .pio/build/esp32_7inch/bootloader.bin \
             0x8000  .pio/build/esp32_7inch/partitions.bin \
             0x10000 .pio/build/esp32_7inch/firmware.bin
