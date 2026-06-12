@@ -48,17 +48,20 @@ jobs:
         run: pip install platformio esptool
 
       - name: Build 4-inch firmware
-        run: pio run -e esp32_4inch
+        run: |
+          pio run -e esp32_4inch
+          mkdir -p /tmp/fw/4inch
+          cp .pio/build/esp32_4inch/bootloader.bin /tmp/fw/4inch/
+          cp .pio/build/esp32_4inch/partitions.bin /tmp/fw/4inch/
+          cp .pio/build/esp32_4inch/firmware.bin   /tmp/fw/4inch/
 
       - name: Build 7-inch firmware
-        run: pio run -e esp32_7inch
-
-      - name: List build artifacts
         run: |
-          echo "=== 4-inch build output ==="
-          find .pio/build/esp32_4inch -name "*.bin" | sort
-          echo "=== 7-inch build output ==="
-          find .pio/build/esp32_7inch -name "*.bin" | sort
+          pio run -e esp32_7inch
+          mkdir -p /tmp/fw/7inch
+          cp .pio/build/esp32_7inch/bootloader.bin /tmp/fw/7inch/
+          cp .pio/build/esp32_7inch/partitions.bin /tmp/fw/7inch/
+          cp .pio/build/esp32_7inch/firmware.bin   /tmp/fw/7inch/
 
       - name: Assemble web-installer directory
         run: |
@@ -68,23 +71,23 @@ jobs:
           python -m esptool --chip esp32p4 merge-bin \
             -o web-installer/firmware-4inch-merged.bin \
             --flash-mode qio --flash-size 16MB \
-            0x0     .pio/build/esp32_4inch/bootloader.bin \
-            0x8000  .pio/build/esp32_4inch/partitions.bin \
-            0x10000 .pio/build/esp32_4inch/firmware.bin
+            0x0     /tmp/fw/4inch/bootloader.bin \
+            0x8000  /tmp/fw/4inch/partitions.bin \
+            0x10000 /tmp/fw/4inch/firmware.bin
 
           # 7-inch firmware
           python -m esptool --chip esp32p4 merge-bin \
             -o web-installer/firmware-7inch-merged.bin \
             --flash-mode qio --flash-size 16MB \
-            0x0     .pio/build/esp32_7inch/bootloader.bin \
-            0x8000  .pio/build/esp32_7inch/partitions.bin \
-            0x10000 .pio/build/esp32_7inch/firmware.bin
+            0x0     /tmp/fw/7inch/bootloader.bin \
+            0x8000  /tmp/fw/7inch/partitions.bin \
+            0x10000 /tmp/fw/7inch/firmware.bin
 
-          # Individual binaries (shared bootloader/partitions, separate firmware)
-          cp .pio/build/esp32_4inch/bootloader.bin  web-installer/bootloader.bin
-          cp .pio/build/esp32_4inch/partitions.bin  web-installer/partitions.bin
-          cp .pio/build/esp32_4inch/firmware.bin    web-installer/firmware-4inch.bin
-          cp .pio/build/esp32_7inch/firmware.bin    web-installer/firmware-7inch.bin
+          # Individual binaries
+          cp /tmp/fw/4inch/bootloader.bin  web-installer/bootloader.bin
+          cp /tmp/fw/4inch/partitions.bin  web-installer/partitions.bin
+          cp /tmp/fw/4inch/firmware.bin    web-installer/firmware-4inch.bin
+          cp /tmp/fw/7inch/firmware.bin    web-installer/firmware-7inch.bin
 
           # Update manifest versions
           VERSION="${{ steps.get_version.outputs.VERSION }}"
