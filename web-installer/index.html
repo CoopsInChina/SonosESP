@@ -59,22 +59,16 @@
             color: rgba(255, 255, 255, 0.7);
         }
 
-        /* Notice */
-        .notice {
-            background: rgba(255, 255, 255, 0.03);
-            border-left: 2px solid rgba(255, 255, 255, 0.3);
-            padding: 1.5rem;
+        /* Screen selector (top) */
+        .screen-selector-top {
             margin-bottom: 3rem;
-            font-size: 0.95rem;
         }
 
-        .notice strong {
-            color: #ffffff;
-        }
-
-        .notice p {
-            color: rgba(255, 255, 255, 0.7);
-            margin: 0;
+        .screen-selector-top .screen-selector-label {
+            text-align: center;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 0.9rem;
+            margin-bottom: 1rem;
         }
 
         /* Main Grid */
@@ -221,38 +215,27 @@
         }
 
         /* Screen size selector */
-        .screen-selector {
-            margin-bottom: 0.5rem;
-        }
-
-        .screen-selector-label {
-            color: rgba(255, 255, 255, 0.6);
-            font-size: 0.9rem;
-            margin-bottom: 0.75rem;
-            text-align: center;
-        }
-
         .screen-options {
             display: flex;
-            gap: 0.75rem;
+            gap: 1rem;
             justify-content: center;
         }
 
         .screen-btn {
             flex: 1;
-            max-width: 180px;
+            max-width: 220px;
             display: flex;
             flex-direction: column;
             align-items: center;
-            padding: 0.75rem 1rem;
-            background: rgba(255, 255, 255, 0.05);
-            border: 2px solid rgba(255, 255, 255, 0.15);
-            color: rgba(255, 255, 255, 0.6);
+            padding: 1.25rem 1.5rem;
+            background: rgba(255, 255, 255, 0.03);
+            border: 2px solid rgba(255, 255, 255, 0.12);
+            color: rgba(255, 255, 255, 0.5);
             cursor: pointer;
             border-radius: 4px;
             transition: all 0.2s;
             font-family: 'Inter', sans-serif;
-            gap: 0.2rem;
+            gap: 0.3rem;
         }
 
         .screen-btn:hover {
@@ -262,22 +245,23 @@
 
         .screen-btn.active {
             border-color: #ffffff;
-            background: rgba(255, 255, 255, 0.1);
+            background: rgba(255, 255, 255, 0.08);
             color: #ffffff;
         }
 
         .screen-btn .screen-size {
-            font-size: 1.4rem;
-            font-weight: 600;
+            font-size: 2rem;
+            font-weight: 300;
+            letter-spacing: -1px;
         }
 
         .screen-btn .screen-model {
-            font-size: 0.7rem;
-            opacity: 0.7;
+            font-size: 0.72rem;
+            opacity: 0.65;
         }
 
         .screen-btn .screen-res {
-            font-size: 0.75rem;
+            font-size: 0.8rem;
             opacity: 0.85;
         }
 
@@ -383,8 +367,20 @@
             <span class="version" id="project-version">v0.1.0</span>
         </header>
 
-        <div class="notice">
-            <p><strong>Supported Hardware:</strong> GUITION JC4880P433C (4", 800×480) · GUITION JC1060P470C (7", 1024×600) — both use ESP32-P4 + ESP32-C6</p>
+        <div class="screen-selector-top">
+            <p class="screen-selector-label">Select your screen size</p>
+            <div class="screen-options">
+                <button class="screen-btn active" id="btn-4inch" onclick="selectScreen('4inch')">
+                    <span class="screen-size">4"</span>
+                    <span class="screen-model">GUITION JC4880P433C</span>
+                    <span class="screen-res">800 × 480</span>
+                </button>
+                <button class="screen-btn" id="btn-7inch" onclick="selectScreen('7inch')">
+                    <span class="screen-size">7"</span>
+                    <span class="screen-model">GUITION JC1060P470C</span>
+                    <span class="screen-res">1024 × 600</span>
+                </button>
+            </div>
         </div>
 
         <div class="grid">
@@ -394,12 +390,16 @@
                         <h2>Hardware Specifications</h2>
                         <div class="specs">
                             <div class="spec-row">
+                                <span class="spec-label">Model</span>
+                                <span class="spec-value" id="spec-model">GUITION JC4880P433C</span>
+                            </div>
+                            <div class="spec-row">
                                 <span class="spec-label">Microcontroller</span>
                                 <span class="spec-value">ESP32-P4</span>
                             </div>
                             <div class="spec-row">
                                 <span class="spec-label">Display</span>
-                                <span class="spec-value">800×480 RGB</span>
+                                <span class="spec-value" id="spec-display">800×480 RGB</span>
                             </div>
                             <div class="spec-row">
                                 <span class="spec-label">Touch</span>
@@ -443,21 +443,6 @@
                     </div>
 
                     <div class="flash-section">
-                        <div class="screen-selector">
-                            <p class="screen-selector-label">Select your screen size:</p>
-                            <div class="screen-options">
-                                <button class="screen-btn active" id="btn-4inch" onclick="selectScreen('4inch')">
-                                    <span class="screen-size">4"</span>
-                                    <span class="screen-model">GUITION JC4880P433C</span>
-                                    <span class="screen-res">800 × 480</span>
-                                </button>
-                                <button class="screen-btn" id="btn-7inch" onclick="selectScreen('7inch')">
-                                    <span class="screen-size">7"</span>
-                                    <span class="screen-model">GUITION JC1060P470C</span>
-                                    <span class="screen-res">1024 × 600</span>
-                                </button>
-                            </div>
-                        </div>
                         <esp-web-install-button id="install-btn" manifest="./manifest-4inch.json">
                             <button slot="activate">INSTALL FIRMWARE</button>
                         </esp-web-install-button>
@@ -485,11 +470,20 @@
             })
             .catch(err => console.error('Failed to load manifest:', err));
 
+        // Screen specs lookup
+        const screenSpecs = {
+            '4inch': { model: 'GUITION JC4880P433C', display: '800×480 RGB' },
+            '7inch': { model: 'GUITION JC1060P470C', display: '1024×600 RGB' }
+        };
+
         // Screen selector
         function selectScreen(size) {
             document.querySelectorAll('.screen-btn').forEach(btn => btn.classList.remove('active'));
             document.getElementById('btn-' + size).classList.add('active');
             document.getElementById('install-btn').setAttribute('manifest', './manifest-' + size + '.json');
+            const specs = screenSpecs[size];
+            document.getElementById('spec-model').textContent = specs.model;
+            document.getElementById('spec-display').textContent = specs.display;
         }
 
         // Console logging system
