@@ -14,6 +14,26 @@
 // Debug levels: 0=OFF, 1=ERRORS, 2=WARNINGS, 3=INFO, 4=VERBOSE
 #define DEBUG_LEVEL             3
 
+// Periodic DMA/heap telemetry: [HEAP], [STACK], [SOAP/DMA], [POLL/DMA],
+// [QUEUE/DMA]. Every few seconds, forever, on every device.
+//
+// Off by default because it is not free. Each line is handed to the USB CDC
+// driver, whose ISR writes it into the peripheral FIFO a byte at a time
+// (usb_serial_jtag_ll_write_txfifo). A user collecting logs for us hit a store
+// fault inside that ISR twice in one afternoon - so the diagnostics were
+// destabilising the device they were meant to diagnose, and the more we print
+// the wider that window gets.
+//
+// Turn it on when actually chasing a DMA or heap problem; the per-event logs
+// (discovery, art, OTA, SOAP errors) are unaffected and stay on.
+#define DEBUG_DMA_TELEMETRY     0
+
+#if DEBUG_DMA_TELEMETRY
+    #define DMA_LOG(fmt, ...) Serial.printf(fmt, ##__VA_ARGS__)
+#else
+    #define DMA_LOG(fmt, ...) ((void)0)
+#endif
+
 // Debug macros - compile out verbose logs when not needed
 #if DEBUG_LEVEL >= 4
     #define DEBUG_VERBOSE(fmt, ...) Serial.printf(fmt, ##__VA_ARGS__)
@@ -109,7 +129,12 @@
 // =============================================================================
 // ALBUM ART
 // =============================================================================
-#define ART_MAX_DOWNLOAD_SIZE   (280 * 1024)  // Max JPEG download buffer (280KB)
+// Derived, not a second opinion: this only feeds a boot log line, and when it
+// was written independently it kept saying 280KB after MAX_ART_SIZE moved.
+// This header deliberately includes nothing, so a translation unit that uses
+// this must pull in ui_common.h too - today only main.cpp does, and it fails
+// loudly at compile time rather than quietly printing a stale number.
+#define ART_MAX_DOWNLOAD_SIZE   MAX_ART_SIZE  // see ui_common.h
 #define ART_TASK_STACK_SIZE     20000   // Album art task stack — PNG decode stacks TLS + software
                                         // decoder on same task; 12KB hit stack=0 on HTTPS PNG (BBC R4)
 #define ART_TASK_PRIORITY       0       // Album art task priority

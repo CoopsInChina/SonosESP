@@ -366,7 +366,7 @@ String SonosController::sendSOAP(SonosDevice* dev, const char* service, const ch
         int delta_end  = (int)((long)dma_post_end  - (long)dma_pre_end);
         int delta_sess = (int)((long)dma_post_end  - (long)session_start_dma);
         if (dma_post_end < 50000 || delta_end < -2048 || soap_count % 10 == 0) {
-            Serial.printf("[SOAP/DMA] #%d: pre=%uKB post=%uKB delta=%+dB session=%+dKB\n",
+            DMA_LOG("[SOAP/DMA] #%d: pre=%uKB post=%uKB delta=%+dB session=%+dKB\n",
                           soap_count,
                           (unsigned)dma_pre_end/1024, (unsigned)dma_post_end/1024,
                           delta_end, delta_sess/1024);
@@ -1567,7 +1567,7 @@ bool SonosController::updateQueue(int startIndex) {
     // Also stamps on empty response: even a failed SOAP leaves TCP residue in SDIO.
     last_queue_fetch_time = millis();
 
-    Serial.printf("[QUEUE/DMA] pre=%uKB post=%uKB delta=%+dB start=%d batch=%d\n",
+    DMA_LOG("[QUEUE/DMA] pre=%uKB post=%uKB delta=%+dB start=%d batch=%d\n",
                   (unsigned)(dma_pre_q / 1024), (unsigned)(dma_post_q / 1024),
                   (int)((long)dma_post_q - (long)dma_pre_q), startIndex, SONOS_QUEUE_BATCH_SIZE);
 
@@ -1941,7 +1941,7 @@ void SonosController::pollingTaskFunction(void* param) {
                 int cycle_delta = (int)((long)dma_cycle - (long)cycle_session_start);
                 // Log: every cycle when DMA < 60KB (danger zone), else every 20 cycles
                 if (dma_cycle < 60000 || cycle_count % 20 == 0) {
-                    Serial.printf("[POLL/DMA] cycle=%u dma=%uKB session=%+dKB art_dl=%d\n",
+                    DMA_LOG("[POLL/DMA] cycle=%u dma=%uKB session=%+dKB art_dl=%d\n",
                                   (unsigned)cycle_count,
                                   (unsigned)(dma_cycle / 1024),
                                   cycle_delta / 1024,
@@ -2510,6 +2510,7 @@ bool SonosController::refreshGroupTopology(bool force) {
     static sonos_topology::Group  s_groups[MAX_SONOS_DEVICES];
     static sonos_topology::Slice  s_members[MAX_SONOS_DEVICES * 2];
 
+    int unmatched = 0;
     int groups = sonos_topology::parseZoneGroups(
         resp.c_str(), declen,
         s_groups,  MAX_SONOS_DEVICES,
@@ -2532,6 +2533,7 @@ bool SonosController::refreshGroupTopology(bool force) {
 
         for (int m = 0; m < s_groups[g].memberCount; m++) {
             const sonos_topology::Slice& mem = s_members[s_groups[g].firstMember + m];
+            bool matched = false;
             for (int i = 0; i < deviceCount; i++) {
                 if (sonos_topology::uuidEquals(devices[i].rinconID.c_str(),
                                                devices[i].rinconID.length(),
@@ -2539,8 +2541,30 @@ bool SonosController::refreshGroupTopology(bool force) {
                     devices[i].groupCoordinatorUUID = coordUuid;
                     devices[i].isGroupCoordinator =
                         sonos_topology::uuidEquals(mem.ptr, mem.len, coord.ptr, coord.len);
+                    matched = true;
                     break;
                 }
+            }
+            // A member we cannot place stays standalone by the reset above, so a
+            // real group would render as N standalone speakers with nothing in
+            // the log to say why.
+            //
+            // Added while chasing #140, which turned out NOT to be this - the
+            // user had made a Sonos *saved group*, which is a preset and does
+            // not group anything until it is applied, so the panel was right to
+            // show them separate. Kept because ruling this out took a day and a
+            // half of log-reading that one line would have ended: it says
+            // outright whether the speaker was never discovered, or whether its
+            // RINCON is spelled differently from the one topology reports.
+            if (!matched) {
+                char mbuf[64];
+                size_t mlen = mem.len < sizeof(mbuf) - 1 ? mem.len : sizeof(mbuf) - 1;
+                memcpy(mbuf, mem.ptr, mlen);
+                mbuf[mlen] = '\0';
+                Serial.printf("[GROUP] Unmatched member %s (coordinator %s) - "
+                              "not in our %d discovered device(s)\n",
+                              mbuf, coordUuid.c_str(), deviceCount);
+                unmatched++;
             }
         }
 
@@ -2557,8 +2581,9 @@ bool SonosController::refreshGroupTopology(bool force) {
     xSemaphoreGive(deviceMutex);
 
     last_refresh_ms = millis();
-    Serial.printf("[GROUP] Topology refreshed: %d group(s) across %d known device(s)\n",
-                  groups, deviceCount);
+    Serial.printf("[GROUP] Topology refreshed: %d group(s) across %d known device(s)%s\n",
+                  groups, deviceCount,
+                  unmatched ? " - SOME MEMBERS UNMATCHED, see above" : "");
     notifyUI(UPDATE_GROUPS);
     return groups > 0;
 }
