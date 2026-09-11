@@ -61,6 +61,9 @@ extern lv_font_t font_icon_16;
 extern lv_font_t font_icon_24;
 extern lv_font_t font_icon_32;
 extern lv_font_t font_icon_40;
+// The battery glyphs (issue #165) at design size 16: lv_font_amber_batt_16 on
+// the 4", _24 on the 7", exactly as font_icon_16 resolves.
+extern lv_font_t font_batt_16;
 
 // Sky glyphs for the Amber screensaver face. No fallback: they are never mixed
 // with text.

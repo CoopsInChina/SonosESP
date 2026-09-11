@@ -4,6 +4,7 @@
  */
 
 #include "ui_common.h"
+#include "ui_battery.h"
 #include "ui_settings_card.h"   // addScreenHeader() - shared title row
 #include "ui_fonts.h"
 #include "amber_icons.h"
@@ -121,6 +122,12 @@ void refreshDeviceList() {
         lv_obj_set_style_text_font(arrow, &font_icon_24, 0);
         lv_obj_align(arrow, LV_ALIGN_TOP_RIGHT, SX(-5), hasGroup || isPlaying ? SY(8) : SY(12));
 
+        // Battery (issue #165). Hidden for mains speakers, so it goes on every row;
+        // left of the volume readout, in a column that lines up down the list. The
+        // name is narrowed to stop short of it only while it shows.
+        lv_obj_t* bat = batteryBadgeCreate(btn, i, false, lbl);
+        lv_obj_align(bat, LV_ALIGN_TOP_RIGHT, SX(-66), hasGroup || isPlaying ? SY(9) : SY(13));
+
         lv_obj_add_event_cb(btn, [](lv_event_t* e) {
             int idx = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
             sonos.selectDevice(idx);
@@ -200,6 +207,11 @@ void refreshDeviceList() {
                 lv_obj_set_style_text_color(badge, AMB_TEXT3, 0);
                 lv_obj_set_style_text_font(badge, &font_text_12, 0);
                 lv_obj_align(badge, LV_ALIGN_RIGHT_MID, SX(-10), 0);
+                // Battery (issue #165), left of "Grouped". A grouped portable is the
+                // one you might carry off, so it belongs here as much as anywhere.
+                lv_obj_update_layout(badge);
+                lv_obj_t* bat = batteryBadgeCreate(memBtn, j, false, memLbl);
+                lv_obj_align(bat, LV_ALIGN_RIGHT_MID, SX(-10) - lv_obj_get_width(badge) - SX(8), 0);
 
                 // Click to select this member directly
                 lv_obj_add_event_cb(memBtn, [](lv_event_t* e) {
@@ -253,6 +265,9 @@ void refreshDeviceList() {
             lv_obj_set_width(lbl, SX(430));
             lv_label_set_long_mode(lbl, LV_LABEL_LONG_DOT);
             lv_obj_align(lbl, LV_ALIGN_LEFT_MID, SX(40), 0);
+            // Battery (issue #165), as on every other speaker row.
+            lv_obj_t* bat = batteryBadgeCreate(btn, i, false, lbl);
+            lv_obj_align(bat, LV_ALIGN_RIGHT_MID, SX(-10), 0);
 
             lv_obj_add_event_cb(btn, [](lv_event_t* e) {
                 int idx = (int)(intptr_t)lv_obj_get_user_data((lv_obj_t*)lv_event_get_target(e));
